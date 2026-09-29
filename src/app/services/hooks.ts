@@ -61,7 +61,7 @@ export function useAuthUser() {
 }
 
 /** Active workspace for the signed-in user. */
-export function useWorkspace() {
+export function useWorkspace(user: AppUser | null | "loading") {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -78,11 +78,21 @@ export function useWorkspace() {
   }, []);
 
   useEffect(() => {
+    // Do not query workspaces before auth has resolved. The old parallel
+    // requests could finish the unauthenticated query last and overwrite a
+    // valid workspace with null, leaving Find Leads permanently blocked.
+    if (user === "loading") return;
+    if (!user) {
+      setWorkspace(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     refresh();
     const onChange = () => refresh();
     window.addEventListener("zybble:workspace", onChange);
     return () => window.removeEventListener("zybble:workspace", onChange);
-  }, [refresh]);
+  }, [refresh, user]);
 
   return { workspace, loading, error, refresh };
 }
@@ -93,7 +103,7 @@ export function useWorkspace() {
  */
 export function useWorkspaceContext() {
   const user = useAuthUser();
-  const { workspace, loading, error, refresh } = useWorkspace();
+  const { workspace, loading, error, refresh } = useWorkspace(user);
   const planId = user === "loading" || !user ? "free" : user.planId;
   return {
     user: user === "loading" ? null : user,
