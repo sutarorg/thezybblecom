@@ -9,6 +9,9 @@ verify_jwt = true
 [functions.ai-analyze]
 verify_jwt = true
 
+[functions.ai-interpret]
+verify_jwt = true
+
 [functions.export-run]
 verify_jwt = true
 

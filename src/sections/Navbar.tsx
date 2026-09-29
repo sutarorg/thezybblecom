@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { Menu, X } from "lucide-react";
 import { cn } from "../utils/cn";
 import { NAV_LINKS } from "../lib/site";
-import { ButtonGreen, SmartLink, ZybbleMark } from "../components/primitives";
+import { SmartLink, ZybbleMark } from "../components/primitives";
+import { AuthCta, AuthTextLink } from "../components/AuthCta";
 
 export function Navbar() {
   const [scrolled, setScrolled] = useState(false);
@@ -60,15 +61,8 @@ export function Navbar() {
         </ul>
 
         <div className="flex items-center gap-1.5">
-          <SmartLink
-            href="/contact"
-            className="hidden rounded-full px-3 py-1.5 text-[13px] font-medium text-ink-soft transition-colors hover:text-ink sm:block"
-          >
-            Contact
-          </SmartLink>
-          <ButtonGreen small href="/#pricing" className="hidden sm:inline-flex">
-            Start for free
-          </ButtonGreen>
+          <AuthTextLink className="hidden sm:block" />
+          <AuthCta small className="hidden sm:inline-flex" />
           <button
             type="button"
             onClick={() => setOpen((v) => !v)}
@@ -114,9 +108,7 @@ export function Navbar() {
             </SmartLink>
           </li>
           <li className="pt-2">
-            <ButtonGreen href="/#pricing" className="w-full">
-              Start for free
-            </ButtonGreen>
+            <AuthCta className="w-full" />
           </li>
         </ul>
       </div>

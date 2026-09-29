@@ -1,11 +1,11 @@
 import {
-  ButtonGreen,
   Eyebrow,
   LandscapeStage,
   Reveal,
   SmartLink,
   ZybbleMark,
 } from "../components/primitives";
+import { AuthCta } from "../components/AuthCta";
 import { FinalSearchCard } from "../components/product-cards";
 import { CONTACT_EMAIL, FOOTER_COLS } from "../lib/site";
 
@@ -60,9 +60,7 @@ export function FinalCta() {
                 the work that matters.
               </p>
               <div className="mt-7 flex flex-col items-start gap-3">
-                <ButtonGreen href="/#pricing" className="px-5.5 py-2.5 text-[14px]">
-                  Start for free
-                </ButtonGreen>
+                <AuthCta className="px-5.5 py-2.5 text-[14px]" />
                 <p className="text-[12px] text-ink-mute">
                   Free plan · 50 leads a month
                 </p>

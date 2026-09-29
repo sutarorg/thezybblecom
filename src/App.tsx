@@ -1,5 +1,15 @@
-import type { ReactElement } from "react";
-import { HashRouter, Route, Routes } from "react-router-dom";
+import { useEffect, type ReactNode } from "react";
+import {
+  BrowserRouter,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  useParams,
+} from "react-router-dom";
+
+/* marketing */
 import { Navbar } from "./sections/Navbar";
 import { Hero } from "./sections/Hero";
 import { Steps } from "./sections/Steps";
@@ -14,12 +24,10 @@ import { Assistant } from "./assistant/Assistant";
 import { usePageSeo, useScrollToHash } from "./lib/hooks";
 
 /* app */
-import { useEffect } from "react";
 import { ToastProvider } from "./app/components/ui";
 import { CommandPalette } from "./app/components/CommandPalette";
-import { navigate, useAppRoute } from "./app/hooks";
+import { registerNavigate } from "./app/hooks";
 import { useAuthUser } from "./app/services/hooks";
-import { BACKEND_ENABLED } from "./app/services/api";
 import { LoginPage, ResetPage, SignupPage } from "./app/pages/Auth";
 import { OverviewPage } from "./app/pages/Overview";
 import { FindPage } from "./app/pages/Find";
@@ -35,9 +43,10 @@ import { WorkspaceDetailPage } from "./app/pages/WorkspaceDetail";
 import { BillingPage } from "./app/pages/Billing";
 import { UsagePage } from "./app/pages/Usage";
 import { SettingsPage } from "./app/pages/Settings";
+import { NotFoundPage } from "./app/pages/NotFound";
 
 /* ------------------------------------------------------------------ */
-/* Landing site (unchanged)                                            */
+/* Marketing home                                                      */
 /* ------------------------------------------------------------------ */
 function Home() {
   usePageSeo({
@@ -67,127 +76,130 @@ function Home() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Lead app routes (hash-based, inside the react-router hash space)    */
+/* Auth gates                                                          */
 /* ------------------------------------------------------------------ */
-const APP_ROUTES: {
-  path: string;
-  render: (path: string) => ReactElement;
-}[] = [
-  { path: "/login", render: () => <LoginPage /> },
-  { path: "/signup", render: () => <SignupPage /> },
-  { path: "/reset", render: () => <ResetPage /> },
-  { path: "/overview", render: () => <OverviewPage /> },
-  { path: "/find", render: () => <FindPage /> },
-  { path: "/search-history", render: () => <SearchHistoryPage /> },
-  { path: "/leads", render: () => <LeadsPage /> },
-  {
-    path: "/leads/",
-    render: (p) => <LeadDetailPage id={p.replace("/leads/", "")} />,
-  },
-  { path: "/lists", render: () => <ListsPage /> },
-  { path: "/lists/", render: (p) => <ListDetailPage id={p.replace("/lists/", "")} /> },
-  { path: "/exports", render: () => <ExportsPage /> },
-  { path: "/team", render: () => <TeamPage /> },
-  { path: "/workspaces", render: () => <WorkspacesPage /> },
-  {
-    path: "/workspaces/",
-    render: (p) => <WorkspaceDetailPage id={p.replace("/workspaces/", "")} />,
-  },
-  { path: "/billing", render: () => <BillingPage /> },
-  { path: "/usage", render: () => <UsagePage /> },
-  { path: "/settings", render: () => <SettingsPage /> },
-];
-
-function AuthSplash() {
+function Splash({ label = "Loading your workspace…" }: { label?: string }) {
   return (
-    <div className="grid min-h-dvh place-items-center bg-paper" role="status" aria-label="Loading Zybble">
+    <div className="grid min-h-dvh place-items-center bg-paper" role="status" aria-live="polite">
       <div className="flex flex-col items-center gap-3">
-        <span className="size-6 animate-spin rounded-full border-2 border-black/[0.08] border-t-brand-600" aria-hidden="true" />
-        <p className="text-xs text-ink-mute">Loading your workspace…</p>
+        <span
+          className="size-6 animate-spin rounded-full border-2 border-black/[0.08] border-t-brand-600"
+          aria-hidden="true"
+        />
+        <p className="text-xs text-ink-mute">{label}</p>
       </div>
     </div>
   );
 }
 
-const AUTH_PATHS = new Set(["/login", "/signup", "/reset"]);
-
-function LeadApp() {
+/** Wraps every authenticated route. */
+function Protected({ children }: { children: ReactNode }) {
   const user = useAuthUser();
-  const { path } = useAppRoute();
+  const location = useLocation();
 
-  useEffect(() => {
-    if (!BACKEND_ENABLED) return;
-    if (user === "loading") return;
-    if (!user && !AUTH_PATHS.has(path)) {
-      navigate("/login");
-    } else if (user && AUTH_PATHS.has(path)) {
-      navigate("/overview");
-    }
-  }, [user, path]);
-
-  if (BACKEND_ENABLED) {
-    if (user === "loading") return <AuthSplash />;
-    if (!user && !AUTH_PATHS.has(path)) return <AuthSplash />;
-    if (user && AUTH_PATHS.has(path)) return <AuthSplash />;
+  if (user === "loading") return <Splash />;
+  if (!user) {
+    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   }
-
-  const route = APP_ROUTES.find((r) => path === r.path || path.startsWith(r.path));
   return (
     <ToastProvider>
-      {route ? route.render(path) : <OverviewPage />}
+      {children}
       <CommandPalette />
     </ToastProvider>
   );
 }
 
+/** Auth screens redirect away once a session exists. */
+function PublicOnly({ children }: { children: ReactNode }) {
+  const user = useAuthUser();
+  const location = useLocation();
+  const from = (location.state as { from?: string } | null)?.from;
+
+  if (user === "loading") return <Splash label="Checking your session…" />;
+  if (user) return <Navigate to={from && from !== "/login" ? from : "/overview"} replace />;
+  return <ToastProvider>{children}</ToastProvider>;
+}
+
+/* param-aware detail wrappers */
+function LeadDetailRoute() {
+  const { id = "" } = useParams();
+  return <LeadDetailPage id={id} />;
+}
+function ListDetailRoute() {
+  const { id = "" } = useParams();
+  return <ListDetailPage id={id} />;
+}
+function WorkspaceDetailRoute() {
+  const { id = "" } = useParams();
+  return <WorkspaceDetailPage id={id} />;
+}
+
 /* ------------------------------------------------------------------ */
-/* Root                                                                */
+/* Bridge: lets non-hook modules push real paths                       */
 /* ------------------------------------------------------------------ */
-function isLeadAppPath(pathname: string) {
-  return APP_ROUTES.some(
-    (r) => pathname === r.path || pathname.startsWith(r.path)
-  );
+function NavigationBridge() {
+  const nav = useNavigate();
+  useEffect(() => {
+    registerNavigate((to, opts) => nav(to, { replace: opts?.replace }));
+  }, [nav]);
+  return null;
 }
 
 function RoutedApp() {
   useScrollToHash();
   return (
     <>
+      <NavigationBridge />
       <a
         href="#main"
-        className="sr-only focus:not-sr-only focus:absolute focus:top-3 focus:left-3 focus:z-[60] focus:rounded-full focus:bg-ink focus:px-4 focus:py-2 focus:text-[13px] focus:font-medium focus:text-white"
+        onClick={(e) => {
+          e.preventDefault();
+          document.getElementById("main")?.scrollIntoView({ block: "start" });
+          document.getElementById("main")?.focus?.();
+        }}
+        className="sr-only focus:not-sr-only focus:absolute focus:top-3 focus:left-3 focus:z-[90] focus:rounded-full focus:bg-ink focus:px-4 focus:py-2 focus:text-[13px] focus:font-medium focus:text-white"
       >
         Skip to content
       </a>
+
       <Routes>
+        {/* marketing */}
         <Route path="/" element={<Home />} />
         <Route path="/contact" element={<ContactPage />} />
         <Route path="/privacy" element={<PrivacyPage />} />
         <Route path="/terms" element={<TermsPage />} />
-        <Route path="*" element={<AppOrHome />} />
+
+        {/* auth */}
+        <Route path="/login" element={<PublicOnly><LoginPage /></PublicOnly>} />
+        <Route path="/signup" element={<PublicOnly><SignupPage /></PublicOnly>} />
+        <Route path="/reset" element={<PublicOnly><ResetPage /></PublicOnly>} />
+
+        {/* application */}
+        <Route path="/overview" element={<Protected><OverviewPage /></Protected>} />
+        <Route path="/find" element={<Protected><FindPage /></Protected>} />
+        <Route path="/search-history" element={<Protected><SearchHistoryPage /></Protected>} />
+        <Route path="/leads" element={<Protected><LeadsPage /></Protected>} />
+        <Route path="/leads/:id" element={<Protected><LeadDetailRoute /></Protected>} />
+        <Route path="/lists" element={<Protected><ListsPage /></Protected>} />
+        <Route path="/lists/:id" element={<Protected><ListDetailRoute /></Protected>} />
+        <Route path="/exports" element={<Protected><ExportsPage /></Protected>} />
+        <Route path="/team" element={<Protected><TeamPage /></Protected>} />
+        <Route path="/workspaces" element={<Protected><WorkspacesPage /></Protected>} />
+        <Route path="/workspaces/:id" element={<Protected><WorkspaceDetailRoute /></Protected>} />
+        <Route path="/billing" element={<Protected><BillingPage /></Protected>} />
+        <Route path="/usage" element={<Protected><UsagePage /></Protected>} />
+        <Route path="/settings" element={<Protected><SettingsPage /></Protected>} />
+
+        <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </>
   );
 }
 
-/**
- * Embeds the lead app for any `/app`-style route, falls back to Home.
- * With the single-file hash router, react-router sees these as real paths.
- */
-function AppOrHome() {
-  return <RoutedAppInner />;
-}
-
-function RoutedAppInner() {
-  const { path } = useAppRoute();
-  if (isLeadAppPath(path)) return <LeadApp />;
-  return <Home />;
-}
-
 export default function App() {
   return (
-    <HashRouter>
+    <BrowserRouter>
       <RoutedApp />
-    </HashRouter>
+    </BrowserRouter>
   );
 }

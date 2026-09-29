@@ -15,29 +15,37 @@ import {
   Phone,
   Sparkles,
 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { cn } from "../utils/cn";
 import { LANDSCAPE_URL, LANDSCAPE_ALT } from "../lib/site";
 
 /* ------------------------------------------------------------------ */
-/* Hash-aware link helpers                                             */
+/* Link helpers — clean paths only, no hash URLs                       */
 /* ------------------------------------------------------------------ */
-export function isHashUrl(href: string) {
-  return href.startsWith("#");
+
+/** Smoothly scroll to a section id without ever writing "#" to the URL. */
+export function scrollToSection(id: string) {
+  const el = document.getElementById(id);
+  if (!el) return false;
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  el.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+  return true;
 }
 
-export function isHashLink(href: string) {
-  return href.startsWith("/#") || isHashUrl(href);
-}
-
-export function homeRebuild(href: string) {
-  return isHashUrl(href) ? `/${href}` : href;
+function parseTarget(href: string) {
+  // "#pricing"  → section on the current page
+  // "/#pricing" → home page, then section
+  // "/contact"  → route
+  // "mailto:"   → external
+  if (href.startsWith("#")) return { kind: "section" as const, id: href.slice(1), path: "/" };
+  if (href.startsWith("/#")) return { kind: "home-section" as const, id: href.slice(2), path: "/" };
+  if (/^(https?:|mailto:|tel:)/.test(href)) return { kind: "external" as const, id: "", path: href };
+  return { kind: "route" as const, id: "", path: href };
 }
 
 /**
- * An anchor that respects the built single-file deploy:
- * same-page hashes use plain <a>, same-document cross-links
- * use <Link>, and unknown "/" hashes fall back to <a> too.
+ * Renders a real-path link. Section links scroll in place (or navigate
+ * home first) and never leave a "#" fragment in the address bar.
  */
 export function SmartLink({
   href,
@@ -52,19 +60,51 @@ export function SmartLink({
   ariaLabel?: string;
   onClick?: () => void;
 }) {
-  // In the single-file build, HashRouter serves every route from the
-  // same document — so "/privacy" must be rendered as "#/privacy" in
-  // hrefs, and hash-based same-page anchors work plain.
-  const resolved = isHashLink(href) ? href : `#${href}`;
+  const target = parseTarget(href);
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  if (target.kind === "external") {
+    const external = /^https?:/.test(href);
+    return (
+      <a
+        href={href}
+        className={className}
+        aria-label={ariaLabel}
+        onClick={onClick}
+        {...(external ? { target: "_blank", rel: "noreferrer" } : {})}
+      >
+        {children}
+      </a>
+    );
+  }
+
+  if (target.kind === "route") {
+    return (
+      <Link to={target.path} className={className} aria-label={ariaLabel} onClick={onClick}>
+        {children}
+      </Link>
+    );
+  }
+
+  // section / home-section
   return (
-    <Link
-      to={resolved}
+    <a
+      href={target.path === "/" && location.pathname === "/" ? `/${""}` : target.path}
       className={className}
       aria-label={ariaLabel}
-      onClick={onClick}
+      onClick={(e) => {
+        e.preventDefault();
+        onClick?.();
+        if (location.pathname === "/") {
+          scrollToSection(target.id);
+        } else {
+          navigate("/", { state: { scrollTo: target.id } });
+        }
+      }}
     >
       {children}
-    </Link>
+    </a>
   );
 }
 

@@ -39,38 +39,32 @@ export function usePageSeo({
 
     document
       .querySelector<HTMLLinkElement>('link[rel="canonical"]')
-      ?.setAttribute("href", `${SITE_URL}${path}`);
+      ?.setAttribute("href", `${SITE_URL}${path === "/" ? "/" : path}`);
   }, [title, description, path, noindex]);
 }
 
 /**
- * Scroll to top on route change; honor /#section deep links by
- * smoothly anchoring to the element when present.
+ * Scroll behaviour on navigation. Cross-page section links pass
+ * `state.scrollTo`, so we can anchor without putting "#" in the URL.
  */
 export function useScrollToHash() {
-  const { pathname, hash } = useLocation();
+  const { pathname, state } = useLocation();
 
   useEffect(() => {
-    if (hash) {
-      // wait for the new page to paint before anchoring
+    const target = (state as { scrollTo?: string } | null)?.scrollTo;
+    if (target) {
       requestAnimationFrame(() => {
-        let el: Element | null = null;
-        try {
-          el = document.querySelector(hash);
-        } catch {
-          el = null;
-        }
+        const el = document.getElementById(target);
         if (el) {
-          el.scrollIntoView({ behavior: "smooth", block: "start" });
-          window.setTimeout(() => {
-            el.scrollIntoView({ behavior: "smooth", block: "start" });
-          }, 120);
-        } else {
-          window.scrollTo({ top: 0, behavior: "auto" });
+          const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+          el.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+          window.history.replaceState({}, "");
+          return;
         }
+        window.scrollTo({ top: 0, behavior: "auto" });
       });
       return;
     }
     window.scrollTo({ top: 0, behavior: "auto" });
-  }, [pathname, hash]);
+  }, [pathname, state]);
 }

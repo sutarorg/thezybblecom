@@ -23,14 +23,16 @@ import {
 } from "lucide-react";
 import { cn } from "../../utils/cn";
 import { ZybbleMark } from "../../components/primitives";
-import { WORKSPACES } from "../data/mock";
-import { useAppRoute } from "../hooks";
+import { navigate, useAppRoute } from "../hooks";
 import { useAuthUser } from "../services/hooks";
 import {
+  getSelectedWorkspaceId,
+  getUsage,
   listWorkspaces,
   setSelectedWorkspaceId,
   signOut,
 } from "../services/api";
+import { planFromId } from "../data/plans";
 import type { Workspace } from "../data/types";
 import { Avatar, Badge, Btn, Kbd, PopItem, PopLabel, PopSep, Popover } from "./ui";
 
@@ -79,12 +81,25 @@ function NavLink({ item, collapsed, onNavigate }: { item: NavItem; collapsed?: b
   );
 }
 
-function SidebarBody({ collapsed, onNavigate }: { collapsed?: boolean; onNavigate?: () => void }) {
+function SidebarBody({
+  collapsed,
+  onNavigate,
+  planName,
+  leadsUsed = 0,
+  leadsLimit = 0,
+}: {
+  collapsed?: boolean;
+  onNavigate?: () => void;
+  planName?: string;
+  leadsUsed?: number;
+  leadsLimit?: number;
+}) {
+  const usagePct = leadsLimit > 0 ? Math.min(100, Math.round((leadsUsed / leadsLimit) * 100)) : 0;
   return (
     <div className="flex h-full flex-col">
       {/* logo */}
       <div className={cn("flex h-14 shrink-0 items-center border-b border-black/[0.05]", collapsed ? "justify-center" : "px-4")}>
-        <a href="#/overview" aria-label="Zybble home" className="flex items-center gap-2">
+        <a href="/overview" aria-label="Zybble home" className="flex items-center gap-2">
           <ZybbleMark className="size-5.5" />
           {!collapsed ? <span className="font-display text-sm font-semibold tracking-[-0.02em] text-ink">Zybble</span> : null}
         </a>
@@ -145,18 +160,25 @@ function SidebarBody({ collapsed, onNavigate }: { collapsed?: boolean; onNavigat
             <NavLink key={item.href} item={item} collapsed={collapsed} onNavigate={onNavigate} />
           ))}
         </ul>
-        {!collapsed ? (
+        {!collapsed && planName ? (
           <div className="mx-2 mt-3 rounded-md border border-brand-600/15 bg-brand-50/70 px-2.5 py-2">
             <div className="flex items-center justify-between">
-              <p className="text-[11px] font-medium text-brand-700">Agency plan</p>
-              <Badge tone="green" className="h-4 px-1 text-[9.5px]">
-                Pro
-              </Badge>
+              <p className="text-[11px] font-medium text-brand-700">{planName} plan</p>
+              {planName !== "Free" ? (
+                <Badge tone="green" className="h-4 px-1 text-[9.5px]">
+                  Pro
+                </Badge>
+              ) : null}
             </div>
             <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-black/[0.07]">
-              <div className="h-full w-[52%] rounded-full bg-brand-600" />
+              <div
+                className="h-full rounded-full bg-brand-600 transition-[width] duration-500"
+                style={{ width: `${usagePct}%` }}
+              />
             </div>
-            <p className="mt-1 text-[10px] text-brand-700/80">7,830 of 15,000 leads</p>
+            <p className="mt-1 text-[10px] text-brand-700/80">
+              {leadsUsed.toLocaleString()} of {leadsLimit.toLocaleString()} leads
+            </p>
           </div>
         ) : null}
       </div>
@@ -200,11 +222,24 @@ export function AppLayout({
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const authUser = useAuthUser();
-  const [workspaces, setWorkspaces] = useState<Workspace[]>(WORKSPACES);
-  const [workspaceId, setWorkspaceId] = useState(WORKSPACES[0].id);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [workspaceId, setWorkspaceId] = useState<string | null>(getSelectedWorkspaceId());
   const { path } = useAppRoute();
-  const workspace = workspaces.find((w) => w.id === workspaceId) ?? workspaces[0];
+  const workspace = workspaces.find((w) => w.id === workspaceId) ?? workspaces[0] ?? null;
   const heading = title ?? pageTitle(path);
+  const plan = planFromId(authUser === "loading" || !authUser ? "free" : authUser.planId);
+  const [leadsUsed, setLeadsUsed] = useState(0);
+
+  useEffect(() => {
+    if (!workspace) return;
+    let mounted = true;
+    getUsage(workspace.id, plan.id)
+      .then((u) => mounted && setLeadsUsed(u.used))
+      .catch(() => undefined);
+    return () => {
+      mounted = false;
+    };
+  }, [workspace, plan.id]);
 
   useEffect(() => {
     let mounted = true;
@@ -212,7 +247,9 @@ export function AppLayout({
       .then((ws) => {
         if (!mounted || !ws.length) return;
         setWorkspaces(ws);
-        setWorkspaceId((current) => (ws.some((w) => w.id === current) ? current : ws[0].id));
+        setWorkspaceId((current: string | null) =>
+          current && ws.some((w) => w.id === current) ? current : ws[0].id
+        );
       })
       .catch(() => undefined);
     return () => {
@@ -233,7 +270,12 @@ export function AppLayout({
           collapsed ? "w-16" : "w-[264px]"
         )}
       >
-        <SidebarBody collapsed={collapsed} />
+        <SidebarBody
+          collapsed={collapsed}
+          planName={plan.label}
+          leadsUsed={leadsUsed}
+          leadsLimit={plan.leadAllowance}
+        />
       </aside>
 
       {/* mobile drawer */}
@@ -245,7 +287,12 @@ export function AppLayout({
             onClick={() => setMobileOpen(false)}
           />
           <div className="drawer-in-left fixed inset-y-0 left-0 z-[76] w-[264px] border-r border-black/[0.08] bg-paper shadow-2xl">
-            <SidebarBody onNavigate={() => setMobileOpen(false)} />
+            <SidebarBody
+              onNavigate={() => setMobileOpen(false)}
+              planName={plan.label}
+              leadsUsed={leadsUsed}
+              leadsLimit={plan.leadAllowance}
+            />
           </div>
         </>
       ) : null}
@@ -272,8 +319,12 @@ export function AppLayout({
           </button>
 
           <div className="flex min-w-0 items-center gap-1.5 text-xs">
-            <span className="hidden text-ink-mute min-[420px]:inline">{workspace.name}</span>
-            <span className="hidden text-neutral-300 min-[420px]:inline" aria-hidden="true">/</span>
+            {workspace ? (
+              <>
+                <span className="hidden truncate text-ink-mute min-[420px]:inline">{workspace.name}</span>
+                <span className="hidden text-neutral-300 min-[420px]:inline" aria-hidden="true">/</span>
+              </>
+            ) : null}
             <span className="truncate font-medium text-ink">{heading}</span>
           </div>
 
@@ -305,7 +356,7 @@ export function AppLayout({
                 </PopItem>
               ))}
               <PopSep />
-              <PopItem icon={<Check className="size-3.5 opacity-0" aria-hidden="true" />} onClick={() => (window.location.hash = "#/workspaces")}>
+              <PopItem icon={<Check className="size-3.5 opacity-0" aria-hidden="true" />} onClick={() => navigate("/workspaces")}>
                 Manage workspaces
               </PopItem>
             </Popover>
@@ -341,18 +392,18 @@ export function AppLayout({
                 </div>
               </div>
               <PopSep />
-              <PopItem icon={<User className="size-3.5" aria-hidden="true" />} onClick={() => (window.location.hash = "#/settings")}>Profile</PopItem>
-              <PopItem icon={<Settings className="size-3.5" aria-hidden="true" />} onClick={() => (window.location.hash = "#/settings")}>Settings</PopItem>
-              <PopItem icon={<Building2 className="size-3.5" aria-hidden="true" />} onClick={() => (window.location.hash = "#/workspaces")}>Workspace</PopItem>
-              <PopItem icon={<CreditCard className="size-3.5" aria-hidden="true" />} onClick={() => (window.location.hash = "#/billing")}>Billing</PopItem>
-              <PopItem icon={<Gauge className="size-3.5" aria-hidden="true" />} onClick={() => (window.location.hash = "#/usage")}>Usage</PopItem>
+              <PopItem icon={<User className="size-3.5" aria-hidden="true" />} onClick={() => navigate("/settings")}>Profile</PopItem>
+              <PopItem icon={<Settings className="size-3.5" aria-hidden="true" />} onClick={() => navigate("/settings")}>Settings</PopItem>
+              <PopItem icon={<Building2 className="size-3.5" aria-hidden="true" />} onClick={() => navigate("/workspaces")}>Workspace</PopItem>
+              <PopItem icon={<CreditCard className="size-3.5" aria-hidden="true" />} onClick={() => navigate("/billing")}>Billing</PopItem>
+              <PopItem icon={<Gauge className="size-3.5" aria-hidden="true" />} onClick={() => navigate("/usage")}>Usage</PopItem>
               <PopSep />
               <PopItem
                 danger
                 icon={<LogOut className="size-3.5" aria-hidden="true" />}
                 onClick={async () => {
                   await signOut();
-                  window.location.hash = "#/login";
+                  navigate("/login", { replace: true });
                 }}
               >
                 Log out

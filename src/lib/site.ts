@@ -4,7 +4,8 @@
  * used purely for product visualization.
  */
 
-export const LANDSCAPE_URL = "https://i.ibb.co/WpHKfrCy/hero-main.webp";
+export const LANDSCAPE_URL =
+  "https://i.ibb.co/0jFFCfm3/Chat-GPT-Image-Sep-29-2026-07-01-04-PM.png";
 
 export const LANDSCAPE_ALT =
   "A dreamy anime-style illustrated landscape: bright blue sky with soft white clouds above a wide green valley, wildflowers in the grass and warm rocky mesas on the horizon.";

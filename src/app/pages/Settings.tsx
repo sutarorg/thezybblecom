@@ -1,7 +1,7 @@
 /* ------------------------------------------------------------------ */
 /* Zybble app — Settings                                               */
 /* ------------------------------------------------------------------ */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Building2,
   Clock,
@@ -13,7 +13,6 @@ import {
   Monitor,
   Shield,
   TriangleAlert,
-  Upload,
   User,
 } from "lucide-react";
 import { cn } from "../../utils/cn";
@@ -30,10 +29,10 @@ import {
   Switch,
   useToast,
 } from "../components/ui";
-import { CURRENT_USER, WORKSPACES } from "../data/mock";
-import { useAppSeo } from "../hooks";
-import { updateProfile } from "../services/api";
-import { useAuthUser } from "../services/hooks";
+import { planFromId } from "../data/plans";
+import { navigate, useAppSeo } from "../hooks";
+import { updateProfile, updatePassword } from "../services/api";
+import { useWorkspaceContext } from "../services/hooks";
 
 const TABS = [
   { id: "profile", label: "Profile", icon: User },
@@ -90,22 +89,30 @@ export function SettingsPage() {
   useAppSeo("Settings — Zybble", "Account, workspace, notifications, and security preferences.", "/settings");
   const toast = useToast();
   const [tab, setTab] = useState<TabId>("profile");
-  const authUser = useAuthUser();
-  const resolvedName = authUser === "loading" || !authUser ? CURRENT_USER.name : authUser.name;
-  const resolvedEmail = authUser === "loading" || !authUser ? CURRENT_USER.email : authUser.email;
+  const { user, workspace, planId } = useWorkspaceContext();
+  const plan = planFromId(planId);
 
-  /* profile */
-  const [name, setName] = useState(resolvedName);
-  const [email, setEmail] = useState(resolvedEmail);
-  const [initialized, setInitialized] = useState(false);
-  if (!initialized && (resolvedName !== CURRENT_USER.name || authUser !== "loading")) {
-    setName(resolvedName);
-    setEmail(resolvedEmail);
-    setInitialized(true);
-  }
+  /* profile — hydrated from the signed-in account */
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [savingProfile, setSavingProfile] = useState(false);
+  useEffect(() => {
+    if (user) {
+      setName(user.name);
+      setEmail(user.email);
+    }
+  }, [user]);
+
   /* workspace */
-  const [wsName, setWsName] = useState(WORKSPACES[0].name);
-  const [defaultList, setDefaultList] = useState("Austin Dentists");
+  const [wsName, setWsName] = useState("");
+  useEffect(() => {
+    if (workspace) setWsName(workspace.name);
+  }, [workspace]);
+
+  /* security */
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [savingPw, setSavingPw] = useState(false);
   /* notifications */
   const [nSearch, setNSearch] = useState(true);
   const [nExport, setNExport] = useState(true);
@@ -118,9 +125,41 @@ export function SettingsPage() {
   /* danger */
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const save = (section: string) => {
-    if (section === "Profile") updateProfile(name, email);
+  const save = async (section: string) => {
+    if (section === "Profile") {
+      setSavingProfile(true);
+      try {
+        await updateProfile(name, email);
+        toast("Profile saved");
+      } catch (e) {
+        toast((e as Error).message, "error");
+      } finally {
+        setSavingProfile(false);
+      }
+      return;
+    }
     toast(`${section} saved`);
+  };
+
+  const changePassword = async () => {
+    if (pw.length < 8) {
+      toast("Password needs at least 8 characters.", "error");
+      return;
+    }
+    if (pw !== pw2) {
+      toast("Passwords don't match.", "error");
+      return;
+    }
+    setSavingPw(true);
+    const { error } = await updatePassword(pw);
+    setSavingPw(false);
+    if (error) {
+      toast(error, "error");
+      return;
+    }
+    setPw("");
+    setPw2("");
+    toast("Password updated");
   };
 
   return (
@@ -164,13 +203,12 @@ export function SettingsPage() {
               </div>
               <div className="space-y-4 px-4 py-5 sm:px-5">
                 <div className="flex items-center gap-3">
-                  <Avatar name={name} tint={CURRENT_USER.tint} src={CURRENT_USER.avatar} size="lg" />
+                  <Avatar name={name || "?"} tint="bg-brand-50 text-brand-700" src={user?.avatarUrl} size="lg" />
                   <div>
-                    <Btn variant="outline" size="sm" onClick={() => toast("Choose a photo in your file dialog — demo", "info")}>
-                      <Upload className="size-3.5" aria-hidden="true" />
-                      Change photo
-                    </Btn>
-                    <p className="mt-1 text-[10.5px] text-neutral-400">PNG or JPG · up to 2 MB</p>
+                    <p className="text-xs font-medium text-ink">{name || "—"}</p>
+                    <p className="mt-0.5 text-[10.5px] text-neutral-400">
+                      Your initials are shown across shared workspaces.
+                    </p>
                   </div>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
@@ -184,8 +222,8 @@ export function SettingsPage() {
                   </div>
                 </div>
                 <div className="flex justify-end border-t border-black/[0.05] pt-4">
-                  <Btn variant="primary" size="sm" onClick={() => save("Profile")}>
-                    Save changes
+                  <Btn variant="primary" size="sm" onClick={() => save("Profile")} disabled={savingProfile}>
+                    {savingProfile ? "Saving…" : "Save changes"}
                   </Btn>
                 </div>
               </div>
@@ -200,11 +238,10 @@ export function SettingsPage() {
                 </div>
                 <dl className="divide-y divide-black/[0.04] px-4 py-1 sm:px-5">
                   {[
-                    ["Account holder", CURRENT_USER.name],
-                    ["Sign-in email", CURRENT_USER.email],
-                    ["Plan", "Agency — $99/month"],
-                    ["Account created", "January 4, 2026"],
-                    ["Workspace", WORKSPACES[0].name],
+                    ["Account holder", user?.name ?? "—"],
+                    ["Sign-in email", user?.email ?? "—"],
+                    ["Plan", `${plan.label} — $${(plan.priceCents / 100).toFixed(0)}/month`],
+                    ["Workspace", workspace?.name ?? "—"],
                   ].map(([label, value]) => (
                     <div key={label} className="flex items-center justify-between gap-4 py-3">
                       <dt className="text-[11px] text-ink-mute">{label}</dt>
@@ -219,7 +256,7 @@ export function SettingsPage() {
                   <p className="text-xs font-medium text-ink">Sign out of Zybble</p>
                   <p className="text-[11px] text-ink-mute">You'll return to the login screen.</p>
                 </div>
-                <Btn variant="outline" size="sm" href="#/login">
+                <Btn variant="outline" size="sm" href="/login">
                   Log out
                 </Btn>
               </Card>
@@ -237,12 +274,15 @@ export function SettingsPage() {
                     <FieldLabel htmlFor="ws-name-set">Workspace name</FieldLabel>
                     <Input id="ws-name-set" value={wsName} onChange={(e) => setWsName(e.target.value)} />
                   </div>
-                  <SelectField label="Default save list" value={defaultList} onChange={setDefaultList} options={["Austin Dentists", "Q1 High-Intent Targets", "Miami Restaurants", "Portland Coffee Shops"]} />
+                  <div>
+                    <FieldLabel htmlFor="ws-plan">Plan</FieldLabel>
+                    <Input id="ws-plan" value={plan.label} readOnly disabled />
+                  </div>
                 </div>
                 <div className="rounded-md border border-black/[0.06] bg-neutral-50/70 px-3 py-2.5">
                   <p className="text-[11px] font-medium text-ink">Ownership</p>
                   <p className="mt-0.5 text-[10.5px] leading-4 text-ink-mute">
-                    This workspace is owned by {CURRENT_USER.name}. Ownership transfers require an admin or the danger zone.
+                    This workspace is owned by {user?.name ?? "you"}. Ownership transfers require an admin.
                   </p>
                 </div>
                 <div className="flex justify-end border-t border-black/[0.05] pt-4">
@@ -280,23 +320,33 @@ export function SettingsPage() {
                   <SectionTitle title="Password" description="Update your sign-in credentials." />
                 </div>
                 <div className="space-y-3 px-4 py-5 sm:px-5">
-                  <div>
-                    <FieldLabel htmlFor="set-pw">Current password</FieldLabel>
-                    <Input id="set-pw" type="password" autoComplete="current-password" placeholder="••••••••" />
-                  </div>
                   <div className="grid gap-3 sm:grid-cols-2">
                     <div>
                       <FieldLabel htmlFor="set-pw-new">New password</FieldLabel>
-                      <Input id="set-pw-new" type="password" autoComplete="new-password" placeholder="8+ characters" />
+                      <Input
+                        id="set-pw-new"
+                        type="password"
+                        autoComplete="new-password"
+                        placeholder="8+ characters"
+                        value={pw}
+                        onChange={(e) => setPw(e.target.value)}
+                      />
                     </div>
                     <div>
                       <FieldLabel htmlFor="set-pw-confirm">Confirm new password</FieldLabel>
-                      <Input id="set-pw-confirm" type="password" autoComplete="new-password" placeholder="Repeat it" />
+                      <Input
+                        id="set-pw-confirm"
+                        type="password"
+                        autoComplete="new-password"
+                        placeholder="Repeat it"
+                        value={pw2}
+                        onChange={(e) => setPw2(e.target.value)}
+                      />
                     </div>
                   </div>
                   <div className="flex justify-end border-t border-black/[0.05] pt-4">
-                    <Btn variant="primary" size="sm" onClick={() => save("Password")}>
-                      Update password
+                    <Btn variant="primary" size="sm" onClick={changePassword} disabled={savingPw || !pw}>
+                      {savingPw ? "Updating…" : "Update password"}
                     </Btn>
                   </div>
                 </div>
@@ -399,10 +449,14 @@ export function SettingsPage() {
         onClose={() => setConfirmDelete(false)}
         onConfirm={() => {
           setConfirmDelete(false);
-          toast("Account deletion scheduled — demo action", "info");
+          toast(
+            "Account deletion is handled by support so we can verify it's you — we've pointed you at the contact form.",
+            "info"
+          );
+          window.setTimeout(() => navigate("/contact"), 600);
         }}
         title="Delete your Zybble account?"
-        description="This permanently removes all of your searches, lead lists, exports, and workspace memberships. This can't be undone."
+        description="This permanently removes all of your searches, lead lists, exports, and workspace memberships. To protect your data we verify the request first — we'll take you to the contact form."
       />
     </AppLayout>
   );

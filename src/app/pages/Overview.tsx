@@ -1,7 +1,7 @@
 /* ------------------------------------------------------------------ */
-/* Zybble app — Overview                                               */
+/* Zybble app — Overview (real workspace metrics)                      */
 /* ------------------------------------------------------------------ */
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ArrowRight,
   ArrowUpRight,
@@ -12,26 +12,45 @@ import {
   ListChecks,
   Search,
   Sparkles,
+  TriangleAlert,
 } from "lucide-react";
-import { AppLayout, PeriodButton } from "../components/AppLayout";
-import { Badge, Btn, Card, SectionTitle, Skel, relative } from "../components/ui";
-import { ACTIVITY, KPI, LISTS, SEARCH_HISTORY } from "../data/mock";
+import { AppLayout } from "../components/AppLayout";
+import {
+  Badge,
+  Btn,
+  Card,
+  EmptyState,
+  SectionTitle,
+  Skel,
+  relative,
+} from "../components/ui";
+import type { ActivityItem, LeadList, SearchRecord } from "../data/types";
 import { useAppSeo } from "../hooks";
-import { BACKEND_ENABLED, getOverview } from "../services/api";
-import { useWorkspace } from "../services/hooks";
+import { getOverview, type OverviewData } from "../services/api";
+import { useWorkspaceContext } from "../services/hooks";
 
-function buildCards(kpi: { leadsFound: number; leadsSaved: number; searches: number; exported: number; remaining: number; allowance: number }) {
-  return [
-    { label: "Leads found", value: kpi.leadsFound, delta: "+8.4%", icon: Search },
-    { label: "Leads saved", value: kpi.leadsSaved, delta: "+5.1%", icon: ListChecks },
-    { label: "Searches", value: kpi.searches, delta: "+12 this week", icon: FileSearch },
-    { label: "Exported", value: kpi.exported, delta: "+214 this week", icon: Download },
-    { label: "Remaining leads", value: kpi.remaining, delta: `of ${kpi.allowance.toLocaleString()}`, icon: Layers },
-  ];
-}
+const ACT_ICON: Record<string, React.ElementType> = {
+  search: Search,
+  save: ListChecks,
+  export: Download,
+  ai: Sparkles,
+  invite: FileSearch,
+  list: ListChecks,
+  workspace: Layers,
+  billing: Layers,
+};
 
-function KpiCard({ label, value, delta, icon: Icon, index }: ReturnType<typeof buildCards>[number] & { index: number }) {
-  const used = label === "Remaining leads";
+function KpiCard({
+  label,
+  value,
+  sub,
+  icon: Icon,
+}: {
+  label: string;
+  value: number;
+  sub: string;
+  icon: React.ElementType;
+}) {
   return (
     <Card className="p-4">
       <div className="flex items-center justify-between">
@@ -43,90 +62,70 @@ function KpiCard({ label, value, delta, icon: Icon, index }: ReturnType<typeof b
       <p className="font-display mt-2 text-[26px] font-semibold leading-none tracking-[-0.03em] text-ink">
         {value.toLocaleString()}
       </p>
-      <p className="mt-1.5 text-[11px] text-ink-mute">
-        <span className={used ? "text-ink-mute" : "font-medium text-brand-700"}>{delta}</span>
-        {!used && index !== 4 ? <span className="text-neutral-400"> vs last month</span> : index === 4 ? <span className="text-neutral-400"> this cycle</span> : null}
-      </p>
+      <p className="mt-1.5 text-[11px] text-ink-mute">{sub}</p>
     </Card>
   );
 }
 
-const ACT_ICON: Record<string, React.ElementType> = {
-  search: Search,
-  save: ListChecks,
-  export: Download,
-  ai: Sparkles,
-  invite: FileSearch,
-  list: ListChecks,
-  workspace: Layers,
-};
-
 export function OverviewPage() {
-  useAppSeo("Overview — Zybble", "Your lead-generation workspace at a glance.", "/overview");
+  useAppSeo("Overview — Zybble", "Your lead generation workspace at a glance.", "/overview");
+  const { workspace, planId, loading: ctxLoading } = useWorkspaceContext();
+
+  const [data, setData] = useState<OverviewData | null>(null);
   const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    const t = window.setTimeout(() => setLoading(false), 520);
-    return () => window.clearTimeout(t);
-  }, []);
+  const [error, setError] = useState<string | null>(null);
 
-  const { workspace } = useWorkspace();
-  const [overview, setOverview] = useState<{
-    leadsFound: number;
-    leadsSaved: number;
-    searches: number;
-    exported: number;
-    remaining: number;
-    allowance: number;
-  } | null>(null);
-  const [remoteSearches, setRemoteSearches] = useState<typeof SEARCH_HISTORY>([]);
-  const [remoteLists, setRemoteLists] = useState<typeof LISTS>([]);
-  const [remoteActivity, setRemoteActivity] = useState<typeof ACTIVITY>([]);
+  const load = useCallback(() => {
+    if (!workspace) return;
+    setLoading(true);
+    setError(null);
+    getOverview(workspace.id, planId)
+      .then(setData)
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setLoading(false));
+  }, [workspace, planId]);
 
   useEffect(() => {
-    if (!BACKEND_ENABLED || !workspace) return;
-    getOverview(workspace.id)
-      .then((data) => {
-        setOverview(data.kpi);
-        setRemoteSearches(data.searches);
-        setRemoteLists(data.lists);
-        setRemoteActivity(data.activity);
-      })
-      .catch(() => undefined);
-  }, [workspace]);
+    if (!ctxLoading && !workspace) setLoading(false);
+    load();
+  }, [load, ctxLoading, workspace]);
 
-  const kpi = overview ?? {
-    leadsFound: KPI.leadsFound,
-    leadsSaved: KPI.leadsSaved,
-    searches: KPI.searches,
-    exported: KPI.exported,
-    remaining: KPI.remaining,
-    allowance: KPI.allowance,
-  };
-  const CARDS = buildCards(kpi);
-  const fallbackLists = useMemo(() => LISTS.slice(0, 4), []);
-  const fallbackHistory = useMemo(() => SEARCH_HISTORY.slice(0, 5), []);
-  const fallbackActivity = useMemo(() => ACTIVITY.slice(0, 5), []);
-  const lists = remoteLists.length ? remoteLists : fallbackLists;
-  const history = remoteSearches.length ? remoteSearches : fallbackHistory;
-  const activity = remoteActivity.length ? remoteActivity : fallbackActivity;
+  const busy = loading || ctxLoading;
+  const kpi = data?.kpi;
+  const searches: SearchRecord[] = data?.searches ?? [];
+  const lists: LeadList[] = data?.lists ?? [];
+  const activity: ActivityItem[] = data?.activity ?? [];
+  const usedPct = kpi && kpi.allowance > 0 ? Math.round(((kpi.allowance - kpi.remaining) / kpi.allowance) * 100) : 0;
 
   return (
     <AppLayout
       title="Overview"
       description="Your lead generation workspace at a glance."
       aside={
-        <>
-          <PeriodButton />
-          <Btn variant="primary" href="#/find">
-            <Search className="size-3.5" aria-hidden="true" />
-            Find leads
-          </Btn>
-        </>
+        <Btn variant="primary" href="/find">
+          <Search className="size-3.5" aria-hidden="true" />
+          Find leads
+        </Btn>
       }
       wide
     >
+      {error ? (
+        <Card className="mb-3 flex items-start gap-3 p-4">
+          <span className="grid size-8 shrink-0 place-items-center rounded-md bg-red-50 text-red-600">
+            <TriangleAlert className="size-4" aria-hidden="true" />
+          </span>
+          <div>
+            <p className="text-[13px] font-medium text-ink">We couldn't load your overview</p>
+            <p className="mt-0.5 text-xs leading-5 text-ink-mute">{error}</p>
+            <Btn variant="outline" size="sm" className="mt-3" onClick={load}>
+              Try again
+            </Btn>
+          </div>
+        </Card>
+      ) : null}
+
       {/* KPI row */}
-      {loading ? (
+      {busy ? (
         <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5" aria-hidden="true">
           {Array.from({ length: 5 }).map((_, i) => (
             <Card key={i} className="p-4">
@@ -136,25 +135,37 @@ export function OverviewPage() {
             </Card>
           ))}
         </div>
-      ) : (
+      ) : kpi ? (
         <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
-          {CARDS.map((card, i) => (
-            <KpiCard key={card.label} {...card} index={i} />
-          ))}
+          <KpiCard label="Leads found" value={kpi.leadsFound} sub="in this workspace" icon={Search} />
+          <KpiCard label="Leads saved" value={kpi.leadsSaved} sub="across your lists" icon={ListChecks} />
+          <KpiCard label="Searches" value={kpi.searches} sub="this billing cycle" icon={FileSearch} />
+          <KpiCard label="Exported" value={kpi.exported} sub="files this cycle" icon={Download} />
+          <KpiCard
+            label="Remaining leads"
+            value={kpi.remaining}
+            sub={`of ${kpi.allowance.toLocaleString()} this cycle`}
+            icon={Layers}
+          />
         </div>
-      )}
+      ) : null}
 
       <div className="mt-6 grid gap-3 lg:grid-cols-3">
         {/* recent searches */}
         <Card className="lg:col-span-2">
           <div className="flex items-center justify-between px-4 pb-2 pt-4">
             <SectionTitle title="Recent searches" />
-            <a href="#/search-history" className="inline-flex items-center gap-0.5 text-xs font-medium text-ink-mute transition-colors hover:text-brand-700">
-              View all
-              <ArrowUpRight className="size-3" aria-hidden="true" />
-            </a>
+            {searches.length ? (
+              <a
+                href="/search-history"
+                className="inline-flex items-center gap-0.5 text-xs font-medium text-ink-mute transition-colors hover:text-brand-700"
+              >
+                View all
+                <ArrowUpRight className="size-3" aria-hidden="true" />
+              </a>
+            ) : null}
           </div>
-          {loading ? (
+          {busy ? (
             <div className="px-4 pb-4 pt-1" aria-hidden="true">
               {Array.from({ length: 4 }).map((_, i) => (
                 <div key={i} className="flex items-center gap-3 py-2.5">
@@ -166,12 +177,26 @@ export function OverviewPage() {
                 </div>
               ))}
             </div>
+          ) : searches.length === 0 ? (
+            <div className="px-4 pb-4">
+              <EmptyState
+                className="border-0 bg-transparent py-8"
+                icon={<Search className="size-4" aria-hidden="true" />}
+                title="No searches yet"
+                description="Describe the businesses you need and Zybble will collect them into this workspace."
+                action={
+                  <Btn variant="primary" href="/find">
+                    Run your first search
+                  </Btn>
+                }
+              />
+            </div>
           ) : (
             <ul className="px-2 pb-2">
-              {history.map((s) => (
+              {searches.map((s) => (
                 <li key={s.id}>
                   <a
-                    href="#/search-history"
+                    href="/search-history"
                     className="group flex items-center gap-3 rounded-md px-2 py-2 transition-colors hover:bg-neutral-50"
                   >
                     <span className="grid size-6 shrink-0 place-items-center rounded-md border border-black/[0.05] bg-neutral-50 text-neutral-400">
@@ -197,28 +222,45 @@ export function OverviewPage() {
           )}
         </Card>
 
-        {/* right column: usage + activity */}
+        {/* usage + activity */}
         <div className="space-y-3">
           <Card className="p-4">
-            <SectionTitle title="Usage this cycle" aside={<span className="text-xs font-medium text-ink">52%</span>} />
-            <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-black/[0.06]">
-              <div className="h-full w-[52%] rounded-full bg-brand-600 transition-all duration-700" />
-            </div>
-            <div className="mt-2 flex items-center justify-between text-[11px] text-ink-mute">
-              <span>{KPI.used.toLocaleString()} used</span>
-              <span>{KPI.remaining.toLocaleString()} left of {KPI.allowance.toLocaleString()}</span>
-            </div>
-            <p className="mt-1 flex items-center gap-1 text-[11px] text-neutral-400">
-              <Clock className="size-3" aria-hidden="true" />
-              Resets {KPI.resetDate}
-            </p>
+            <SectionTitle
+              title="Usage this cycle"
+              aside={!busy && kpi ? <span className="text-xs font-medium text-ink">{usedPct}%</span> : null}
+            />
+            {busy || !kpi ? (
+              <>
+                <Skel className="mt-3 block h-1.5 w-full rounded-full" />
+                <Skel className="mt-2 block h-2 w-40 rounded" />
+              </>
+            ) : (
+              <>
+                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-black/[0.06]">
+                  <div
+                    className="h-full rounded-full bg-brand-600 transition-[width] duration-700"
+                    style={{ width: `${usedPct}%` }}
+                  />
+                </div>
+                <div className="mt-2 flex items-center justify-between text-[11px] text-ink-mute">
+                  <span>{(kpi.allowance - kpi.remaining).toLocaleString()} used</span>
+                  <span>
+                    {kpi.remaining.toLocaleString()} left of {kpi.allowance.toLocaleString()}
+                  </span>
+                </div>
+                <p className="mt-1 flex items-center gap-1 text-[11px] text-neutral-400">
+                  <Clock className="size-3" aria-hidden="true" />
+                  Resets at the start of next month
+                </p>
+              </>
+            )}
           </Card>
 
           <Card>
             <div className="flex items-center justify-between px-4 pb-1 pt-4">
               <SectionTitle title="Recent activity" />
             </div>
-            {loading ? (
+            {busy ? (
               <div className="px-4 pb-4" aria-hidden="true">
                 {Array.from({ length: 4 }).map((_, i) => (
                   <div key={i} className="py-2.5">
@@ -227,6 +269,10 @@ export function OverviewPage() {
                   </div>
                 ))}
               </div>
+            ) : activity.length === 0 ? (
+              <p className="px-4 pb-5 pt-1 text-[11.5px] leading-5 text-ink-mute">
+                Activity from you and your team will appear here.
+              </p>
             ) : (
               <ul className="px-4 pb-3">
                 {activity.map((a) => {
@@ -237,7 +283,7 @@ export function OverviewPage() {
                         <Icon className="size-2.5" aria-hidden="true" />
                       </span>
                       <div className="min-w-0">
-                        <p className="truncate text-xs leading-5 text-ink-soft">{a.text}</p>
+                        <p className="text-xs leading-5 text-ink-soft">{a.text}</p>
                         <p className="text-[10.5px] text-neutral-400">{relative(a.at)}</p>
                       </div>
                     </li>
@@ -253,12 +299,17 @@ export function OverviewPage() {
       <div className="mt-6">
         <div className="mb-3 flex items-center justify-between">
           <SectionTitle title="Lead lists" description="Where your saved leads live." />
-          <a href="#/lists" className="inline-flex items-center gap-0.5 text-xs font-medium text-ink-mute transition-colors hover:text-brand-700">
-            View all
-            <ArrowUpRight className="size-3" aria-hidden="true" />
-          </a>
+          {lists.length ? (
+            <a
+              href="/lists"
+              className="inline-flex items-center gap-0.5 text-xs font-medium text-ink-mute transition-colors hover:text-brand-700"
+            >
+              View all
+              <ArrowUpRight className="size-3" aria-hidden="true" />
+            </a>
+          ) : null}
         </div>
-        {loading ? (
+        {busy ? (
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-hidden="true">
             {Array.from({ length: 4 }).map((_, i) => (
               <Card key={i} className="p-4">
@@ -268,16 +319,30 @@ export function OverviewPage() {
               </Card>
             ))}
           </div>
+        ) : lists.length === 0 ? (
+          <EmptyState
+            icon={<ListChecks className="size-4" aria-hidden="true" />}
+            title="No lists yet"
+            description="Save search results into a list to keep campaigns, markets, or clients separate."
+            action={
+              <Btn variant="outline" href="/lists">
+                Create a list
+              </Btn>
+            }
+          />
         ) : (
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             {lists.map((list) => (
-              <a key={list.id} href={`#/lists/${list.id}`} className="group">
-                <Card className="p-4 transition-all duration-200 group-hover:border-black/[0.12] group-hover:-translate-y-0.5">
+              <a key={list.id} href={`/lists/${list.id}`} className="group">
+                <Card className="p-4 transition-all duration-200 group-hover:-translate-y-0.5 group-hover:border-black/[0.12]">
                   <div className="flex items-center justify-between">
                     <span className={`grid size-7 place-items-center rounded-md text-[9px] font-bold ${list.color}`}>
                       {list.name.split(" ").slice(0, 2).map((w) => w[0]).join("")}
                     </span>
-                    <ArrowUpRight className="size-3 text-neutral-300 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden="true" />
+                    <ArrowUpRight
+                      className="size-3 text-neutral-300 opacity-0 transition-opacity group-hover:opacity-100"
+                      aria-hidden="true"
+                    />
                   </div>
                   <p className="mt-3 truncate text-xs font-medium text-ink">{list.name}</p>
                   <p className="font-display mt-1 text-lg font-semibold tracking-[-0.02em] text-ink">

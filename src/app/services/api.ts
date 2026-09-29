@@ -1,25 +1,10 @@
 /* ------------------------------------------------------------------ */
-/* Zybble — typed service layer.                                       */
-/* Every provider-touching or money-touching action goes through       */
-/* Supabase Edge Functions. Direct PostgREST reads/writes are guarded  */
-/* by Row Level Security. When the backend isn't configured, every     */
-/* call falls back to the bundled demo data so the preview keeps work. */
+/* Zybble — production service layer.                                  */
+/* No mock data, no simulated success. Reads go through RLS-guarded    */
+/* PostgREST; provider/money actions go through Edge Functions.        */
 /* ------------------------------------------------------------------ */
 import { getSupabase, BACKEND_ENABLED } from "./supabase";
-import {
-  ACTIVITY,
-  CURRENT_USER,
-  EXPORTS,
-  KPI,
-  LEADS,
-  LISTS,
-  PLAN,
-  SEARCH_HISTORY,
-  TEAM,
-  WEEK_LABELS,
-  WEEKLY_USAGE,
-  WORKSPACES,
-} from "../data/mock";
+import { planFromId, planLabel } from "../data/plans";
 import type {
   ActivityItem,
   ExportRecord,
@@ -36,8 +21,23 @@ import type {
 
 export { BACKEND_ENABLED };
 
+export const CONFIG_ERROR =
+  "Zybble isn't connected to its backend yet. Add your Supabase environment variables to continue.";
+
+class NotConfigured extends Error {
+  constructor() {
+    super(CONFIG_ERROR);
+  }
+}
+
+function requireClient() {
+  const sb = getSupabase();
+  if (!sb) throw new NotConfigured();
+  return sb;
+}
+
 /* ------------------------------------------------------------------ */
-/* Local workspace selection                                           */
+/* Workspace selection                                                 */
 /* ------------------------------------------------------------------ */
 const WS_KEY = "zybble.workspace";
 
@@ -52,30 +52,30 @@ export function setSelectedWorkspaceId(id: string) {
   try {
     localStorage.setItem(WS_KEY, id);
   } catch {
-    /* ignore */
+    /* storage unavailable */
   }
 }
 
 /* ------------------------------------------------------------------ */
-/* Snake → camel mappers                                               */
+/* Row mappers                                                         */
 /* ------------------------------------------------------------------ */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+/* eslint-disable @typescript-eslint/no-explicit-any */
 function mapLead(row: any): Lead {
   return {
     id: row.id,
     business_id: row.data_id ?? row.id,
     place_id: row.place_id ?? "",
     name: row.name,
-    title: row.title ?? `${row.name}`,
+    title: row.title ?? row.name,
     category: row.category ?? "Business",
     categories: row.categories ?? [],
     types: row.types ?? [],
     description: row.description ?? null,
-    rating: Number(row.rating ?? 0),
+    rating: row.rating != null ? Number(row.rating) : 0,
     reviews: row.reviews ?? 0,
     price: row.price ?? null,
     price_level: row.price_level ?? null,
-    phone: row.phone ?? "—",
+    phone: row.phone ?? "",
     phone_normalized: row.phone_normalized ?? "",
     email: row.email ?? null,
     emails: row.emails ?? [],
@@ -103,7 +103,7 @@ function mapLead(row: any): Lead {
     logo: row.logo ?? null,
     maps_url: row.maps_url ?? "",
     google_maps_url: row.google_maps_url ?? "",
-    source: row.source ?? "Public business listing",
+    source: row.source ?? "",
     source_url: row.source_url ?? "",
     data_id: row.data_id ?? "",
     data_cid: row.data_cid ?? "",
@@ -116,9 +116,9 @@ function mapLead(row: any): Lead {
     social_links: row.social_links ?? [],
     search_query: row.search_query ?? "",
     search_location: row.search_location ?? "",
-    collected_at: row.collected_at,
-    updated_at: row.updated_at,
-    status: row.status as LeadStatus,
+    collected_at: row.collected_at ?? row.created_at,
+    updated_at: row.updated_at ?? row.created_at,
+    status: (row.status ?? "new") as LeadStatus,
     tags: row.tags ?? [],
     notes: (row.lead_notes ?? []).map((n: any) => ({
       id: n.id,
@@ -130,39 +130,51 @@ function mapLead(row: any): Lead {
   };
 }
 
-const LEAD_SELECT =
-  "*, lead_notes(id, body, created_at, author_id), lead_list_members(list_id)";
+const LEAD_SELECT = "*, lead_notes(id, body, created_at, author_id), lead_list_members(list_id)";
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const LIST_TINTS = [
+  "text-emerald-700 bg-emerald-50",
+  "text-sky-700 bg-sky-50",
+  "text-amber-700 bg-amber-50",
+  "text-violet-700 bg-violet-50",
+  "text-rose-700 bg-rose-50",
+  "text-stone-600 bg-stone-100",
+];
+function tintFor(seed: string) {
+  let h = 0;
+  for (const ch of seed) h = (h * 31 + ch.charCodeAt(0)) % 997;
+  return LIST_TINTS[h % LIST_TINTS.length];
+}
+
 function mapList(row: any): LeadList {
   return {
     id: row.id,
     name: row.name,
     description: row.description ?? "",
-    color: "text-emerald-700 bg-emerald-50",
+    color: tintFor(row.id ?? row.name ?? ""),
     lead_count: row.lead_count ?? row.lead_list_members?.[0]?.count ?? 0,
-    owner: row.owner_name ?? "You",
+    owner: row.owner_name ?? "",
     created_at: row.created_at,
     updated_at: row.updated_at,
     workspace_id: row.workspace_id,
   };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function mapSearch(row: any): SearchRecord {
+  const status: SearchRecord["status"] =
+    row.status === "completed" ? "completed" : row.status === "failed" ? "failed" : "partial";
   return {
     id: row.id,
     query: row.query,
     location: row.location ?? "—",
     results: row.result_count ?? 0,
-    status: row.status === "completed" ? "completed" : row.status === "failed" ? "failed" : "partial",
+    status,
     list_id: row.saved_list_id ?? null,
     saved: Boolean(row.saved_list_id),
     at: row.created_at,
   };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function mapExport(row: any): ExportRecord {
   return {
     id: row.id,
@@ -176,28 +188,24 @@ function mapExport(row: any): ExportRecord {
   };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function mapWorkspace(row: any): Workspace {
   return {
     id: row.id,
     name: row.name,
-    owner: "You",
-    plan: row.plan_id ? planLabel(row.plan_id) : "Agency",
+    owner: row.owner_name ?? "",
+    plan: planLabel(row.plan_id),
     members: row.workspace_members?.[0]?.count ?? 1,
     leads_used: row.leads_used ?? 0,
-    leads_limit: row.leads_limit ?? 15000,
+    leads_limit: planFromId(row.plan_id).leadAllowance,
     searches: row.searches ?? 0,
     lists: row.lists ?? 0,
     created_at: row.created_at,
   };
 }
-
-function planLabel(id: string) {
-  return id === "free" ? "Free" : id === "growth" ? "Growth" : id === "agency" ? "Agency" : "Scale";
-}
+/* eslint-enable @typescript-eslint/no-explicit-any */
 
 /* ------------------------------------------------------------------ */
-/* Current user                                                        */
+/* Session / profile                                                   */
 /* ------------------------------------------------------------------ */
 export type AppUser = {
   id: string;
@@ -206,45 +214,64 @@ export type AppUser = {
   avatarUrl: string | null;
   initials: string;
   plan: string;
+  planId: string;
+  isAdmin: boolean;
 };
 
 export async function getCurrentUser(): Promise<AppUser | null> {
   const sb = getSupabase();
-  if (!sb) {
-    return {
-      id: "demo",
-      name: CURRENT_USER.name,
-      email: CURRENT_USER.email,
-      avatarUrl: CURRENT_USER.avatar,
-      initials: CURRENT_USER.initials,
-      plan: PLAN,
-    };
-  }
+  if (!sb) return null;
+
   const {
     data: { session },
   } = await sb.auth.getSession();
   if (!session) return null;
-  const { data: profile } = await sb.from("profiles").select("name, avatar_url").eq("id", session.user.id).single();
+
+  const { data: profile } = await sb
+    .from("profiles")
+    .select("name, avatar_url, role")
+    .eq("id", session.user.id)
+    .maybeSingle();
+
   const name = profile?.name ?? session.user.email?.split("@")[0] ?? "User";
-  const initials = name.split(/\s+/).slice(0, 2).map((s: string) => s[0]?.toUpperCase() ?? "").join("");
-  let plan = "Free";
-  try {
-    const { data: sub } = await sb.from("subscriptions").select("plan_id").eq("user_id", session.user.id).maybeSingle();
-    if (sub) plan = planLabel(sub.plan_id);
-  } catch { /* subscription optional until billing wired */ }
-  return { id: session.user.id, name, email: session.user.email ?? "", avatarUrl: profile?.avatar_url ?? null, initials, plan };
+  const initials = name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((s: string) => s[0]!.toUpperCase())
+    .join("");
+
+  let planId = "free";
+  const { data: sub } = await sb
+    .from("subscriptions")
+    .select("plan_id, status")
+    .eq("user_id", session.user.id)
+    .maybeSingle();
+  if (sub && ["active", "trialing"].includes(sub.status)) planId = sub.plan_id;
+
+  return {
+    id: session.user.id,
+    name,
+    email: session.user.email ?? "",
+    avatarUrl: profile?.avatar_url ?? null,
+    initials,
+    plan: planLabel(planId),
+    planId,
+    isAdmin: profile?.role === "admin",
+  };
 }
 
 export async function updateProfile(name: string, email: string) {
-  const sb = getSupabase();
-  if (!sb) return;
+  const sb = requireClient();
   const {
     data: { session },
   } = await sb.auth.getSession();
-  if (!session) return;
-  await sb.from("profiles").update({ name }).eq("id", session.user.id);
+  if (!session) throw new Error("Your session expired — sign in again.");
+  const { error } = await sb.from("profiles").update({ name }).eq("id", session.user.id);
+  if (error) throw new Error(readableError(error.message));
   if (email && email !== session.user.email) {
-    await sb.auth.updateUser({ email });
+    const { error: mailErr } = await sb.auth.updateUser({ email });
+    if (mailErr) throw new Error(mailErr.message);
   }
 }
 
@@ -253,54 +280,42 @@ export async function updateProfile(name: string, email: string) {
 /* ------------------------------------------------------------------ */
 export async function signIn(email: string, password: string) {
   const sb = getSupabase();
-  if (!sb) {
-    await wait(700);
-    return { error: null };
-  }
+  if (!sb) return { error: CONFIG_ERROR };
   const { error } = await sb.auth.signInWithPassword({ email, password });
-  return { error: error?.message ?? null };
+  return { error: error ? friendlyAuthError(error.message) : null };
 }
 
 export async function signUp(name: string, email: string, password: string) {
   const sb = getSupabase();
-  if (!sb) {
-    await wait(900);
-    return { error: null, needsConfirm: false };
-  }
+  if (!sb) return { error: CONFIG_ERROR, needsConfirm: false };
   const { data, error } = await sb.auth.signUp({
     email,
     password,
     options: {
       data: { name },
-      emailRedirectTo: `${window.location.origin}/#/overview`,
+      emailRedirectTo: `${window.location.origin}/overview`,
     },
   });
   return {
-    error: error?.message ?? null,
+    error: error ? friendlyAuthError(error.message) : null,
     needsConfirm: Boolean(data.user && !data.session),
   };
 }
 
 export async function requestPasswordReset(email: string) {
   const sb = getSupabase();
-  if (!sb) {
-    await wait(700);
-    return { error: null };
-  }
+  if (!sb) return { error: CONFIG_ERROR };
   const { error } = await sb.auth.resetPasswordForEmail(email, {
-    redirectTo: `${window.location.origin}/#/reset?step=update`,
+    redirectTo: `${window.location.origin}/reset?step=update`,
   });
-  return { error: error?.message ?? null };
+  return { error: error ? friendlyAuthError(error.message) : null };
 }
 
 export async function updatePassword(password: string) {
   const sb = getSupabase();
-  if (!sb) {
-    await wait(700);
-    return { error: null };
-  }
+  if (!sb) return { error: CONFIG_ERROR };
   const { error } = await sb.auth.updateUser({ password });
-  return { error: error?.message ?? null };
+  return { error: error ? friendlyAuthError(error.message) : null };
 }
 
 export async function signOut() {
@@ -308,8 +323,16 @@ export async function signOut() {
   if (sb) await sb.auth.signOut();
 }
 
-function wait(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
+function friendlyAuthError(message: string) {
+  const m = message.toLowerCase();
+  if (m.includes("invalid login")) return "That email and password don't match.";
+  if (m.includes("already registered") || m.includes("already been registered"))
+    return "An account with this email already exists. Try logging in.";
+  if (m.includes("rate limit") || m.includes("too many"))
+    return "Too many attempts — please wait a moment and try again.";
+  if (m.includes("email not confirmed")) return "Confirm your email first — check your inbox.";
+  if (m.includes("weak password")) return "Choose a stronger password.";
+  return message;
 }
 
 /* ------------------------------------------------------------------ */
@@ -317,128 +340,196 @@ function wait(ms: number) {
 /* ------------------------------------------------------------------ */
 export async function listWorkspaces(): Promise<Workspace[]> {
   const sb = getSupabase();
-  if (!sb) return WORKSPACES;
+  if (!sb) return [];
   const { data, error } = await sb
     .from("workspaces")
     .select("*, workspace_members(count)")
     .order("created_at", { ascending: true });
-  if (error) throw error;
+  if (error) throw new Error(readableError(error.message));
   return (data ?? []).map(mapWorkspace);
 }
 
 export async function getWorkspace(id: string): Promise<Workspace | null> {
   const sb = getSupabase();
-  if (!sb) return WORKSPACES.find((w) => w.id === id) ?? WORKSPACES[0];
-  const { data, error } = await sb.from("workspaces").select("*, workspace_members(count)").eq("id", id).maybeSingle();
-  if (error) throw error;
+  if (!sb) return null;
+  const { data, error } = await sb
+    .from("workspaces")
+    .select("*, workspace_members(count)")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw new Error(readableError(error.message));
   return data ? mapWorkspace(data) : null;
 }
 
-export async function createWorkspace(name: string): Promise<{ workspace?: Workspace; error?: string }> {
-  const sb = getSupabase();
-  if (!sb) return { error: "demo" };
+export async function createWorkspace(name: string): Promise<Workspace> {
+  const sb = requireClient();
   const {
     data: { session },
   } = await sb.auth.getSession();
-  if (!session) return { error: "Not signed in" };
+  if (!session) throw new Error("Your session expired — sign in again.");
   const { data, error } = await sb
     .from("workspaces")
     .insert({ name, owner_id: session.user.id, is_client: true })
-    .select()
+    .select("*, workspace_members(count)")
     .single();
-  if (error) return { error: readableError(error.message) };
-  if (data) {
-    await sb.from("workspace_members").insert({ workspace_id: data.id, user_id: session.user.id, role: "owner" });
-  }
-  return { workspace: data ? mapWorkspace(data) : undefined };
+  if (error) throw new Error(readableError(error.message));
+  await sb
+    .from("workspace_members")
+    .insert({ workspace_id: data.id, user_id: session.user.id, role: "owner" });
+  return mapWorkspace(data);
 }
 
-export async function getDefaultWorkspace(): Promise<Workspace> {
-  const ws = await listWorkspaces();
+export async function getDefaultWorkspace(): Promise<Workspace | null> {
+  const all = await listWorkspaces();
+  if (!all.length) return null;
   const selected = getSelectedWorkspaceId();
-  return ws.find((w) => w.id === selected) ?? ws[0];
+  return all.find((w) => w.id === selected) ?? all[0];
 }
 
 /* ------------------------------------------------------------------ */
 /* Overview                                                            */
 /* ------------------------------------------------------------------ */
 export type OverviewData = {
-  kpi: { leadsFound: number; leadsSaved: number; searches: number; exported: number; remaining: number; allowance: number };
+  kpi: {
+    leadsFound: number;
+    leadsSaved: number;
+    searches: number;
+    exported: number;
+    remaining: number;
+    allowance: number;
+  };
   searches: SearchRecord[];
   lists: LeadList[];
   activity: ActivityItem[];
 };
 
-export async function getOverview(workspaceId: string): Promise<OverviewData> {
-  const sb = getSupabase();
-  if (!sb) {
-    return {
-      kpi: { leadsFound: KPI.leadsFound, leadsSaved: KPI.leadsSaved, searches: KPI.searches, exported: KPI.exported, remaining: KPI.remaining, allowance: KPI.allowance },
-      searches: SEARCH_HISTORY.slice(0, 5),
-      lists: LISTS.slice(0, 4),
-      activity: ACTIVITY.slice(0, 5),
-    };
-  }
-  const period = new Date();
-  period.setDate(1);
-  const [searches, lists, usage, activity] = await Promise.all([
+function periodStart() {
+  const d = new Date();
+  d.setDate(1);
+  return d.toISOString().slice(0, 10);
+}
+
+export async function getOverview(workspaceId: string, planId: string): Promise<OverviewData> {
+  const sb = requireClient();
+  const allowance = planFromId(planId).leadAllowance;
+
+  const [searches, lists, usage, activity, leadCount] = await Promise.all([
     sb.from("lead_searches").select("*").eq("workspace_id", workspaceId).order("created_at", { ascending: false }).limit(5),
     sb.from("lead_lists").select("*, lead_list_members(count)").eq("workspace_id", workspaceId).order("updated_at", { ascending: false }).limit(4),
-    sb.from("usage_counters").select("*").eq("workspace_id", workspaceId).eq("period_start", period.toISOString().slice(0, 10)).maybeSingle(),
+    sb.from("usage_counters").select("*").eq("workspace_id", workspaceId).eq("period_start", periodStart()).maybeSingle(),
     sb.from("activity_logs").select("*").eq("workspace_id", workspaceId).order("created_at", { ascending: false }).limit(5),
+    sb.from("leads").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId),
   ]);
-  const leadsFound = (searches.data ?? []).reduce((a: number, s: any) => a + (s.result_count ?? 0), 0);
-  const listsData = (lists.data ?? []).map((l: any) => mapList({ ...l, lead_count: l.lead_list_members?.[0]?.count ?? 0 }));
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const listRows = (lists.data ?? []).map((l: any) =>
+    mapList({ ...l, lead_count: l.lead_list_members?.[0]?.count ?? 0 })
+  );
+  const used = usage.data?.leads_used ?? 0;
+
   return {
     kpi: {
-      leadsFound,
-      leadsSaved: listsData.reduce((a: number, l: LeadList) => a + l.lead_count, 0),
-      searches: usage.data?.searches ?? (searches.data ?? []).length,
+      leadsFound: leadCount.count ?? 0,
+      leadsSaved: listRows.reduce((a, l) => a + l.lead_count, 0),
+      searches: usage.data?.searches ?? 0,
       exported: usage.data?.exports ?? 0,
-      remaining: Math.max(0, 50000 - (usage.data?.leads_used ?? 0)),
-      allowance: 50000,
+      remaining: Math.max(0, allowance - used),
+      allowance,
     },
     searches: (searches.data ?? []).map(mapSearch),
-    lists: listsData,
-    activity: (activity.data ?? []).map((a: any) => ({ id: String(a.id), kind: a.kind, text: a.text, at: a.created_at })),
+    lists: listRows,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    activity: (activity.data ?? []).map((a: any) => ({
+      id: String(a.id),
+      kind: a.kind,
+      text: a.text,
+      at: a.created_at,
+    })),
   };
 }
 
 /* ------------------------------------------------------------------ */
-/* Find — run search (Edge Function does everything provider-side)     */
+/* Search — structured filters, explicitly triggered by the user       */
 /* ------------------------------------------------------------------ */
+export type SearchFilters = {
+  category: string;
+  location: string;
+  quantity: number;
+  minRating: string;
+  priceLevel: string;
+  radius: string;
+  sort: string;
+  requireWebsite: boolean;
+  requirePhone: boolean;
+  requireEmail: boolean;
+  openNow: boolean;
+};
+
+export const EMPTY_FILTERS: SearchFilters = {
+  category: "",
+  location: "",
+  quantity: 50,
+  minRating: "",
+  priceLevel: "",
+  radius: "",
+  sort: "relevance",
+  requireWebsite: false,
+  requirePhone: false,
+  requireEmail: false,
+  openNow: false,
+};
+
 export type SearchRunResult = {
   searchId: string;
   leads: Lead[];
   stats: {
     requested: number;
-    found: number;
-    dedupeRemoved: number;
     savedCount: number;
-    remaining: number;
-    interpretation: Record<string, unknown> | null;
+    dedupeRemoved: number;
     insights: string[];
-    suggestions: string[];
   };
 };
 
-export async function runSearch(workspaceId: string, query: string): Promise<{ result?: SearchRunResult; error?: string }> {
+export async function runSearch(
+  workspaceId: string,
+  filters: SearchFilters
+): Promise<{ result?: SearchRunResult; error?: string }> {
   const sb = getSupabase();
-  if (!sb) return { error: "demo" };
+  if (!sb) return { error: CONFIG_ERROR };
   const { data, error } = await sb.functions.invoke("search-run", {
-    body: { workspaceId, query },
+    body: { workspaceId, filters },
   });
-  if (error) {
-    return { error: readableFunctionError(error) };
-  }
+  if (error) return { error: await readFunctionError(error) };
   if (data?.error) return { error: data.error };
   return {
     result: {
-      ...(data as SearchRunResult),
+      searchId: data.searchId,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      leads: ((data as any).leads ?? []).map(mapLead),
+      leads: (data.leads ?? []).map((l: any) => mapLead(l)),
+      stats: data.stats,
     },
   };
+}
+
+/** Interpretation only — never consumes lead quota, never runs a search. */
+export type Interpretation = {
+  filters: Partial<SearchFilters>;
+  summary: string;
+  notes: string[];
+};
+
+export async function interpretRequest(
+  workspaceId: string,
+  request: string
+): Promise<{ result?: Interpretation; error?: string }> {
+  const sb = getSupabase();
+  if (!sb) return { error: CONFIG_ERROR };
+  const { data, error } = await sb.functions.invoke("ai-interpret", {
+    body: { workspaceId, request },
+  });
+  if (error) return { error: await readFunctionError(error) };
+  if (data?.error) return { error: data.error };
+  return { result: data as Interpretation };
 }
 
 /* ------------------------------------------------------------------ */
@@ -456,44 +547,57 @@ export type LeadFilters = {
   pageSize?: number;
 };
 
-export async function listLeads(workspaceId: string, f: LeadFilters): Promise<{ rows: Lead[]; total: number }> {
+export async function listLeads(
+  workspaceId: string,
+  f: LeadFilters
+): Promise<{ rows: Lead[]; total: number }> {
   const sb = getSupabase();
-  if (!sb) {
-    const rows = LEADS.filter((l) => {
-      if (f.status && l.status !== f.status) return false;
-      if (f.city && l.city !== f.city) return false;
-      if (f.category && l.category !== f.category) return false;
-      if (f.minRating && l.rating < f.minRating) return false;
-      if (f.withWebsite && !l.website) return false;
-      if (f.withEmail && !l.email) return false;
-      if (f.search && !`${l.name} ${l.category} ${l.city}`.toLowerCase().includes(f.search.toLowerCase())) return false;
-      return true;
-    });
-    return { rows, total: rows.length };
-  }
-  const from = ((f.page ?? 1) - 1) * (f.pageSize ?? 12);
-  const to = from + (f.pageSize ?? 12) - 1;
+  if (!sb) return { rows: [], total: 0 };
+  const pageSize = f.pageSize ?? 25;
+  const from = ((f.page ?? 1) - 1) * pageSize;
+
   let q = sb
     .from("leads")
     .select(LEAD_SELECT, { count: "exact" })
     .eq("workspace_id", workspaceId)
     .order("updated_at", { ascending: false })
-    .range(from, to);
+    .range(from, from + pageSize - 1);
+
   if (f.status) q = q.eq("status", f.status);
   if (f.city) q = q.eq("city", f.city);
   if (f.category) q = q.eq("category", f.category);
   if (f.minRating) q = q.gte("rating", f.minRating);
   if (f.withWebsite) q = q.not("website", "is", null);
   if (f.withEmail) q = q.not("email", "is", null);
-  if (f.search) q = q.ilike("name", `%${f.search}%`);
+  if (f.search) q = q.or(`name.ilike.%${f.search}%,city.ilike.%${f.search}%,category.ilike.%${f.search}%`);
+
   const { data, count, error } = await q;
-  if (error) throw error;
+  if (error) throw new Error(readableError(error.message));
   return { rows: (data ?? []).map(mapLead), total: count ?? 0 };
+}
+
+/** Distinct facet values so filter dropdowns reflect real data only. */
+export async function getLeadFacets(workspaceId: string) {
+  const sb = getSupabase();
+  if (!sb) return { cities: [] as string[], categories: [] as string[] };
+  const { data } = await sb
+    .from("leads")
+    .select("city, category")
+    .eq("workspace_id", workspaceId)
+    .limit(1000);
+  const cities = new Set<string>();
+  const categories = new Set<string>();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (data ?? []).forEach((r: any) => {
+    if (r.city) cities.add(r.city);
+    if (r.category) categories.add(r.category);
+  });
+  return { cities: [...cities].sort(), categories: [...categories].sort() };
 }
 
 export async function getLead(id: string, workspaceId?: string): Promise<Lead | null> {
   const sb = getSupabase();
-  if (!sb) return LEADS.find((l) => l.id === id) ?? LEADS[0];
+  if (!sb) return null;
   let q = sb.from("leads").select(LEAD_SELECT).eq("id", id);
   if (workspaceId) q = q.eq("workspace_id", workspaceId);
   const { data, error } = await q.maybeSingle();
@@ -502,37 +606,39 @@ export async function getLead(id: string, workspaceId?: string): Promise<Lead | 
 }
 
 export async function updateLeadStatus(id: string, status: LeadStatus) {
-  const sb = getSupabase();
-  if (!sb) return;
-  await sb.from("leads").update({ status }).eq("id", id);
+  const sb = requireClient();
+  const { error } = await sb.from("leads").update({ status }).eq("id", id);
+  if (error) throw new Error(readableError(error.message));
 }
 
 export async function updateLeadTags(id: string, tags: string[]) {
-  const sb = getSupabase();
-  if (!sb) return;
-  await sb.from("leads").update({ tags }).eq("id", id);
+  const sb = requireClient();
+  const { error } = await sb.from("leads").update({ tags }).eq("id", id);
+  if (error) throw new Error(readableError(error.message));
 }
 
-export async function addLeadNote(leadId: string, body: string): Promise<Note | null> {
-  const sb = getSupabase();
-  if (!sb) return { id: `note-${Date.now()}`, author: CURRENT_USER.name, body, at: new Date().toISOString() };
+export async function addLeadNote(leadId: string, body: string): Promise<Note> {
+  const sb = requireClient();
   const user = await getCurrentUser();
-  if (!user) return null;
-  const { data, error } = await sb.from("lead_notes").insert({ lead_id: leadId, author_id: user.id, body }).select().single();
-  if (error) return null;
+  if (!user) throw new Error("Your session expired — sign in again.");
+  const { data, error } = await sb
+    .from("lead_notes")
+    .insert({ lead_id: leadId, author_id: user.id, body })
+    .select()
+    .single();
+  if (error) throw new Error(readableError(error.message));
   return { id: data.id, author: user.name, body: data.body, at: data.created_at };
 }
 
 export async function deleteLeadNote(noteId: string) {
-  const sb = getSupabase();
-  if (!sb) return;
+  const sb = requireClient();
   await sb.from("lead_notes").delete().eq("id", noteId);
 }
 
 export async function deleteLeads(ids: string[]) {
-  const sb = getSupabase();
-  if (!sb) return;
-  await sb.from("leads").delete().in("id", ids);
+  const sb = requireClient();
+  const { error } = await sb.from("leads").delete().in("id", ids);
+  if (error) throw new Error(readableError(error.message));
 }
 
 /* ------------------------------------------------------------------ */
@@ -540,65 +646,77 @@ export async function deleteLeads(ids: string[]) {
 /* ------------------------------------------------------------------ */
 export async function getLists(workspaceId: string): Promise<LeadList[]> {
   const sb = getSupabase();
-  if (!sb) return LISTS;
+  if (!sb) return [];
   const { data, error } = await sb
     .from("lead_lists")
     .select("*, lead_list_members(count)")
     .eq("workspace_id", workspaceId)
     .order("updated_at", { ascending: false });
-  if (error) throw error;
-  return (data ?? []).map((l: any) => mapList({ ...l, lead_count: l.lead_list_members?.[0]?.count ?? 0 }));
+  if (error) throw new Error(readableError(error.message));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (data ?? []).map((l: any) =>
+    mapList({ ...l, lead_count: l.lead_list_members?.[0]?.count ?? 0 })
+  );
+}
+
+export async function getList(id: string): Promise<LeadList | null> {
+  const sb = getSupabase();
+  if (!sb) return null;
+  const { data, error } = await sb
+    .from("lead_lists")
+    .select("*, lead_list_members(count)")
+    .eq("id", id)
+    .maybeSingle();
+  if (error || !data) return null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return mapList({ ...(data as any), lead_count: (data as any).lead_list_members?.[0]?.count ?? 0 });
 }
 
 export async function createList(workspaceId: string, name: string, description: string) {
-  const sb = getSupabase();
-  if (!sb) return { error: "demo" };
+  const sb = requireClient();
   const user = await getCurrentUser();
-  if (!user) return { error: "Not signed in" };
+  if (!user) throw new Error("Your session expired — sign in again.");
   const { data, error } = await sb
     .from("lead_lists")
     .insert({ workspace_id: workspaceId, owner_id: user.id, name, description })
     .select()
     .single();
-  if (error) return { error: readableError(error.message) };
-  return { list: mapList(data) };
+  if (error) throw new Error(readableError(error.message));
+  return mapList({ ...data, lead_count: 0 });
 }
 
 export async function deleteList(id: string) {
-  const sb = getSupabase();
-  if (!sb) return;
-  await sb.from("lead_lists").delete().eq("id", id);
+  const sb = requireClient();
+  const { error } = await sb.from("lead_lists").delete().eq("id", id);
+  if (error) throw new Error(readableError(error.message));
 }
 
-export async function listMembers(listId: string, workspaceId: string): Promise<Lead[]> {
+export async function listMembers(listId: string): Promise<Lead[]> {
   const sb = getSupabase();
-  if (!sb) {
-    const list = LISTS.find((l) => l.id === listId);
-    return list ? LEADS.filter((l) => l.list_ids.includes(listId)) : [];
-  }
+  if (!sb) return [];
   const { data, error } = await sb
     .from("lead_list_members")
     .select(`leads(${LEAD_SELECT})`)
     .eq("list_id", listId);
-  if (error) throw error;
+  if (error) throw new Error(readableError(error.message));
   return (data ?? [])
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     .map((m: any) => m.leads)
     .filter(Boolean)
     .map(mapLead);
-  void workspaceId;
 }
 
 export async function addToList(listId: string, leadIds: string[]) {
-  const sb = getSupabase();
-  if (!sb) return;
+  const sb = requireClient();
   const rows = leadIds.map((id) => ({ list_id: listId, lead_id: id }));
-  await sb.from("lead_list_members").upsert(rows, { onConflict: "list_id,lead_id" });
+  const { error } = await sb
+    .from("lead_list_members")
+    .upsert(rows, { onConflict: "list_id,lead_id" });
+  if (error) throw new Error(readableError(error.message));
 }
 
 export async function removeFromList(listId: string, leadIds: string[]) {
-  const sb = getSupabase();
-  if (!sb) return;
+  const sb = requireClient();
   await sb.from("lead_list_members").delete().eq("list_id", listId).in("lead_id", leadIds);
 }
 
@@ -607,34 +725,21 @@ export async function removeFromList(listId: string, leadIds: string[]) {
 /* ------------------------------------------------------------------ */
 export async function getSearches(workspaceId: string): Promise<SearchRecord[]> {
   const sb = getSupabase();
-  if (!sb) return SEARCH_HISTORY;
+  if (!sb) return [];
   const { data, error } = await sb
     .from("lead_searches")
     .select("*")
     .eq("workspace_id", workspaceId)
     .order("created_at", { ascending: false })
-    .limit(50);
-  if (error) throw error;
+    .limit(100);
+  if (error) throw new Error(readableError(error.message));
   return (data ?? []).map(mapSearch);
 }
 
 export async function deleteSearch(id: string) {
-  const sb = getSupabase();
-  if (!sb) return;
-  await sb.from("lead_searches").delete().eq("id", id);
-}
-
-export async function getSearchResults(searchId: string): Promise<Lead[]> {
-  const sb = getSupabase();
-  if (!sb) return LEADS.slice(0, 24);
-  const { data, error } = await sb
-    .from("leads")
-    .select(LEAD_SELECT)
-    .eq("search_id", searchId)
-    .order("created_at", { ascending: false })
-    .limit(500);
-  if (error) throw error;
-  return (data ?? []).map(mapLead);
+  const sb = requireClient();
+  const { error } = await sb.from("lead_searches").delete().eq("id", id);
+  if (error) throw new Error(readableError(error.message));
 }
 
 /* ------------------------------------------------------------------ */
@@ -642,39 +747,44 @@ export async function getSearchResults(searchId: string): Promise<Lead[]> {
 /* ------------------------------------------------------------------ */
 export async function getExports(workspaceId: string): Promise<ExportRecord[]> {
   const sb = getSupabase();
-  if (!sb) return EXPORTS;
+  if (!sb) return [];
   const { data, error } = await sb
     .from("exports")
     .select("*")
     .eq("workspace_id", workspaceId)
     .order("created_at", { ascending: false })
     .limit(50);
-  if (error) throw error;
+  if (error) throw new Error(readableError(error.message));
   return (data ?? []).map(mapExport);
 }
 
-export async function runExport(workspaceId: string, leadIds: string[], source: string, fileName?: string) {
+export async function runExport(opts: {
+  workspaceId: string;
+  leadIds?: string[];
+  listId?: string;
+  searchId?: string;
+  source: string;
+  fileName?: string;
+}) {
   const sb = getSupabase();
-  if (!sb) return { error: "demo" };
-  const { data, error } = await sb.functions.invoke("export-run", {
-    body: { workspaceId, leadIds, source, fileName },
-  });
-  if (error) return { error: readableFunctionError(error) };
+  if (!sb) return { error: CONFIG_ERROR };
+  const { data, error } = await sb.functions.invoke("export-run", { body: opts });
+  if (error) return { error: await readFunctionError(error) };
   if (data?.error) return { error: data.error };
   return { export: data as { id: string; file_name: string; lead_count: number; status: string } };
 }
 
-export async function downloadExport(id: string): Promise<{ csv?: string; fileName?: string; error?: string }> {
+export async function downloadExport(
+  id: string
+): Promise<{ csv?: string; fileName?: string; error?: string }> {
   const sb = getSupabase();
-  if (!sb) {
-    const head = "name,category,city,state,rating,reviews,phone,email,website,status";
-    const body = LEADS.slice(0, 5)
-      .map((l) => [l.name, l.category, l.city, l.state, l.rating, l.reviews, l.phone, l.email ?? "", l.website_domain ?? "", l.status].join(","))
-      .join("\n");
-    return { csv: `${head}\n${body}`, fileName: "demo-export.csv" };
-  }
-  const { data, error } = await sb.from("exports").select("csv, file_name, status").eq("id", id).maybeSingle();
-  if (error || !data) return { error: "Export not found" };
+  if (!sb) return { error: CONFIG_ERROR };
+  const { data, error } = await sb
+    .from("exports")
+    .select("csv, file_name, status")
+    .eq("id", id)
+    .maybeSingle();
+  if (error || !data) return { error: "That export is no longer available." };
   if (data.status !== "completed") return { error: "This export is still processing." };
   return { csv: data.csv ?? "", fileName: data.file_name };
 }
@@ -684,42 +794,79 @@ export async function downloadExport(id: string): Promise<{ csv?: string; fileNa
 /* ------------------------------------------------------------------ */
 export async function getTeam(workspaceId: string): Promise<TeamMember[]> {
   const sb = getSupabase();
-  if (!sb) return TEAM;
-  const { data, error } = await sb
-    .from("workspace_members")
-    .select("*, profiles:user_id(name, avatar_url), auth_email:user_id(email)")
-    .eq("workspace_id", workspaceId);
-  if (error) throw error;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (data ?? []).map((m: any) => ({
-    id: m.user_id,
-    name: m.profiles?.name ?? "Member",
-    email: m.auth_email?.email ?? "—",
-    role: m.role as Role,
-    workspace: "Workspace",
-    status: "active" as const,
-    joined_at: m.created_at,
-    initials: (m.profiles?.name ?? "M").slice(0, 2).toUpperCase(),
-    tint: "bg-stone-100 text-stone-600",
+  if (!sb) return [];
+
+  const [{ data: members, error }, { data: invites }] = await Promise.all([
+    sb
+      .from("workspace_members")
+      .select("user_id, role, created_at, profiles:user_id(name, avatar_url)")
+      .eq("workspace_id", workspaceId),
+    sb
+      .from("workspace_invitations")
+      .select("id, email, role, status, created_at")
+      .eq("workspace_id", workspaceId)
+      .eq("status", "pending"),
+  ]);
+  if (error) throw new Error(readableError(error.message));
+
+  const wsName = (await getWorkspace(workspaceId))?.name ?? "";
+
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  const active: TeamMember[] = (members ?? []).map((m: any) => {
+    const name = m.profiles?.name ?? "Member";
+    return {
+      id: m.user_id,
+      name,
+      email: "",
+      role: m.role as Role,
+      workspace: wsName,
+      status: "active",
+      joined_at: m.created_at,
+      initials: name.split(/\s+/).slice(0, 2).map((p: string) => p[0]?.toUpperCase() ?? "").join(""),
+      tint: tintFor(m.user_id),
+    };
+  });
+
+  const pending: TeamMember[] = (invites ?? []).map((i: any) => ({
+    id: i.id,
+    name: i.email.split("@")[0],
+    email: i.email,
+    role: i.role as Role,
+    workspace: wsName,
+    status: "invited",
+    joined_at: i.created_at,
+    initials: i.email.slice(0, 2).toUpperCase(),
+    tint: tintFor(i.email),
   }));
+  /* eslint-enable @typescript-eslint/no-explicit-any */
+
+  return [...active, ...pending];
 }
 
 export async function inviteMember(workspaceId: string, email: string, role: "admin" | "member") {
   const sb = getSupabase();
-  if (!sb) return { error: "demo" };
+  if (!sb) return { error: CONFIG_ERROR };
   const { data, error } = await sb.functions.invoke("team-invite", {
     body: { workspaceId, email, role },
   });
-  if (error) return { error: readableFunctionError(error) };
+  if (error) return { error: await readFunctionError(error) };
   if (data?.error) return { error: data.error };
   return { ok: true as const };
 }
 
-export async function removeMember(workspaceId: string, userId: string) {
-  const sb = getSupabase();
-  if (!sb) return { error: "demo" };
-  const { error } = await sb.from("workspace_members").delete().eq("workspace_id", workspaceId).eq("user_id", userId);
-  return { error: error?.message };
+export async function removeMember(workspaceId: string, memberId: string, status: string) {
+  const sb = requireClient();
+  if (status === "invited") {
+    const { error } = await sb.from("workspace_invitations").delete().eq("id", memberId);
+    if (error) throw new Error(readableError(error.message));
+    return;
+  }
+  const { error } = await sb
+    .from("workspace_members")
+    .delete()
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", memberId);
+  if (error) throw new Error(readableError(error.message));
 }
 
 /* ------------------------------------------------------------------ */
@@ -732,52 +879,39 @@ export type UsageData = {
   searches: number;
   exports: number;
   aiRuns: number;
+  leadsSaved: number;
   resetDate: string;
-  weekly: number[];
-  weekLabels: string[];
+  monthly: { label: string; value: number }[];
 };
 
-export async function getUsage(workspaceId: string): Promise<UsageData> {
-  const sb = getSupabase();
-  if (!sb) {
-    return {
-      used: KPI.used,
-      allowance: KPI.allowance,
-      remaining: KPI.remaining,
-      searches: KPI.searches,
-      exports: KPI.exported,
-      aiRuns: KPI.aiRuns,
-      resetDate: KPI.resetDate,
-      weekly: WEEKLY_USAGE as unknown as number[],
-      weekLabels: WEEK_LABELS as unknown as string[],
-    };
-  }
-  const period = new Date();
-  period.setDate(1);
-  const { data } = await sb
-    .from("usage_counters")
-    .select("*")
-    .eq("workspace_id", workspaceId)
-    .eq("period_start", period.toISOString().slice(0, 10))
-    .maybeSingle();
-  const used = data?.leads_used ?? 0;
-  // allowance derives from the workspace owner's subscription via plans
-  let allowance = 50;
-  try {
-    const { data: ws } = await sb.from("workspaces").select("plan_id").eq("id", workspaceId).single();
-    const planCaps: Record<string, number> = { free: 50, growth: 5000, agency: 15000, scale: 50000 };
-    allowance = planCaps[ws?.plan_id ?? "free"] ?? 50;
-  } catch { /* free default */ }
+export async function getUsage(workspaceId: string, planId: string): Promise<UsageData> {
+  const sb = requireClient();
+  const allowance = planFromId(planId).leadAllowance;
+
+  const [{ data: current }, { data: history }, savedCount] = await Promise.all([
+    sb.from("usage_counters").select("*").eq("workspace_id", workspaceId).eq("period_start", periodStart()).maybeSingle(),
+    sb.from("usage_counters").select("*").eq("workspace_id", workspaceId).order("period_start", { ascending: true }).limit(12),
+    sb.from("lead_list_members").select("lead_id", { count: "exact", head: true }),
+  ]);
+
+  const used = current?.leads_used ?? 0;
+  const reset = new Date();
+  reset.setMonth(reset.getMonth() + 1, 1);
+
   return {
     used,
     allowance,
     remaining: Math.max(0, allowance - used),
-    searches: data?.searches ?? 0,
-    exports: data?.exports ?? 0,
-    aiRuns: data?.ai_runs ?? 0,
-    resetDate: new Date(period.getFullYear(), period.getMonth() + 1, 1).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
-    weekly: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, used],
-    weekLabels: WEEK_LABELS as unknown as string[],
+    searches: current?.searches ?? 0,
+    exports: current?.exports ?? 0,
+    aiRuns: current?.ai_runs ?? 0,
+    leadsSaved: savedCount.count ?? 0,
+    resetDate: reset.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    monthly: (history ?? []).map((row: any) => ({
+      label: new Date(row.period_start).toLocaleDateString("en-US", { month: "short" }),
+      value: row.leads_used ?? 0,
+    })),
   };
 }
 
@@ -786,21 +920,25 @@ export async function getUsage(workspaceId: string): Promise<UsageData> {
 /* ------------------------------------------------------------------ */
 export async function analyzeLead(leadId: string, workspaceId: string) {
   const sb = getSupabase();
-  if (!sb) return { error: "demo" };
+  if (!sb) return { error: CONFIG_ERROR };
   const { data, error } = await sb.functions.invoke("ai-analyze", {
     body: { leadId, workspaceId },
   });
-  if (error) return { error: readableFunctionError(error) };
+  if (error) return { error: await readFunctionError(error) };
   if (data?.error) return { error: data.error };
-  return {
-    result: data as { summary: string; points: string[]; model: string },
-  };
+  return { result: data as { summary: string; points: string[]; model: string } };
 }
 
-export async function getLeadInsight(leadId: string): Promise<{ summary: string; points: string[] } | null> {
+export async function getLeadInsight(
+  leadId: string
+): Promise<{ summary: string; points: string[] } | null> {
   const sb = getSupabase();
   if (!sb) return null;
-  const { data } = await sb.from("ai_insights").select("summary, points").eq("lead_id", leadId).maybeSingle();
+  const { data } = await sb
+    .from("ai_insights")
+    .select("summary, points")
+    .eq("lead_id", leadId)
+    .maybeSingle();
   return data ?? null;
 }
 
@@ -808,44 +946,40 @@ export async function getLeadInsight(leadId: string): Promise<{ summary: string;
 /* Billing                                                             */
 /* ------------------------------------------------------------------ */
 export type BillingState = {
+  planId: string;
   plan: string;
   status: string;
-  renewalDate: string;
+  renewalDate: string | null;
   invoices: Invoice[];
-  seatInfo: { used: number; limit: number };
+  seats: { used: number; limit: number };
+  paymentMethodLast4: string | null;
 };
 
 export async function getBilling(workspaceId: string): Promise<BillingState> {
-  const sb = getSupabase();
-  if (!sb) {
-    return {
-      plan: PLAN,
-      status: "active",
-      renewalDate: KPI.renewalDate,
-      invoices: (await Promise.resolve()) as unknown as Invoice[],
-      seatInfo: { used: 3, limit: 3 },
-    };
-  }
+  const sb = requireClient();
   const user = await getCurrentUser();
-  const { data: sub } = await sb
-    .from("subscriptions")
-    .select("*")
-    .eq("user_id", user?.id ?? "")
-    .maybeSingle();
-  const { data: invoices } = await sb
-    .from("invoices")
-    .select("*")
-    .eq("user_id", user?.id ?? "")
-    .order("issued_at", { ascending: false })
-    .limit(10);
-  const { data: members } = await sb.from("workspace_members").select("user_id", { count: "exact" }).eq("workspace_id", workspaceId);
-  const planCap: Record<string, number> = { free: 1, growth: 1, agency: 3, scale: 5 };
+  if (!user) throw new Error("Your session expired — sign in again.");
+
+  const [{ data: sub }, { data: invoices }, { count: memberCount }] = await Promise.all([
+    sb.from("subscriptions").select("*").eq("user_id", user.id).maybeSingle(),
+    sb.from("invoices").select("*").eq("user_id", user.id).order("issued_at", { ascending: false }).limit(12),
+    sb.from("workspace_members").select("user_id", { count: "exact", head: true }).eq("workspace_id", workspaceId),
+  ]);
+
+  const planId = sub && ["active", "trialing"].includes(sub.status) ? sub.plan_id : "free";
+
   return {
-    plan: planLabel(sub?.plan_id ?? "free"),
+    planId,
+    plan: planLabel(planId),
     status: sub?.status ?? "active",
     renewalDate: sub?.current_period_end
-      ? new Date(sub.current_period_end).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
-      : "—",
+      ? new Date(sub.current_period_end).toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        })
+      : null,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     invoices: (invoices ?? []).map((i: any) => ({
       id: i.number,
       date: i.issued_at,
@@ -853,26 +987,27 @@ export async function getBilling(workspaceId: string): Promise<BillingState> {
       amount: `$${(i.amount_cents / 100).toFixed(2)}`,
       status: i.status,
     })),
-    seatInfo: { used: members?.length ?? 1, limit: planCap[sub?.plan_id ?? "free"] ?? 1 },
+    seats: { used: memberCount ?? 1, limit: planFromId(planId).maxUsers },
+    paymentMethodLast4: null,
   };
 }
 
 export async function startCheckout(planId: "growth" | "agency" | "scale") {
   const sb = getSupabase();
-  if (!sb) return { error: "demo" };
+  if (!sb) return { error: CONFIG_ERROR };
   const { data, error } = await sb.functions.invoke("billing", {
-    body: { action: "checkout", plan: planId, returnTo: window.location.href },
+    body: { action: "checkout", plan: planId },
   });
-  if (error) return { error: readableFunctionError(error) };
+  if (error) return { error: await readFunctionError(error) };
   if (data?.error) return { error: data.error };
   return { url: data?.url as string };
 }
 
 export async function cancelSubscription() {
   const sb = getSupabase();
-  if (!sb) return { error: "demo" };
+  if (!sb) return { error: CONFIG_ERROR };
   const { data, error } = await sb.functions.invoke("billing", { body: { action: "cancel" } });
-  if (error) return { error: readableFunctionError(error) };
+  if (error) return { error: await readFunctionError(error) };
   if (data?.error) return { error: data.error };
   return { ok: true as const };
 }
@@ -880,28 +1015,38 @@ export async function cancelSubscription() {
 export async function syncBilling() {
   const sb = getSupabase();
   if (!sb) return;
-  await sb.functions.invoke("billing", { body: { action: "sync" } });
+  await sb.functions.invoke("billing", { body: { action: "sync" } }).catch(() => undefined);
 }
 
 /* ------------------------------------------------------------------ */
 /* Error helpers                                                       */
 /* ------------------------------------------------------------------ */
-function readableError(message: string): string {
-  const m = message.toLowerCase();
-  if (m.includes("list_limit")) return "Your plan allows one list. Upgrade for unlimited lists.";
+export function readableError(message: string): string {
+  const m = (message ?? "").toLowerCase();
+  if (m.includes("list_limit")) return "Your plan includes one lead list. Upgrade for unlimited lists.";
   if (m.includes("seat_limit")) return "You've reached your plan's team-seat limit.";
-  if (m.includes("client_workspaces_not_available")) return "Client workspaces are available on Agency and Scale.";
-  if (m.includes("duplicate")) return "That already exists.";
-  return message;
+  if (m.includes("client_workspaces_not_available"))
+    return "Client workspaces are available on Agency and Scale.";
+  if (m.includes("duplicate key")) return "That already exists.";
+  if (m.includes("row-level security") || m.includes("permission"))
+    return "You don't have access to that resource.";
+  if (m.includes("jwt") || m.includes("expired")) return "Your session expired — sign in again.";
+  return message || "Something went wrong.";
 }
 
+/** Edge Functions return structured JSON errors; surface them verbatim. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function readableFunctionError(error: any): string {
-  const msg = String(error?.message ?? error ?? "Something went wrong");
-  if (msg.includes("quota")) return "You've reached your monthly lead limit.";
-  if (msg.includes("FunctionsHttpError")) return "The service could not complete that action. Please try again.";
-  if (msg.includes("401")) return "Your session expired — please sign in again.";
-  return msg;
+async function readFunctionError(error: any): Promise<string> {
+  try {
+    const ctx = error?.context;
+    if (ctx && typeof ctx.json === "function") {
+      const body = await ctx.json();
+      if (body?.error) return String(body.error);
+    }
+  } catch {
+    /* fall through */
+  }
+  const msg = String(error?.message ?? "");
+  if (msg.includes("Failed to fetch")) return "We couldn't reach the server. Check your connection.";
+  return msg || "The service couldn't complete that action.";
 }
-
-export const demoNotice = "Running on demo data — connect Supabase to persist changes.";

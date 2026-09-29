@@ -3,13 +3,14 @@
 Zybble is a production SaaS application for **AI-powered business lead discovery**: describe the businesses you need in plain language, Gemini structures the request, SerpApi collects public business data from Google Maps, Zybble normalizes, deduplicates, and organizes it into exportable lead lists — behind real auth, plan entitlements, team workspaces, and Razorpay-billed subscriptions.
 
 ```
-Browser (Vite + React SPA)
+Browser (Vite + React SPA, clean URLs via BrowserRouter)
    │
    ├── Supabase Auth (email/password, sessions, reset)
    ├── Supabase PostgREST (RLS-guarded reads/writes)
    │
    └── Supabase Edge Functions  ← every secret lives here, never in the bundle
-         ├── search-run      → Gemini interpret → SerpApi → normalize → dedupe → persist
+         ├── search-run      → validated filters → SerpApi → normalize → dedupe → persist
+         ├── ai-interpret    → Gemini fills the search form (never runs a search)
          ├── ai-analyze      → Gemini lead intelligence
          ├── export-run      → server-side CSV generation
          ├── team-invite     → seats + Resend invitations
@@ -19,7 +20,26 @@ Browser (Vite + React SPA)
          Supabase PostgreSQL (RLS, triggers, atomic usage reservation)
 ```
 
-**Demo mode:** with no environment variables the frontend runs entirely on bundled demo data — landing page, dashboard, and every route keep working for previews. Add the two `VITE_` variables and the whole platform comes alive.
+### Routing
+
+The app uses **real paths** — `/login`, `/find`, `/leads/:id` — with no hash fragments
+anywhere. Deep links and refreshes work because `vercel.json` rewrites every path to
+`index.html`. On any other host, add the same SPA fallback rewrite.
+
+### No demo data
+
+There is no mock/demo data source in the application. A newly registered user gets a
+personal workspace and genuinely empty Leads, Lists, Searches, Exports, Usage, and
+Billing views, each with its own empty state. Without the two `VITE_` variables the app
+cannot authenticate and shows a clear "backend not configured" notice rather than
+fabricated records. (The public landing page still contains clearly-labelled
+illustrative product screenshots — those are marketing imagery, not account data.)
+
+### Zybble AI on /find
+
+The manual filter panel is the source of truth. Zybble AI reads a plain-language
+request, shows four interpretation stages, and **populates the filters** — it never
+executes a search. The user reviews the filters and presses **Find leads**.
 
 ---
 
@@ -49,9 +69,10 @@ Create accounts/tools before configuring anything:
 5. Copy the **Project URL** and the **publishable key** → these go into `.env.local` (browser-safe).
 6. **Auth → Providers**: enable **Email**. Recommended settings:
    - *Confirm email*: **ON** for production.
-   - *Password reset redirect URL*: `https://your-domain.com/#/reset?step=update`
    - *Site URL*: `https://your-domain.com`
-   - *Additional redirect URLs*: `https://your-domain.com/#/overview`, `http://localhost:5173/#/overview` (dev).
+   - *Additional redirect URLs* (clean paths — no `#`):
+     `https://your-domain.com/overview`, `https://your-domain.com/reset?step=update`,
+     `http://localhost:5173/overview`, `http://localhost:5173/reset?step=update`
 7. **SQL Editor → New query**: paste the entire contents of [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql) → **Run**.
 8. Verify: **Table Editor** should list `plans, profiles, workspaces, workspace_members, workspace_invitations, subscriptions, payments, invoices, lead_searches, lead_search_jobs, leads, lead_lists, lead_list_members, exports, usage_counters, activity_logs, ai_requests, ai_insights, webhook_events`. Every table shows **RLS Enabled**.
 9. (CLI alternative) `supabase login && supabase link --project-ref <ref> && supabase db push`.
@@ -78,7 +99,7 @@ supabase secrets set \
   RESEND_FROM_EMAIL="Zybble <hello@your-domain.com>" \
   APP_URL="https://your-domain.com"
 
-supabase functions deploy search-run ai-analyze export-run team-invite billing razorpay-webhook
+supabase functions deploy search-run ai-interpret ai-analyze export-run team-invite billing razorpay-webhook
 ```
 
 `razorpay-webhook` is deployed with `verify_jwt = false` (see `supabase/config.toml`) — its HMAC signature **is** the security boundary. All other functions demand the user's JWT.

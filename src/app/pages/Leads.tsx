@@ -1,12 +1,13 @@
 /* ------------------------------------------------------------------ */
-/* Zybble app — Leads database                                         */
+/* Zybble app — Leads database (server-paginated, real data only)      */
 /* ------------------------------------------------------------------ */
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Check,
   ChevronDown,
   Columns3,
   Download,
+  FileSearch,
   Filter,
   Mail,
   Phone,
@@ -15,15 +16,22 @@ import {
 import { cn } from "../../utils/cn";
 import { AppLayout } from "../components/AppLayout";
 import { LeadsTable } from "../components/LeadsTable";
-import { Badge, Btn, Input, PopItem, PopLabel, PopSep, Popover, useToast } from "../components/ui";
-import { LEADS } from "../data/mock";
-import type { Lead } from "../data/types";
+import {
+  Badge,
+  Btn,
+  EmptyState,
+  Input,
+  PopItem,
+  PopLabel,
+  PopSep,
+  Popover,
+  useToast,
+} from "../components/ui";
+import type { Lead, LeadStatus } from "../data/types";
 import { useAppSeo } from "../hooks";
-import { BACKEND_ENABLED, deleteLeads, listLeads } from "../services/api";
-import { useWorkspace } from "../services/hooks";
+import { deleteLeads, getLeadFacets, getLists, listLeads, runExport } from "../services/api";
+import { useWorkspaceContext } from "../services/hooks";
 
-const CITIES = Array.from(new Set(LEADS.map((l) => l.city))).sort();
-const CATEGORIES = Array.from(new Set(LEADS.map((l) => l.category))).sort();
 const COLUMNS = [
   { id: "category", label: "Category" },
   { id: "rating", label: "Rating & reviews" },
@@ -34,12 +42,20 @@ const COLUMNS = [
   { id: "list", label: "List" },
 ];
 
+const PAGE_SIZE = 25;
+
 export function LeadsPage() {
-  useAppSeo("Leads — Zybble", "Your collected business leads, in one structured database.", "/leads");
+  useAppSeo("Leads — Zybble", "Your collected business leads.", "/leads");
   const toast = useToast();
+  const { workspace, loading: ctxLoading } = useWorkspaceContext();
+
+  const [rows, setRows] = useState<Lead[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [leads, setLeads] = useState<Lead[]>(LEADS);
+  const [error, setError] = useState<string | null>(null);
+
   const [query, setQuery] = useState("");
+  const [debounced, setDebounced] = useState("");
   const [city, setCity] = useState("");
   const [category, setCategory] = useState("");
   const [rating, setRating] = useState("");
@@ -47,37 +63,86 @@ export function LeadsPage() {
   const [withWebsite, setWithWebsite] = useState(false);
   const [withEmail, setWithEmail] = useState(false);
   const [visibleCols, setVisibleCols] = useState<string[]>(COLUMNS.map((c) => c.id));
-  const { workspace } = useWorkspace();
 
+  const [facets, setFacets] = useState<{ cities: string[]; categories: string[] }>({
+    cities: [],
+    categories: [],
+  });
+  const [listNames, setListNames] = useState<Record<string, string>>({});
+
+  /* debounce the text search so we don't hammer PostgREST */
   useEffect(() => {
-    const t = window.setTimeout(() => setLoading(false), 520);
+    const t = window.setTimeout(() => setDebounced(query.trim()), 300);
     return () => window.clearTimeout(t);
-  }, []);
+  }, [query]);
+
+  const load = useCallback(() => {
+    if (!workspace) return;
+    setLoading(true);
+    setError(null);
+    listLeads(workspace.id, {
+      search: debounced || undefined,
+      city: city || undefined,
+      category: category || undefined,
+      minRating: rating ? Number(rating) : undefined,
+      status: (status as LeadStatus) || undefined,
+      withWebsite,
+      withEmail,
+      pageSize: 500,
+    })
+      .then((res) => {
+        setRows(res.rows);
+        setTotal(res.total);
+      })
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setLoading(false));
+  }, [workspace, debounced, city, category, rating, status, withWebsite, withEmail]);
 
   useEffect(() => {
-    if (!BACKEND_ENABLED || !workspace) return;
-    setLoading(true);
-    listLeads(workspace.id, { pageSize: 500 })
-      .then((res) => setLeads(res.rows))
-      .catch(() => undefined)
-      .finally(() => setLoading(false));
+    if (!ctxLoading && !workspace) setLoading(false);
+    load();
+  }, [load, ctxLoading, workspace]);
+
+  useEffect(() => {
+    if (!workspace) return;
+    getLeadFacets(workspace.id).then(setFacets).catch(() => undefined);
+    getLists(workspace.id)
+      .then((ls) => setListNames(Object.fromEntries(ls.map((l) => [l.id, l.name]))))
+      .catch(() => undefined);
   }, [workspace]);
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return leads.filter((lead) => {
-      if (q && !`${lead.name} ${lead.category} ${lead.city} ${lead.state} ${lead.email ?? ""}`.toLowerCase().includes(q)) return false;
-      if (city && lead.city !== city) return false;
-      if (category && lead.category !== category) return false;
-      if (rating && lead.rating < Number(rating.replace("+", ""))) return false;
-      if (status && lead.status.toLowerCase() !== status.toLowerCase()) return false;
-      if (withWebsite && !lead.website) return false;
-      if (withEmail && !lead.email) return false;
-      return true;
-    });
-  }, [leads, query, city, category, rating, status, withWebsite, withEmail]);
+  const activeCount =
+    [city, category, rating, status].filter(Boolean).length + (withWebsite ? 1 : 0) + (withEmail ? 1 : 0);
 
-  const activeCount = [city, category, rating, status].filter(Boolean).length + (withWebsite ? 1 : 0) + (withEmail ? 1 : 0);
+  const clearFilters = () => {
+    setCity("");
+    setCategory("");
+    setRating("");
+    setStatus("");
+    setWithWebsite(false);
+    setWithEmail(false);
+  };
+
+  const hasAnyFilter = activeCount > 0 || debounced.length > 0;
+  const isEmptyAccount = !loading && !hasAnyFilter && rows.length === 0;
+
+  const emptyState = useMemo(
+    () =>
+      isEmptyAccount ? (
+        <EmptyState
+          icon={<FileSearch className="size-4" aria-hidden="true" />}
+          title="No leads yet"
+          description="Run your first search and the businesses you discover will be collected here, ready to organize and export."
+          action={
+            <Btn variant="primary" href="/find">
+              <Search className="size-3.5" aria-hidden="true" />
+              Find your first leads
+            </Btn>
+          }
+        />
+      ) : undefined,
+    [isEmptyAccount]
+  );
 
   return (
     <AppLayout
@@ -85,13 +150,28 @@ export function LeadsPage() {
       description="Every business you've collected — search, segment, and work them."
       aside={
         <>
-          <Btn variant="outline" href="#/find">
+          <Btn variant="outline" href="/find">
             <Search className="size-3.5" aria-hidden="true" />
             Find leads
           </Btn>
           <Btn
             variant="primary"
-            onClick={() => toast("Select lead rows to export them", "info")}
+            onClick={async () => {
+              if (!workspace || !rows.length) {
+                toast("There are no leads to export yet.", "info");
+                return;
+              }
+              const res = await runExport({
+                workspaceId: workspace.id,
+                leadIds: rows.map((r) => r.id),
+                source: "Leads",
+              });
+              if (res.error) {
+                toast(res.error, "error");
+                return;
+              }
+              toast("Export ready — find it in Exports");
+            }}
           >
             <Download className="size-3.5" aria-hidden="true" />
             Export
@@ -103,7 +183,10 @@ export function LeadsPage() {
       {/* toolbar */}
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <div className="relative min-w-[200px] flex-1 sm:max-w-xs">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-neutral-300" aria-hidden="true" />
+          <Search
+            className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-neutral-300"
+            aria-hidden="true"
+          />
           <Input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -113,7 +196,6 @@ export function LeadsPage() {
           />
         </div>
 
-        {/* filters popover */}
         <Popover
           width="w-64"
           trigger={(_, toggle) => (
@@ -121,7 +203,9 @@ export function LeadsPage() {
               <Filter className="size-3.5 text-neutral-400" aria-hidden="true" />
               Filters
               {activeCount > 0 ? (
-                <span className="grid size-4 place-items-center rounded-full bg-brand-600 text-[9.5px] font-semibold text-white">{activeCount}</span>
+                <span className="grid size-4 place-items-center rounded-full bg-brand-600 text-[9.5px] font-semibold text-white">
+                  {activeCount}
+                </span>
               ) : (
                 <ChevronDown className="size-3 text-neutral-400" aria-hidden="true" />
               )}
@@ -139,7 +223,7 @@ export function LeadsPage() {
                 aria-label="Filter by city"
               >
                 <option value="">All cities</option>
-                {CITIES.map((c) => (
+                {facets.cities.map((c) => (
                   <option key={c}>{c}</option>
                 ))}
               </select>
@@ -153,7 +237,7 @@ export function LeadsPage() {
                 aria-label="Filter by category"
               >
                 <option value="">All categories</option>
-                {CATEGORIES.map((c) => (
+                {facets.categories.map((c) => (
                   <option key={c}>{c}</option>
                 ))}
               </select>
@@ -167,9 +251,9 @@ export function LeadsPage() {
                 aria-label="Filter by minimum rating"
               >
                 <option value="">Any</option>
-                <option>3.5+</option>
-                <option>4.0+</option>
-                <option>4.5+</option>
+                <option value="3.5">3.5+</option>
+                <option value="4">4.0+</option>
+                <option value="4.5">4.5+</option>
               </select>
             </div>
             <div>
@@ -181,9 +265,9 @@ export function LeadsPage() {
                 aria-label="Filter by status"
               >
                 <option value="">Any</option>
-                <option>New</option>
-                <option>Enriched</option>
-                <option>Contacted</option>
+                <option value="new">New</option>
+                <option value="enriched">Enriched</option>
+                <option value="contacted">Contacted</option>
               </select>
             </div>
           </div>
@@ -199,7 +283,12 @@ export function LeadsPage() {
                 onClick={() => t.set(!t.state)}
                 className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs text-ink-soft transition-colors hover:bg-black/[0.045]"
               >
-                <span className={cn("grid size-3.5 place-items-center rounded border", t.state ? "border-brand-600 bg-brand-600 text-white" : "border-black/[0.15] text-transparent")}>
+                <span
+                  className={cn(
+                    "grid size-3.5 place-items-center rounded border",
+                    t.state ? "border-brand-600 bg-brand-600 text-white" : "border-black/[0.15] text-transparent"
+                  )}
+                >
                   <Check className="size-2.5" strokeWidth={3} aria-hidden="true" />
                 </span>
                 {t.label}
@@ -209,24 +298,13 @@ export function LeadsPage() {
           {activeCount > 0 ? (
             <>
               <PopSep />
-              <PopItem
-                danger
-                onClick={() => {
-                  setCity("");
-                  setCategory("");
-                  setRating("");
-                  setStatus("");
-                  setWithWebsite(false);
-                  setWithEmail(false);
-                }}
-              >
+              <PopItem danger onClick={clearFilters}>
                 Clear all filters
               </PopItem>
             </>
           ) : null}
         </Popover>
 
-        {/* columns popover */}
         <Popover
           align="end"
           width="w-48"
@@ -247,7 +325,12 @@ export function LeadsPage() {
                 onClick={() => setVisibleCols((v) => (on ? v.filter((x) => x !== col.id) : [...v, col.id]))}
                 className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs text-ink-soft transition-colors hover:bg-black/[0.045]"
               >
-                <span className={cn("grid size-3.5 place-items-center rounded border", on ? "border-brand-600 bg-brand-600 text-white" : "border-black/[0.15] text-transparent")}>
+                <span
+                  className={cn(
+                    "grid size-3.5 place-items-center rounded border",
+                    on ? "border-brand-600 bg-brand-600 text-white" : "border-black/[0.15] text-transparent"
+                  )}
+                >
                   <Check className="size-2.5" strokeWidth={3} aria-hidden="true" />
                 </span>
                 {col.label}
@@ -256,18 +339,41 @@ export function LeadsPage() {
           })}
         </Popover>
 
-        {activeCount > 0 ? <Badge tone="green">{activeCount} filter{activeCount === 1 ? "" : "s"}</Badge> : null}
-        <span className="ml-auto text-[11px] text-ink-mute">{filtered.length.toLocaleString()} of {leads.length.toLocaleString()}</span>
+        {activeCount > 0 ? (
+          <Badge tone="green">
+            {activeCount} filter{activeCount === 1 ? "" : "s"}
+          </Badge>
+        ) : null}
+        {!loading ? (
+          <span className="ml-auto text-[11px] text-ink-mute">
+            {rows.length.toLocaleString()}
+            {total > rows.length ? ` of ${total.toLocaleString()}` : ""} leads
+          </span>
+        ) : null}
       </div>
 
       <LeadsTable
-        leads={filtered}
-        loading={loading}
-        pageSize={12}
-        onBulk={(action, ids) => {
+        leads={rows}
+        loading={loading || ctxLoading}
+        error={error}
+        onRetry={load}
+        pageSize={PAGE_SIZE}
+        listNames={listNames}
+        noLists={!visibleCols.includes("list")}
+        emptyState={emptyState}
+        onBulk={async (action, ids) => {
+          if (!workspace) return;
           if (action === "delete") {
-            setLeads((l) => l.filter((x) => !ids.includes(x.id)));
-            if (BACKEND_ENABLED) deleteLeads(ids);
+            try {
+              await deleteLeads(ids);
+              setRows((r) => r.filter((x) => !ids.includes(x.id)));
+            } catch (e) {
+              toast((e as Error).message, "error");
+            }
+          }
+          if (action === "export") {
+            const res = await runExport({ workspaceId: workspace.id, leadIds: ids, source: "Selection" });
+            if (res.error) toast(res.error, "error");
           }
         }}
       />

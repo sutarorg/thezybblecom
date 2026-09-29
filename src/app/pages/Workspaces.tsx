@@ -1,14 +1,8 @@
 /* ------------------------------------------------------------------ */
-/* Zybble app — Workspaces (list)                                      */
+/* Zybble app — Workspaces                                             */
 /* ------------------------------------------------------------------ */
-import { useEffect, useState, type FormEvent } from "react";
-import {
-  ArrowUpRight,
-  Building2,
-  FolderPlus,
-  MoreHorizontal,
-  Users,
-} from "lucide-react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { ArrowUpRight, Building2, FolderPlus, Lock, Users } from "lucide-react";
 import { cn } from "../../utils/cn";
 import { AppLayout } from "../components/AppLayout";
 import {
@@ -19,91 +13,110 @@ import {
   DialogHeader,
   EmptyState,
   FieldLabel,
-  IconBtn,
   Input,
-  PopItem,
-  PopSep,
-  Popover,
   formatDate,
   useToast,
 } from "../components/ui";
-import { WORKSPACES } from "../data/mock";
+import { planFromId } from "../data/plans";
 import type { Workspace } from "../data/types";
 import { useAppSeo } from "../hooks";
-import { BACKEND_ENABLED, createWorkspace, listWorkspaces } from "../services/api";
-import { useWorkspace } from "../services/hooks";
+import { createWorkspace, listWorkspaces } from "../services/api";
+import { useWorkspaceContext } from "../services/hooks";
 
 export function WorkspacesPage() {
   useAppSeo("Workspaces — Zybble", "Separate client spaces with their own usage and lists.", "/workspaces");
   const toast = useToast();
+  const { planId, loading: ctxLoading } = useWorkspaceContext();
+  const plan = planFromId(planId);
+
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [loading, setLoading] = useState(true);
-  const [workspaces, setWorkspaces] = useState<Workspace[]>(WORKSPACES);
+  const [error, setError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState("");
+  const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    const t = window.setTimeout(() => setLoading(false), 420);
-    return () => window.clearTimeout(t);
-  }, []);
-
-  const { workspace: _sel } = useWorkspace();
-  useEffect(() => {
-    if (!BACKEND_ENABLED || !_sel) return;
+  const load = useCallback(() => {
     setLoading(true);
+    setError(null);
     listWorkspaces()
       .then(setWorkspaces)
-      .catch(() => undefined)
+      .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
-  }, [_sel]);
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   const onCreate = async (e: FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
-    if (BACKEND_ENABLED) {
-      const { workspace: created, error } = await createWorkspace(name.trim());
-      if (error && error !== "demo") {
-        toast(error, "error");
-        return;
-      }
-      if (created) {
-        setWorkspaces((w) => [...w, created]);
-        setName("");
-        setCreateOpen(false);
-        toast(`Workspace “${created.name}” created`);
-        return;
-      }
+    setSaving(true);
+    try {
+      const created = await createWorkspace(name.trim());
+      setWorkspaces((w) => [...w, created]);
+      setName("");
+      setCreateOpen(false);
+      toast(`Workspace “${created.name}” created`);
+    } catch (err) {
+      toast((err as Error).message, "error");
+    } finally {
+      setSaving(false);
     }
-    const next: Workspace = {
-      id: `ws-${Date.now()}`,
-      name: name.trim(),
-      owner: "Avery Chen",
-      plan: "Agency workspace",
-      members: 1,
-      leads_used: 0,
-      leads_limit: 5000,
-      searches: 0,
-      lists: 0,
-      created_at: new Date().toISOString(),
-    };
-    setWorkspaces((w) => [...w, next]);
-    setName("");
-    setCreateOpen(false);
-    toast(`Workspace “${next.name}” created`);
   };
+
+  const busy = loading || ctxLoading;
 
   return (
     <AppLayout
       title="Workspaces"
       description="Separate environments for clients and teams — their own searches, lists, and usage."
       aside={
-        <Btn variant="primary" onClick={() => setCreateOpen(true)}>
+        <Btn
+          variant="primary"
+          onClick={() => {
+            if (!plan.clientWorkspaces) {
+              toast("Client workspaces are available on Agency and Scale.", "error");
+              return;
+            }
+            setCreateOpen(true);
+          }}
+        >
           <FolderPlus className="size-3.5" aria-hidden="true" />
           Create workspace
         </Btn>
       }
       wide
     >
-      {loading ? (
+      {!plan.clientWorkspaces && !busy ? (
+        <Card className="mb-3 flex flex-wrap items-center gap-3 px-4 py-3">
+          <span className="grid size-8 place-items-center rounded-md bg-neutral-100 text-neutral-400">
+            <Lock className="size-4" aria-hidden="true" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium text-ink">Client workspaces are an Agency feature</p>
+            <p className="text-[11px] leading-4.5 text-ink-mute">
+              Keep each client's searches, lists, and exports separate — included on Agency and Scale.
+            </p>
+          </div>
+          <Btn variant="outline" size="sm" href="/billing">
+            View plans
+          </Btn>
+        </Card>
+      ) : null}
+
+      {error ? (
+        <Card className="mb-3 p-4">
+          <p className="text-[13px] font-medium text-ink">We couldn't load your workspaces</p>
+          <p className="mt-0.5 text-xs leading-5 text-ink-mute">{error}</p>
+          <Btn variant="outline" size="sm" className="mt-3" onClick={load}>
+            Try again
+          </Btn>
+        </Card>
+      ) : null}
+
+      {busy ? (
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3" aria-hidden="true">
           {Array.from({ length: 3 }).map((_, i) => (
             <Card key={i} className="p-4">
@@ -125,20 +138,26 @@ export function WorkspacesPage() {
           title="No workspaces yet"
           description="Workspaces keep each client's searches, lists, and exports fully separate."
           action={
-            <Btn variant="primary" onClick={() => setCreateOpen(true)}>
-              <FolderPlus className="size-3.5" aria-hidden="true" />
-              Create workspace
-            </Btn>
+            plan.clientWorkspaces ? (
+              <Btn variant="primary" onClick={() => setCreateOpen(true)}>
+                <FolderPlus className="size-3.5" aria-hidden="true" />
+                Create workspace
+              </Btn>
+            ) : (
+              <Btn variant="outline" href="/billing">
+                View plans
+              </Btn>
+            )
           }
         />
       ) : (
         <ul className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {workspaces.map((ws) => {
-            const pct = Math.min(100, Math.round((ws.leads_used / ws.leads_limit) * 100));
+            const pct = ws.leads_limit > 0 ? Math.min(100, Math.round((ws.leads_used / ws.leads_limit) * 100)) : 0;
             return (
               <li key={ws.id} className="group">
-                <a href={`#/workspaces/${ws.id}`}>
-                  <Card className="h-full p-4 transition-all duration-200 hover:border-black/[0.14] hover:-translate-y-0.5">
+                <a href={`/workspaces/${ws.id}`}>
+                  <Card className="h-full p-4 transition-all duration-200 hover:-translate-y-0.5 hover:border-black/[0.14]">
                     <div className="flex items-start justify-between gap-2">
                       <span className="flex min-w-0 items-center gap-2.5">
                         <span className="grid size-9 shrink-0 place-items-center rounded-md bg-neutral-100 text-[11px] font-bold text-ink-soft">
@@ -150,35 +169,14 @@ export function WorkspacesPage() {
                           </span>
                           <span className="mt-0.5 flex items-center gap-1 text-[11px] text-ink-mute">
                             <Users className="size-3" aria-hidden="true" />
-                            {ws.members} members · owned by {ws.owner}
+                            {ws.members} {ws.members === 1 ? "member" : "members"}
                           </span>
                         </span>
                       </span>
-                      <span onClick={(e) => e.preventDefault()}>
-                        <Popover
-                          align="end"
-                          width="w-40"
-                          trigger={(_, toggle) => (
-                            <IconBtn
-                              variant="ghost"
-                              label={`Actions for ${ws.name}`}
-                              onClick={toggle}
-                              className="opacity-0 transition-opacity group-hover:opacity-100"
-                            >
-                              <MoreHorizontal className="size-3.5" aria-hidden="true" />
-                            </IconBtn>
-                          )}
-                        >
-                          <PopItem icon={<ArrowUpRight className="size-3.5" aria-hidden="true" />} onClick={() => (window.location.hash = `#/workspaces/${ws.id}`)}>
-                            Open workspace
-                          </PopItem>
-                          <PopItem onClick={() => toast("Workspace duplicated")}>Duplicate</PopItem>
-                          <PopSep />
-                          <PopItem danger onClick={() => toast("Archiving a workspace is irreversible — confirm first", "info")}>
-                            Archive
-                          </PopItem>
-                        </Popover>
-                      </span>
+                      <ArrowUpRight
+                        className="size-3 text-neutral-300 opacity-0 transition-opacity group-hover:opacity-100"
+                        aria-hidden="true"
+                      />
                     </div>
 
                     <div className="mt-4 flex items-center justify-between text-[11px]">
@@ -194,10 +192,8 @@ export function WorkspacesPage() {
                       />
                     </div>
                     <div className="mt-3 flex flex-wrap items-center justify-between gap-1 border-t border-black/[0.05] pt-3">
-                      <p className="text-[10.5px] text-neutral-400">
-                        {ws.searches} searches · {ws.lists} lists · created {formatDate(ws.created_at)}
-                      </p>
-                      <Badge tone={ws.plan === "Agency" ? "green" : "neutral"}>{ws.plan}</Badge>
+                      <p className="text-[10.5px] text-neutral-400">Created {formatDate(ws.created_at)}</p>
+                      <Badge tone={ws.plan === "Free" ? "neutral" : "green"}>{ws.plan}</Badge>
                     </div>
                   </Card>
                 </a>
@@ -219,6 +215,7 @@ export function WorkspacesPage() {
             <Input
               id="ws-name"
               autoFocus
+              required
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="e.g. Client · Sunrise Dental"
@@ -229,8 +226,8 @@ export function WorkspacesPage() {
             <Btn variant="outline" size="sm" onClick={() => setCreateOpen(false)}>
               Cancel
             </Btn>
-            <Btn variant="primary" size="sm" type="submit" disabled={!name.trim()}>
-              Create workspace
+            <Btn variant="primary" size="sm" type="submit" disabled={saving || !name.trim()}>
+              {saving ? "Creating…" : "Create workspace"}
             </Btn>
           </div>
         </form>

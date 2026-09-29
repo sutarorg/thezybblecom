@@ -197,68 +197,96 @@ Deno.serve(async (req) => {
     const sb = serviceClient();
     const body = await req.json().catch(() => ({}));
     const workspaceId = String(body.workspaceId ?? "");
-    const query = String(body.query ?? "").trim();
     if (!workspaceId) throw new HttpError(400, "workspaceId is required");
-    if (!query || query.length < 2) throw new HttpError(400, "Describe the businesses you need at least a little.");
-    if (query.length > 400) throw new HttpError(400, "Keep the request under 400 characters.");
 
     const user = await callerFromRequest(req, sb);
     await requireWorkspaceRole(sb, user.id, workspaceId);
-
     const entitlements = await getEntitlements(sb, user.id);
 
-    /* 1 — interpret with Gemini (fallback to regex when unavailable) */
-    let interpretation: ReturnType<typeof fallbackInterpret> | null = null;
-    let interpretedBy: "gemini" | "fallback" = "gemini";
-    try {
-      const plan = await geminiJson({
-        system: INTERPRET_SYSTEM,
-        prompt: `User request: ${query}`,
-        schema: {
-          type: "object",
-          properties: {
-            q: { type: "string" },
-            category: { type: "string" },
-            location: { type: "string" },
-            requested_count: { type: "integer" },
-            filters: {
-              type: "object",
-              properties: {
-                require_website: { type: "boolean" },
-                min_rating: { type: "number" },
-              },
-            },
-          },
-          required: ["q", "requested_count"],
-        },
-      });
+    /* ------------------------------------------------------------ */
+    /* Input: structured filters the user reviewed in the UI.        */
+    /* A raw `query` string is still accepted for compatibility.     */
+    /* ------------------------------------------------------------ */
+    const f = (body.filters ?? null) as Record<string, unknown> | null;
+    let interpretation: ReturnType<typeof fallbackInterpret>;
+    let query: string;
+
+    if (f) {
+      const category = String(f.category ?? "").trim();
+      if (category.length < 2) throw new HttpError(400, "Add a business category to search for.");
+      if (category.length > 120) throw new HttpError(400, "That category is too long.");
+      const location = String(f.location ?? "").trim().slice(0, 120);
+      const quantity = Math.min(Math.max(1, Number(f.quantity) || 50), MAX_PER_RUN);
+      const minRating = f.minRating ? Number(f.minRating) : null;
+
       interpretation = {
-        q: String(plan.q || query),
-        category: plan.category ? String(plan.category) : null,
-        location: plan.location ? String(plan.location) : null,
-        requested_count: Math.min(Math.max(1, Number(plan.requested_count) || 50), MAX_PER_RUN),
+        q: location ? `${category} in ${location}` : category,
+        category,
+        location: location || null,
+        requested_count: quantity,
         filters: {
-          require_website: Boolean((plan.filters as Record<string, unknown> | undefined)?.require_website),
-          min_rating: (plan.filters as Record<string, unknown> | undefined)?.min_rating != null
-            ? Number((plan.filters as Record<string, unknown> | undefined)!.min_rating)
-            : null,
+          require_website: Boolean(f.requireWebsite),
+          min_rating: Number.isFinite(minRating) ? minRating : null,
         },
       };
-    } catch (e) {
-      console.warn("Gemini interpret failed — using fallback:", e);
-      interpretation = fallbackInterpret(query);
-      interpretedBy = "fallback";
+      // extra requirements applied during normalization/filtering
+      (interpretation as Record<string, unknown>).require_phone = Boolean(f.requirePhone);
+      (interpretation as Record<string, unknown>).require_email = Boolean(f.requireEmail);
+      (interpretation as Record<string, unknown>).open_now = Boolean(f.openNow);
+      (interpretation as Record<string, unknown>).price_level = f.priceLevel ? Number(f.priceLevel) : null;
+      query = interpretation.q;
+    } else {
+      query = String(body.query ?? "").trim();
+      if (!query || query.length < 2) throw new HttpError(400, "Describe the businesses you need.");
+      if (query.length > 400) throw new HttpError(400, "Keep the request under 400 characters.");
+      try {
+        const planned = await geminiJson({
+          system: INTERPRET_SYSTEM,
+          prompt: `User request: ${query}`,
+          schema: {
+            type: "object",
+            properties: {
+              q: { type: "string" },
+              category: { type: "string" },
+              location: { type: "string" },
+              requested_count: { type: "integer" },
+              filters: {
+                type: "object",
+                properties: {
+                  require_website: { type: "boolean" },
+                  min_rating: { type: "number" },
+                },
+              },
+            },
+            required: ["q", "requested_count"],
+          },
+        });
+        interpretation = {
+          q: String(planned.q || query),
+          category: planned.category ? String(planned.category) : null,
+          location: planned.location ? String(planned.location) : null,
+          requested_count: Math.min(Math.max(1, Number(planned.requested_count) || 50), MAX_PER_RUN),
+          filters: {
+            require_website: Boolean((planned.filters as Record<string, unknown> | undefined)?.require_website),
+            min_rating:
+              (planned.filters as Record<string, unknown> | undefined)?.min_rating != null
+                ? Number((planned.filters as Record<string, unknown> | undefined)!.min_rating)
+                : null,
+          },
+        };
+      } catch (e) {
+        console.warn("Gemini interpret failed — using fallback:", e);
+        interpretation = fallbackInterpret(query);
+      }
+      await sb.from("ai_requests").insert({
+        workspace_id: workspaceId,
+        user_id: user.id,
+        kind: "interpret",
+        input: { query, plan: interpretation },
+        status: "completed",
+        model: GEMINI_MODEL,
+      });
     }
-
-    // record the AI request
-    await sb.from("ai_requests").insert({
-      workspace_id: workspaceId,
-      user_id: user.id,
-      kind: "interpret",
-      input: { query, plan: interpretation, model: interpretedBy === "gemini" ? GEMINI_MODEL : "fallback" },
-      status: interpretedBy === "gemini" ? "completed" : "failed",
-      model: interpretedBy === "gemini" ? GEMINI_MODEL : null,
-    });
 
     /* 2 — create search + job rows (status staging) */
     const requestedCount = interpretation!.requested_count;
@@ -268,7 +296,7 @@ Deno.serve(async (req) => {
         workspace_id: workspaceId,
         user_id: user.id,
         query,
-        interpretation: { ...interpretation, interpreted_by: interpretedBy },
+        interpretation,
         filters: interpretation!.filters ?? {},
         location: interpretation!.location,
         requested_count: requestedCount,
@@ -321,6 +349,19 @@ Deno.serve(async (req) => {
 
         for (const raw of results) {
           const normalized = normalize(raw, { query: interpretation!.q, location: interpretation!.location });
+
+          /* apply the user's explicit requirements */
+          const req = interpretation as unknown as Record<string, unknown>;
+          if (interpretation.filters?.require_website && !normalized.website) continue;
+          if (req.require_phone && !normalized.phone) continue;
+          if (req.require_email && !normalized.email) continue;
+          if (req.open_now && normalized.open_state !== "open") continue;
+          const minR = interpretation.filters?.min_rating;
+          if (minR != null && Number(normalized.rating ?? 0) < minR) continue;
+          if (req.price_level != null && normalized.price_level != null && normalized.price_level !== req.price_level) {
+            continue;
+          }
+
           const key = String(normalized.dedupe_key);
           if (seenKeys.has(key)) {
             dedupeRemoved++;
@@ -415,19 +456,10 @@ Deno.serve(async (req) => {
         savedCount: saved,
         remaining: Math.max(0, requestedCount - saved),
         interpretation,
-        insights: entitlements.allowances.ai
-          ? [
-              `Interpreted as “${interpretation!.q}${interpretation!.location ? ` in ${interpretation!.location}` : ""}”.`,
-              `${saved} unique leads collected; ${dedupeRemoved} duplicates removed during the run.`,
-            ]
-          : [`Interpreted as “${interpretation!.q}${interpretation!.location ? ` in ${interpretation!.location}` : ""}”.`],
-        suggestions: entitlements.allowances.ai
-          ? [
-              interpretation!.filters?.require_website ? "Try adding a rating filter — “rated above 4”." : "Add “with websites” for a direct outreach channel.",
-              `Broaden the market — search “${interpretation!.q} in Denver” next.`,
-              "Save these results to a list before re-running.",
-            ]
-          : ["Save these results to a list."],
+        insights: [
+          `Searched “${interpretation!.q}”.`,
+          `${saved} new lead${saved === 1 ? "" : "s"} saved${dedupeRemoved ? `; ${dedupeRemoved} duplicate${dedupeRemoved === 1 ? "" : "s"} skipped` : ""}.`,
+        ],
       },
     });
   } catch (e) {

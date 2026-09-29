@@ -115,7 +115,7 @@ export function PrivacyPage() {
         <p className="mt-10 rounded-2xl border border-black/[0.06] bg-white px-5 py-4 text-[13px] leading-6 text-ink-mute">
           Questions or requests?{" "}
           <Link
-            to="#/contact"
+            to="/contact"
             className="font-medium text-brand-700 underline-offset-4 hover:underline"
           >
             Contact us
@@ -218,7 +218,7 @@ export function TermsPage() {
         <p className="mt-10 rounded-2xl border border-black/[0.06] bg-white px-5 py-4 text-[13px] leading-6 text-ink-mute">
           Questions about these terms?{" "}
           <Link
-            to="#/contact"
+            to="/contact"
             className="font-medium text-brand-700 underline-offset-4 hover:underline"
           >
             Talk to us

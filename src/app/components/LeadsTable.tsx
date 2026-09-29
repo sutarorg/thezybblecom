@@ -21,7 +21,6 @@ import {
 } from "lucide-react";
 import { cn } from "../../utils/cn";
 import type { Lead } from "../data/types";
-import { LISTS } from "../data/mock";
 import {
   Badge,
   Btn,
@@ -32,7 +31,7 @@ import {
   PopItem as MenuItem,
   PopSep,
   Popover,
-  TableSkeleton,
+  Skel,
   useToast,
 } from "./ui";
 import { navigate } from "../hooks";
@@ -45,13 +44,13 @@ const STATUS_TONE: Record<Lead["status"], { tone: "neutral" | "green" | "amber";
   contacted: { tone: "amber", label: "Contacted" },
 };
 
-function listBadge(lead: Lead) {
+function listBadge(lead: Lead, listNames: Record<string, string>) {
   if (!lead.list_ids.length) return <span className="text-[11px] text-neutral-300">—</span>;
-  const first = LISTS.find((l) => l.id === lead.list_ids[0]);
+  const first = listNames[lead.list_ids[0]];
   return (
     <span className="flex items-center gap-1">
       <Badge className={cn("max-w-[132px] truncate")} tone="neutral">
-        {first?.name ?? "List"}
+        {first ?? "In a list"}
       </Badge>
       {lead.list_ids.length > 1 ? (
         <span className="text-[11px] text-neutral-400">+{lead.list_ids.length - 1}</span>
@@ -68,6 +67,8 @@ export function LeadsTable({
   pageSize = 10,
   onBulk,
   noLists,
+  listNames = {},
+  emptyState,
 }: {
   leads: Lead[];
   loading?: boolean;
@@ -76,6 +77,8 @@ export function LeadsTable({
   pageSize?: number;
   onBulk?: (action: "list" | "export" | "tag" | "delete", ids: string[]) => void;
   noLists?: boolean;
+  listNames?: Record<string, string>;
+  emptyState?: React.ReactNode;
 }) {
   const toast = useToast();
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -237,15 +240,17 @@ export function LeadsTable({
       ) : null}
 
       {loading ? (
-        <TableSkeleton rows={8} />
+        <LeadsTableSkeleton rows={Math.min(pageSize, 10)} noLists={noLists} />
       ) : leads.length === 0 ? (
         <div className="p-4">
-          <EmptyState
-            icon={<SearchX className="size-4" aria-hidden="true" />}
-            title="No leads match"
-            description="Adjust your search or filters — or run a new search to find more businesses."
-            action={<Btn variant="primary" href="#/find">Find leads</Btn>}
-          />
+          {emptyState ?? (
+            <EmptyState
+              icon={<SearchX className="size-4" aria-hidden="true" />}
+              title="No leads match"
+              description="Adjust your search or filters — or run a new search to find more businesses."
+              action={<Btn variant="primary" href="/find">Find leads</Btn>}
+            />
+          )}
         </div>
       ) : (
         <div className="thin-scroll overflow-x-auto">
@@ -360,7 +365,7 @@ export function LeadsTable({
                     <td className="py-2 pr-3">
                       <Badge tone={STATUS_TONE[lead.status].tone}>{STATUS_TONE[lead.status].label}</Badge>
                     </td>
-                    <td className={cn("py-2 pr-3", noLists && "hidden")}>{listBadge(lead)}</td>
+                    <td className={cn("py-2 pr-3", noLists && "hidden")}>{listBadge(lead, listNames)}</td>
                     <td className="py-2 pr-2" onClick={(e) => e.stopPropagation()}>
                       <Popover
                         align="end"
@@ -414,6 +419,108 @@ export function LeadsTable({
         </div>
       ) : null}
     </Card>
+  );
+}
+
+/* ---------------------------------------------------------------- */
+/* Skeleton that mirrors the real table exactly (no layout shift)    */
+/* ---------------------------------------------------------------- */
+export function LeadsTableSkeleton({
+  rows = 10,
+  noLists,
+}: {
+  rows?: number;
+  noLists?: boolean;
+}) {
+  const widths = ["w-40", "w-52", "w-36", "w-48", "w-44", "w-56", "w-40", "w-44", "w-36", "w-52"];
+  return (
+    <div className="thin-scroll overflow-x-auto" aria-hidden="true">
+      <table className="w-full min-w-[860px] text-left">
+        <thead>
+          <tr className="border-b border-black/[0.06] bg-neutral-50/50">
+            <th className="w-9 py-2 pl-3 pr-2">
+              <span className="block size-3.5 rounded-sm bg-black/[0.07]" />
+            </th>
+            <th className="py-2 pr-3">
+              <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-300">Business</span>
+            </th>
+            <th className="hidden py-2 pr-3 lg:table-cell">
+              <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-300">Category</span>
+            </th>
+            <th className="py-2 pr-3">
+              <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-300">Rating</span>
+            </th>
+            <th className="hidden py-2 pr-3 xl:table-cell">
+              <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-300">Phone</span>
+            </th>
+            <th className="hidden py-2 pr-3 md:table-cell">
+              <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-300">Website</span>
+            </th>
+            <th className="hidden py-2 pr-3 sm:table-cell">
+              <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-300">Location</span>
+            </th>
+            <th className="py-2 pr-3">
+              <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-300">Status</span>
+            </th>
+            <th className={cn("py-2 pr-3", noLists && "hidden")}>
+              <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-300">List</span>
+            </th>
+            <th className="w-10 py-2 pr-3" />
+          </tr>
+        </thead>
+        <tbody>
+          {Array.from({ length: rows }).map((_, i) => (
+            <tr key={i} className="border-b border-black/[0.04] last:border-0">
+              <td className="py-2 pl-3 pr-2">
+                <Skel className="size-3.5 rounded-sm" />
+              </td>
+              {/* business: avatar + two lines, matching real row height */}
+              <td className="py-2 pr-3">
+                <span className="flex items-center gap-2.5">
+                  <Skel className="size-6 rounded-md" />
+                  <span className="min-w-0 space-y-1">
+                    <Skel className={cn("block h-2.5 rounded", widths[i % widths.length])} />
+                    <Skel className="block h-2 w-24 rounded" />
+                  </span>
+                </span>
+              </td>
+              <td className="hidden py-2 pr-3 lg:table-cell">
+                <Skel className="h-2.5 w-20 rounded" />
+              </td>
+              <td className="py-2 pr-3">
+                <span className="inline-flex items-center gap-1">
+                  <Skel className="size-3 rounded-sm" />
+                  <Skel className="h-2.5 w-6 rounded" />
+                </span>
+              </td>
+              <td className="hidden py-2 pr-3 xl:table-cell">
+                <Skel className="h-2.5 w-24 rounded" />
+              </td>
+              <td className="hidden py-2 pr-3 md:table-cell">
+                <Skel className="h-2.5 w-28 rounded" />
+              </td>
+              <td className="hidden py-2 pr-3 sm:table-cell">
+                <Skel className="h-2.5 w-20 rounded" />
+              </td>
+              <td className="py-2 pr-3">
+                <Skel className="h-5 w-14 rounded" />
+              </td>
+              <td className={cn("py-2 pr-3", noLists && "hidden")}>
+                <Skel className="h-5 w-16 rounded" />
+              </td>
+              <td className="py-2 pr-2">
+                <Skel className="size-4 rounded" />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {/* footer placeholder keeps total height stable */}
+      <div className="flex items-center justify-between border-t border-black/[0.06] px-3 py-2">
+        <Skel className="h-2.5 w-36 rounded" />
+        <Skel className="h-6 w-40 rounded" />
+      </div>
+    </div>
   );
 }
 

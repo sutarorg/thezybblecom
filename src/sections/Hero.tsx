@@ -1,9 +1,6 @@
 import { Sparkles } from "lucide-react";
-import {
-  ButtonGreen,
-  LandscapeStage,
-  Reveal,
-} from "../components/primitives";
+import { LandscapeStage, Reveal } from "../components/primitives";
+import { AuthCta } from "../components/AuthCta";
 import { HeroAppCard } from "../components/product-cards";
 import { LANDSCAPE_ALT } from "../lib/site";
 
@@ -53,9 +50,7 @@ export function Hero() {
           {/* CTA + supporting line */}
           <Reveal delay={230}>
             <div className="mt-7 flex flex-col items-center gap-3">
-              <ButtonGreen href="/#pricing" className="px-5.5 py-2.5 text-[14px]">
-                Start for free
-              </ButtonGreen>
+              <AuthCta className="px-5.5 py-2.5 text-[14px]" />
               <div className="flex items-center gap-2.5">
                 <div className="flex -space-x-2" aria-hidden="true">
                   {AVATARS.map((src) => (

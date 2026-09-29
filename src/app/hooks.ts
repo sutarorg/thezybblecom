@@ -1,37 +1,37 @@
 /* ------------------------------------------------------------------ */
-/* Zybble app — hash routing + per-page SEO                            */
+/* Zybble app — real-path routing helpers + per-page SEO               */
+/* No hash routing anywhere: BrowserRouter owns the URL.               */
 /* ------------------------------------------------------------------ */
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
+import { useLocation } from "react-router-dom";
 import { SITE_URL } from "../lib/site";
 
-export function parseAppHash(): string {
-  let h = window.location.hash.replace(/^#/, "");
-  if (!h.startsWith("/")) h = "/" + h;
-  h = h.split(/[?#]/)[0];
-  return h === "" ? "/overview" : h;
-}
-
+/** Current pathname, e.g. "/leads/abc". */
 export function useAppRoute() {
-  const [path, setPath] = useState(parseAppHash);
-  useEffect(() => {
-    const on = () => {
-      setPath(parseAppHash());
-      window.scrollTo({ top: 0, behavior: "auto" });
-    };
-    window.addEventListener("hashchange", on);
-    return () => window.removeEventListener("hashchange", on);
-  }, []);
-  return { path };
-}
-
-export function navigate(to: string) {
-  window.location.hash = to.startsWith("#") ? to : `#${to}`;
+  const { pathname } = useLocation();
+  return { path: pathname };
 }
 
 /**
- * Marks a title/description as belonging to the `<app>/...` SPA.
- * Adds `#` to canonical URLs so marketing metadata stays intact.
+ * Module-level navigate so non-hook call sites (menus, table rows,
+ * command palette) can push real paths. The bridge below registers the
+ * router's navigate during render of the app tree.
  */
+let routerNavigate: ((to: string, opts?: { replace?: boolean }) => void) | null = null;
+
+export function registerNavigate(
+  fn: (to: string, opts?: { replace?: boolean }) => void
+) {
+  routerNavigate = fn;
+}
+
+export function navigate(to: string, opts?: { replace?: boolean }) {
+  const path = to.startsWith("#") ? to.slice(1) : to;
+  if (routerNavigate) routerNavigate(path, opts);
+  else window.location.assign(path);
+}
+
+/** Per-route document metadata. Canonicals use clean paths (no #). */
 export function useAppSeo(title: string, description: string, path: string) {
   useEffect(() => {
     document.title = title;
@@ -40,9 +40,13 @@ export function useAppSeo(title: string, description: string, path: string) {
     set('meta[name="description"]', description);
     set('meta[property="og:title"]', title);
     set('meta[property="og:description"]', description);
-    set('meta[property="og:url"]', `${SITE_URL}/#${path}`);
-    return () => {
-      document.title = "Zybble — Find the businesses you need. Turn them into usable leads.";
-    };
+    set('meta[property="og:url"]', `${SITE_URL}${path}`);
+    document
+      .querySelector<HTMLLinkElement>('link[rel="canonical"]')
+      ?.setAttribute("href", `${SITE_URL}${path}`);
+    // App routes should never be indexed.
+    const robots = document.head.querySelector<HTMLMetaElement>('meta[name="robots"]');
+    const isApp = !["/", "/contact", "/privacy", "/terms"].includes(path);
+    robots?.setAttribute("content", isApp ? "noindex, nofollow" : "index, follow, max-image-preview:large");
   }, [title, description, path]);
 }

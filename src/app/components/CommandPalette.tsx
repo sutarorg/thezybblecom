@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { cn } from "../../utils/cn";
 import { navigate } from "../hooks";
+import { signOut } from "../services/api";
 import { Kbd, useToast } from "./ui";
 
 type Cmd = {
@@ -71,6 +72,16 @@ export function CommandPalette() {
           toast("Use “New list” to create a list", "info");
         },
         keywords: "new list create",
+      },
+      {
+        id: "act-logout",
+        title: "Log out",
+        group: "Actions",
+        icon: Settings,
+        action: () => {
+          void signOut().then(() => navigate("/login", { replace: true }));
+        },
+        keywords: "sign out logout leave",
       },
       {
         id: "act-export",

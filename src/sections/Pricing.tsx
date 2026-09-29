@@ -71,7 +71,7 @@ export function Pricing() {
 
                 <div className="mt-auto pt-6">
                   <a
-                    href="/#top"
+                    href="/signup"
                     aria-label={`Start for free on the ${plan.name} plan`}
                     className={cn(
                       "inline-flex w-full items-center justify-center rounded-full bg-brand-600 py-2.5 text-[13px] font-medium text-white transition-all duration-200 hover:bg-brand-700",

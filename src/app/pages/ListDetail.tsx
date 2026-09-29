@@ -1,126 +1,156 @@
 /* ------------------------------------------------------------------ */
 /* Zybble app — List detail                                            */
 /* ------------------------------------------------------------------ */
-import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Download, ListPlus, Search, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { ArrowLeft, Download, ListChecks, Search } from "lucide-react";
 import { AppLayout } from "../components/AppLayout";
 import { LeadsTable } from "../components/LeadsTable";
-import { Badge, Btn, Input, formatDate, relative, useToast } from "../components/ui";
-import { LEADS, LISTS } from "../data/mock";
+import { Badge, Btn, EmptyState, Input, formatDate, relative, useToast } from "../components/ui";
+import type { Lead, LeadList } from "../data/types";
 import { useAppSeo } from "../hooks";
-import type { Lead } from "../data/types";
-import { BACKEND_ENABLED, listMembers, removeFromList } from "../services/api";
-import { useWorkspace } from "../services/hooks";
+import { getList, listMembers, removeFromList, runExport } from "../services/api";
+import { useWorkspaceContext } from "../services/hooks";
 
 export function ListDetailPage({ id }: { id: string }) {
-  const list = useMemo(() => LISTS.find((l) => l.id === id), [id]);
+  const toast = useToast();
+  const { workspace, loading: ctxLoading } = useWorkspaceContext();
+
+  const [list, setList] = useState<LeadList | null>(null);
+  const [leads, setLeads] = useState<Lead[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+
   useAppSeo(
     list ? `${list.name} — Zybble` : "List — Zybble",
-    list ? list.description : "Lead list.",
+    list?.description || "Lead list.",
     `/lists/${id}`
   );
-  const toast = useToast();
-  const [loading, setLoading] = useState(true);
-  const [query, setQuery] = useState("");
-  const [removed, setRemoved] = useState<Set<string>>(new Set());
-  const { workspace } = useWorkspace();
-  const [sourceLeads, setSourceLeads] = useState<Lead[]>(LEADS);
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    if (!workspace) return;
     setLoading(true);
-    const t = window.setTimeout(() => setLoading(false), 420);
-    return () => window.clearTimeout(t);
-  }, [id]);
-
-  useEffect(() => {
-    if (!BACKEND_ENABLED || !workspace) return;
-    listMembers(id, workspace.id)
-      .then((rows) => setSourceLeads(rows.length ? rows : []))
-      .catch(() => undefined);
+    setError(null);
+    Promise.all([getList(id), listMembers(id)])
+      .then(([l, rows]) => {
+        setList(l);
+        setLeads(rows);
+      })
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setLoading(false));
   }, [id, workspace]);
 
-  const leads = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return sourceLeads.filter((l) => {
-      const belongs = Boolean(list && l.list_ids.includes(list.id));
-      if (list && !belongs) {
-        // Deterministic fallback so demo lists always have a sensible membership
-        const idx = Math.abs(l.id.split("").reduce((a, c) => a + c.charCodeAt(0), 0));
-        if (idx % LISTS.length !== Math.max(0, LISTS.findIndex((x) => x.id === id))) return false;
-      }
-      if (removed.has(l.id)) return false;
-      if (q && !`${l.name} ${l.category} ${l.city}`.toLowerCase().includes(q)) return false;
-      return true;
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [list, id, removed, query, sourceLeads]);
+  useEffect(() => {
+    if (!ctxLoading && !workspace) setLoading(false);
+    load();
+  }, [load, ctxLoading, workspace]);
 
-  const listName = list?.name ?? "Unknown list";
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return leads;
+    return leads.filter((l) => `${l.name} ${l.category} ${l.city}`.toLowerCase().includes(q));
+  }, [leads, query]);
+
+  const busy = loading || ctxLoading;
+  const listName = list?.name ?? "List";
 
   return (
-    <AppLayout title={listName} description={list?.description ?? "This list may have been removed."} wide>
+    <AppLayout
+      title={busy ? "List" : listName}
+      description={list?.description || "Leads saved into this list."}
+      wide
+    >
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-        <a href="#/lists" className="inline-flex items-center gap-1 text-xs font-medium text-ink-mute transition-colors hover:text-ink">
+        <a
+          href="/lists"
+          className="inline-flex items-center gap-1 text-xs font-medium text-ink-mute transition-colors hover:text-ink"
+        >
           <ArrowLeft className="size-3.5" aria-hidden="true" />
           Lists
         </a>
         <div className="flex items-center gap-1.5">
-          <Badge tone="neutral">
-            {list ? `${list.lead_count.toLocaleString()} leads` : "0 leads"}
-          </Badge>
-          {list ? (
-            <Badge tone="neutral">Updated {relative(list.updated_at)}</Badge>
+          {!busy && list ? (
+            <>
+              <Badge tone="neutral">{leads.length.toLocaleString()} leads</Badge>
+              <Badge tone="neutral">Updated {relative(list.updated_at)}</Badge>
+            </>
           ) : null}
-          <Btn variant="outline" size="sm" onClick={() => toast("Use row selection to remove leads from this list", "info")}>
-            <ListPlus className="size-3.5" aria-hidden="true" />
-            Manage
-          </Btn>
-          <Btn variant="primary" size="sm" onClick={() => toast("Export started — find it in Exports", "info")}>
+          <Btn
+            variant="primary"
+            size="sm"
+            disabled={!leads.length}
+            onClick={async () => {
+              if (!workspace) return;
+              const res = await runExport({ workspaceId: workspace.id, listId: id, source: listName });
+              if (res.error) {
+                toast(res.error, "error");
+                return;
+              }
+              toast("Export ready — find it in Exports");
+            }}
+          >
             <Download className="size-3.5" aria-hidden="true" />
             Export list
           </Btn>
         </div>
       </div>
 
-      {list ? (
-        <p className="mb-3 text-[11px] text-neutral-400">
-          Created {formatDate(list.created_at)} · owned by {list.owner}
-        </p>
+      {!busy && list ? (
+        <p className="mb-3 text-[11px] text-neutral-400">Created {formatDate(list.created_at)}</p>
       ) : null}
 
-      <div className="mb-3 flex items-center gap-2">
-        <div className="relative min-w-[200px] flex-1 sm:max-w-xs">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-neutral-300" aria-hidden="true" />
-          <Input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search inside this list…"
-            aria-label="Search inside this list"
-            className="pl-8"
-          />
+      {leads.length > 0 ? (
+        <div className="mb-3 flex items-center gap-2">
+          <div className="relative min-w-[200px] flex-1 sm:max-w-xs">
+            <Search
+              className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-neutral-300"
+              aria-hidden="true"
+            />
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search inside this list…"
+              aria-label="Search inside this list"
+              className="pl-8"
+            />
+          </div>
         </div>
-        {removed.size > 0 ? (
-          <button
-            type="button"
-            onClick={() => setRemoved(new Set())}
-            className="inline-flex items-center gap-1 text-[11px] text-brand-700 hover:text-brand-600"
-          >
-            <X className="size-3" aria-hidden="true" />
-            Restore {removed.size} removed
-          </button>
-        ) : null}
-      </div>
+      ) : null}
 
       <LeadsTable
-        leads={leads}
-        loading={loading}
-        pageSize={12}
+        leads={filtered}
+        loading={busy}
+        error={error}
+        onRetry={load}
+        pageSize={25}
         noLists
-        onBulk={(action, ids) => {
+        emptyState={
+          query ? undefined : (
+            <EmptyState
+              icon={<ListChecks className="size-4" aria-hidden="true" />}
+              title="This list is empty"
+              description="Run a search and save the results here, or add leads from your database."
+              action={
+                <Btn variant="primary" href="/find">
+                  Find leads
+                </Btn>
+              }
+            />
+          )
+        }
+        onBulk={async (action, ids) => {
           if (action === "delete") {
-            setRemoved((s) => new Set([...s, ...ids]));
-            if (BACKEND_ENABLED) removeFromList(id, ids);
-            toast(`${ids.length} ${ids.length === 1 ? "lead" : "leads"} removed from ${listName}`);
+            try {
+              await removeFromList(id, ids);
+              setLeads((l) => l.filter((x) => !ids.includes(x.id)));
+              toast(`${ids.length} ${ids.length === 1 ? "lead" : "leads"} removed from ${listName}`);
+            } catch (e) {
+              toast((e as Error).message, "error");
+            }
+          }
+          if (action === "export" && workspace) {
+            const res = await runExport({ workspaceId: workspace.id, leadIds: ids, source: listName });
+            if (res.error) toast(res.error, "error");
           }
         }}
       />
