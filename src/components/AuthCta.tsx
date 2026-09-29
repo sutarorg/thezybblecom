@@ -39,19 +39,26 @@ export function AuthCta({
   );
 }
 
-/** Secondary text link that mirrors the same auth state. */
+/**
+ * Secondary "Sign in" link.
+ * When a session exists this renders nothing — the green CTA already
+ * says "Dashboard", and two Dashboard buttons would be redundant.
+ */
 export function AuthTextLink({ className }: { className?: string }) {
   const user = useAuthUser();
   const authed = user !== "loading" && Boolean(user);
+
+  if (authed) return null;
+
   return (
     <a
-      href={authed ? "/overview" : "/login"}
+      href="/login"
       className={cn(
         "rounded-full px-3 py-1.5 text-[13px] font-medium text-ink-soft transition-colors hover:text-ink",
         className
       )}
     >
-      {authed ? "Dashboard" : "Sign in"}
+      Sign in
     </a>
   );
 }

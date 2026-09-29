@@ -24,6 +24,10 @@ import { Assistant } from "./assistant/Assistant";
 import { usePageSeo, useScrollToHash } from "./lib/hooks";
 
 /* app */
+import { TriangleAlert } from "lucide-react";
+import { ZybbleMark } from "./components/primitives";
+import { ErrorBoundary } from "./app/components/ErrorBoundary";
+import { BACKEND_ENABLED } from "./app/services/api";
 import { ToastProvider } from "./app/components/ui";
 import { CommandPalette } from "./app/components/CommandPalette";
 import { registerNavigate } from "./app/hooks";
@@ -97,15 +101,61 @@ function Protected({ children }: { children: ReactNode }) {
   const user = useAuthUser();
   const location = useLocation();
 
+  if (!BACKEND_ENABLED) return <BackendMissing />;
   if (user === "loading") return <Splash />;
   if (!user) {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   }
   return (
-    <ToastProvider>
-      {children}
-      <CommandPalette />
-    </ToastProvider>
+    <ErrorBoundary>
+      <ToastProvider>
+        {children}
+        <CommandPalette />
+      </ToastProvider>
+    </ErrorBoundary>
+  );
+}
+
+/**
+ * Explicit, debuggable state when the deployment has no Supabase
+ * credentials — far better than an empty screen.
+ */
+function BackendMissing() {
+  return (
+    <div className="grid min-h-dvh place-items-center bg-paper px-5">
+      <div className="w-full max-w-md text-center">
+        <a href="/" className="mx-auto mb-8 inline-flex items-center gap-2" aria-label="Zybble home">
+          <ZybbleMark className="size-5" />
+          <span className="font-display text-[15px] font-semibold tracking-[-0.02em] text-ink">Zybble</span>
+        </a>
+        <span className="mx-auto grid size-10 place-items-center rounded-lg bg-amber-50 text-amber-600">
+          <TriangleAlert className="size-4" aria-hidden="true" />
+        </span>
+        <h1 className="font-display mt-4 text-[20px] font-semibold tracking-[-0.02em] text-ink">
+          Backend not configured
+        </h1>
+        <p className="mt-2 text-[13px] leading-6 text-ink-mute">
+          This deployment is missing its Supabase credentials, so the application can't sign you in
+          or load your workspace.
+        </p>
+        <div className="mt-4 rounded-lg border border-black/[0.07] bg-white px-3 py-2.5 text-left">
+          <p className="text-[11px] font-medium text-ink">Set these in your host's environment:</p>
+          <pre className="mt-1.5 font-mono text-[10.5px] leading-4 text-ink-mute">
+{`VITE_SUPABASE_URL
+VITE_SUPABASE_PUBLISHABLE_KEY`}
+          </pre>
+          <p className="mt-2 text-[10.5px] leading-4 text-neutral-400">
+            Then redeploy — Vite reads these at build time, so a rebuild is required.
+          </p>
+        </div>
+        <a
+          href="/"
+          className="mt-5 inline-flex h-9 items-center rounded-full border border-black/[0.09] bg-white px-4 text-[13px] font-medium text-ink transition-colors hover:bg-neutral-50"
+        >
+          Back to home
+        </a>
+      </div>
+    </div>
   );
 }
 
@@ -115,9 +165,13 @@ function PublicOnly({ children }: { children: ReactNode }) {
   const location = useLocation();
   const from = (location.state as { from?: string } | null)?.from;
 
-  if (user === "loading") return <Splash label="Checking your session…" />;
+  if (user === "loading" && BACKEND_ENABLED) return <Splash label="Checking your session…" />;
   if (user) return <Navigate to={from && from !== "/login" ? from : "/overview"} replace />;
-  return <ToastProvider>{children}</ToastProvider>;
+  return (
+    <ErrorBoundary>
+      <ToastProvider>{children}</ToastProvider>
+    </ErrorBoundary>
+  );
 }
 
 /* param-aware detail wrappers */
@@ -198,8 +252,10 @@ function RoutedApp() {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <RoutedApp />
-    </BrowserRouter>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <RoutedApp />
+      </BrowserRouter>
+    </ErrorBoundary>
   );
 }

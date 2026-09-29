@@ -218,47 +218,75 @@ export type AppUser = {
   isAdmin: boolean;
 };
 
+/**
+ * Never let a hung network call freeze the UI. Supabase's getSession()
+ * can stall when a stored token is stale and the refresh endpoint is
+ * unreachable — that used to leave the app on a permanent splash.
+ */
+function withTimeout<T>(promise: PromiseLike<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
 export async function getCurrentUser(): Promise<AppUser | null> {
   const sb = getSupabase();
   if (!sb) return null;
 
-  const {
-    data: { session },
-  } = await sb.auth.getSession();
-  if (!session) return null;
+  try {
+    const sessionResult = await withTimeout(sb.auth.getSession(), 8000, {
+      data: { session: null },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const session = sessionResult?.data?.session ?? null;
+    if (!session) return null;
 
-  const { data: profile } = await sb
-    .from("profiles")
-    .select("name, avatar_url, role")
-    .eq("id", session.user.id)
-    .maybeSingle();
+    const emailName = session.user.email?.split("@")[0] ?? "User";
 
-  const name = profile?.name ?? session.user.email?.split("@")[0] ?? "User";
-  const initials = name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((s: string) => s[0]!.toUpperCase())
-    .join("");
+    // Profile/subscription are enrichment — never block sign-in on them.
+    const [profileRes, subRes] = await Promise.all([
+      withTimeout(
+        sb.from("profiles").select("name, avatar_url, role").eq("id", session.user.id).maybeSingle(),
+        6000,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        { data: null } as any
+      ),
+      withTimeout(
+        sb.from("subscriptions").select("plan_id, status").eq("user_id", session.user.id).maybeSingle(),
+        6000,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        { data: null } as any
+      ),
+    ]);
 
-  let planId = "free";
-  const { data: sub } = await sb
-    .from("subscriptions")
-    .select("plan_id, status")
-    .eq("user_id", session.user.id)
-    .maybeSingle();
-  if (sub && ["active", "trialing"].includes(sub.status)) planId = sub.plan_id;
+    const profile = profileRes?.data ?? null;
+    const sub = subRes?.data ?? null;
 
-  return {
-    id: session.user.id,
-    name,
-    email: session.user.email ?? "",
-    avatarUrl: profile?.avatar_url ?? null,
-    initials,
-    plan: planLabel(planId),
-    planId,
-    isAdmin: profile?.role === "admin",
-  };
+    const name: string = profile?.name || emailName;
+    const initials = name
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((s: string) => s[0]!.toUpperCase())
+      .join("");
+
+    const planId = sub && ["active", "trialing"].includes(sub.status) ? sub.plan_id : "free";
+
+    return {
+      id: session.user.id,
+      name,
+      email: session.user.email ?? "",
+      avatarUrl: profile?.avatar_url ?? null,
+      initials,
+      plan: planLabel(planId),
+      planId,
+      isAdmin: profile?.role === "admin",
+    };
+  } catch (e) {
+    console.error("getCurrentUser failed:", e);
+    return null;
+  }
 }
 
 export async function updateProfile(name: string, email: string) {

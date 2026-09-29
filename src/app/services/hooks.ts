@@ -11,12 +11,33 @@ export function useAuthUser() {
 
   useEffect(() => {
     let mounted = true;
+
+    /* Absolute safety net: the app must never sit on "loading" forever. */
+    const failsafe = window.setTimeout(() => {
+      if (mounted) {
+        setUser((current) => (current === "loading" ? null : current));
+      }
+    }, 10000);
+
     getCurrentUser()
-      .then((u) => mounted && setUser(u))
-      .catch(() => mounted && setUser(null));
+      .then((u) => {
+        if (!mounted) return;
+        window.clearTimeout(failsafe);
+        setUser(u);
+      })
+      .catch(() => {
+        if (!mounted) return;
+        window.clearTimeout(failsafe);
+        setUser(null);
+      });
 
     const sb = getSupabase();
-    if (!sb) return () => { mounted = false; };
+    if (!sb) {
+      return () => {
+        mounted = false;
+        window.clearTimeout(failsafe);
+      };
+    }
 
     const {
       data: { subscription },
@@ -31,6 +52,7 @@ export function useAuthUser() {
     });
     return () => {
       mounted = false;
+      window.clearTimeout(failsafe);
       subscription.unsubscribe();
     };
   }, []);
