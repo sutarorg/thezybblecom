@@ -223,9 +223,17 @@ export function AppLayout({
   const [mobileOpen, setMobileOpen] = useState(false);
   const authUser = useAuthUser();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [workspacesLoading, setWorkspacesLoading] = useState(true);
   const [workspaceId, setWorkspaceId] = useState<string | null>(getSelectedWorkspaceId());
   const { path } = useAppRoute();
-  const workspace = workspaces.find((w) => w.id === workspaceId) ?? workspaces[0] ?? null;
+  /*
+   * Explicitly nullable: the list is empty on first render (and stays empty
+   * for an account with no workspace yet), so `workspaces[0]` is undefined.
+   * Every read below must go through the null check.
+   */
+  const workspace: Workspace | null =
+    workspaces.find((w) => w.id === workspaceId) ?? workspaces[0] ?? null;
+  const workspaceLabel = workspace?.name ?? (workspacesLoading ? "Loading…" : "No workspace");
   const heading = title ?? pageTitle(path);
   const plan = planFromId(authUser === "loading" || !authUser ? "free" : authUser.planId);
   const [leadsUsed, setLeadsUsed] = useState(0);
@@ -243,17 +251,29 @@ export function AppLayout({
 
   useEffect(() => {
     let mounted = true;
-    listWorkspaces()
-      .then((ws) => {
-        if (!mounted || !ws.length) return;
-        setWorkspaces(ws);
-        setWorkspaceId((current: string | null) =>
-          current && ws.some((w) => w.id === current) ? current : ws[0].id
-        );
-      })
-      .catch(() => undefined);
+
+    const load = () => {
+      listWorkspaces()
+        .then((ws) => {
+          if (!mounted) return;
+          /* Store the result even when empty — the UI needs the empty state. */
+          setWorkspaces(ws);
+          setWorkspaceId((current: string | null) =>
+            current && ws.some((w) => w.id === current) ? current : (ws[0]?.id ?? null)
+          );
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (mounted) setWorkspacesLoading(false);
+        });
+    };
+
+    load();
+    /* Keep the switcher in sync when a workspace is created or picked elsewhere. */
+    window.addEventListener("zybble:workspace", load);
     return () => {
       mounted = false;
+      window.removeEventListener("zybble:workspace", load);
     };
   }, []);
 
@@ -333,9 +353,15 @@ export function AppLayout({
               align="end"
               width="w-64"
               trigger={(_, toggle) => (
-                <Btn variant="outline" size="sm" onClick={toggle} className="max-w-[190px]">
+                <Btn
+                  variant="outline"
+                  size="sm"
+                  onClick={toggle}
+                  className="max-w-[190px]"
+                  label={`Workspace: ${workspaceLabel}`}
+                >
                   <Building2 className="size-3.5 shrink-0 text-neutral-400" aria-hidden="true" />
-                  <span className="truncate">{workspace.name}</span>
+                  <span className={cn("truncate", !workspace && "text-ink-mute")}>{workspaceLabel}</span>
                   <ChevronDown className="size-3 shrink-0 text-neutral-400" aria-hidden="true" />
                 </Btn>
               )}
@@ -355,9 +381,14 @@ export function AppLayout({
                   {w.name}
                 </PopItem>
               ))}
+              {!workspaces.length ? (
+                <p className="px-2 py-1.5 text-xs text-ink-mute">
+                  {workspacesLoading ? "Loading workspaces…" : "No workspaces yet."}
+                </p>
+              ) : null}
               <PopSep />
               <PopItem icon={<Check className="size-3.5 opacity-0" aria-hidden="true" />} onClick={() => navigate("/workspaces")}>
-                Manage workspaces
+                {workspaces.length ? "Manage workspaces" : "Create a workspace"}
               </PopItem>
             </Popover>
 
