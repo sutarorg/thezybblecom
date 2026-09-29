@@ -22,6 +22,7 @@ import ContactPage from "./pages/Contact";
 import { PrivacyPage, TermsPage } from "./pages/Legal";
 import { Assistant } from "./assistant/Assistant";
 import { usePageSeo, useScrollToHash } from "./lib/hooks";
+import { legacyHashRouteToPath } from "./lib/legacy-route";
 
 /* app */
 import { TriangleAlert } from "lucide-react";
@@ -199,11 +200,33 @@ function NavigationBridge() {
   return null;
 }
 
+/**
+ * Hash routes were used by an earlier app shell. Keep old bookmarks working,
+ * but immediately replace them with clean paths on every page.
+ */
+function LegacyHashRouteRedirect() {
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const redirect = () => {
+      const path = legacyHashRouteToPath(window.location.hash);
+      if (path) navigate(path, { replace: true });
+    };
+
+    redirect();
+    window.addEventListener("hashchange", redirect);
+    return () => window.removeEventListener("hashchange", redirect);
+  }, [navigate]);
+
+  return null;
+}
+
 function RoutedApp() {
   useScrollToHash();
   return (
     <>
       <NavigationBridge />
+      <LegacyHashRouteRedirect />
       <a
         href="#main"
         onClick={(e) => {
