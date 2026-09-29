@@ -524,16 +524,62 @@ export async function runSearch(
 ): Promise<{ result?: SearchRunResult; error?: string }> {
   const sb = getSupabase();
   if (!sb) return { error: CONFIG_ERROR };
+
+  /*
+   * Production searches run through our same-origin Vercel Function. That is
+   * where SERPAPI_API_KEY lives on a Vercel deployment; the browser never sees
+   * it. The request still carries the Supabase session and every database write
+   * is made with that user-scoped token, so RLS and reserve_leads() remain the
+   * authorization and quota boundaries.
+   *
+   * Plain `vite` development has no /api runtime. In that one case (a 404 or
+   * an HTML SPA fallback), retain the Supabase Edge Function path documented
+   * for non-Vercel/local deployments.
+   */
+  const {
+    data: { session },
+  } = await sb.auth.getSession();
+  if (!session) return { error: "Your session expired — sign in again." };
+
+  try {
+    const response = await fetch("/api/search-run", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ workspaceId, filters }),
+    });
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      const data = await response.json();
+      if (!response.ok || data?.error) {
+        return { error: String(data?.error ?? "The search couldn't complete.") };
+      }
+      return searchRunResponse(data);
+    }
+    if (response.status !== 404 && !contentType.includes("text/html")) {
+      return { error: "The search server returned an invalid response. Please try again." };
+    }
+  } catch {
+    // A local Vite server has no API route; fall through to the Edge Function.
+  }
+
   const { data, error } = await sb.functions.invoke("search-run", {
     body: { workspaceId, filters },
   });
   if (error) return { error: await readFunctionError(error) };
   if (data?.error) return { error: data.error };
+  return searchRunResponse(data);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function searchRunResponse(data: any): { result: SearchRunResult } {
   return {
     result: {
       searchId: data.searchId,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      leads: (data.leads ?? []).map((l: any) => mapLead(l)),
+      leads: (data.leads ?? []).map((lead: any) => mapLead(lead)),
       stats: data.stats,
     },
   };

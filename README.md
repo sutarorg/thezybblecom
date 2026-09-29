@@ -7,14 +7,17 @@ Browser (Vite + React SPA, clean URLs via BrowserRouter)
    │
    ├── Supabase Auth (email/password, sessions, reset)
    ├── Supabase PostgREST (RLS-guarded reads/writes)
+   ├── Vercel Function /api/search-run
+   │     └── validated filters → SerpApi → normalize → dedupe → persist
+   │         (user JWT + RLS + atomic quota reservation on every run)
    │
-   └── Supabase Edge Functions  ← every secret lives here, never in the bundle
-         ├── search-run      → validated filters → SerpApi → normalize → dedupe → persist
-         ├── ai-interpret    → Gemini fills the search form (never runs a search)
-         ├── ai-analyze      → Gemini lead intelligence
-         ├── export-run      → server-side CSV generation
-         ├── team-invite     → seats + Resend invitations
-         ├── billing         → Razorpay checkout / sync / cancel
+   └── Supabase Edge Functions
+         ├── search-run       → fallback for local/non-Vercel deployments
+         ├── ai-interpret     → Gemini fills the search form (never runs a search)
+         ├── ai-analyze       → Gemini lead intelligence
+         ├── export-run       → server-side CSV generation
+         ├── team-invite      → seats + Resend invitations
+         ├── billing          → Razorpay checkout / sync / cancel
          └── razorpay-webhook → HMAC-verified, idempotent subscription sync
                 ▼
          Supabase PostgreSQL (RLS, triggers, atomic usage reservation)
@@ -110,9 +113,10 @@ supabase functions deploy search-run ai-interpret ai-analyze export-run team-inv
 
 1. Log in to **serpapi.com** → **Dashboard → API Key**.
 2. Treat any previously shared/pasted key as compromised → **regenerate it** in account settings.
-3. Copy the new key → set it locally (optional, for function testing) and as the Edge secret above (`SERPAPI_API_KEY`).
-4. Test: in SerpApi Playground run `engine=google_maps`, `q=coffee`, `ll=@40.7455,-74.0083,14z` — confirm `local_results` appear.
-5. Watch your monthly search credit; the engine caps at 12 pages (240 leads) per request and stops when `serpapi_pagination.next` disappears.
+3. Copy the new key → set `SERPAPI_API_KEY` as a **server-only Vercel environment variable** for Production and Preview, then redeploy. Do not prefix it with `VITE_`; that would expose it to the browser bundle.
+4. If you run the app outside Vercel, also set it as a Supabase Edge Function secret (`supabase secrets set SERPAPI_API_KEY=...`) so the documented `search-run` fallback can run.
+5. Test: in SerpApi Playground run `engine=google_maps`, `q=coffee`, `ll=@40.7455,-74.0083,14z` — confirm `local_results` appear.
+6. Watch your monthly search credit; the engine caps at 12 pages (240 leads) per request and stops when `serpapi_pagination.next` disappears.
 
 ## 3 · Gemini setup
 
@@ -167,8 +171,9 @@ npm run dev
 4. **Environment Variables** (Production + Preview — scoped per current Vercel guidance):
    - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_PUBLISHABLE_KEY`
-   - *(Only these two — Edge secrets never enter Vercel.)*
-5. **Deploy** → test the preview URL end-to-end.
+   - `SERPAPI_API_KEY` — server-only; used by `/api/search-run` and never included in the Vite bundle
+   - Gemini, Razorpay, Resend, and Supabase secret/service-role keys remain Supabase Edge Function secrets and must not be added to the browser bundle.
+5. **Redeploy after adding or changing an environment variable** — existing deployments do not receive new values retroactively — then test the preview URL end-to-end.
 6. Add your custom domain → then go back and:
    - Supabase **Auth → URL Configuration**: add the domain as Site URL + allowed redirect URLs.
    - Confirm the Razorpay webhook URL points to the production project.
@@ -184,7 +189,7 @@ Never commit: `.env`, `.env.local`, any key material. `.gitignore` already exclu
 
 ## Architecture notes
 
-- **Secrets**: only `VITE_SUPABASE_URL` + `VITE_SUPABASE_PUBLISHABLE_KEY` reach the browser; the publishable key is safe because every table is RLS-guarded. All provider keys exist solely as Edge Function secrets.
+- **Secrets**: only `VITE_SUPABASE_URL` + `VITE_SUPABASE_PUBLISHABLE_KEY` reach the browser; the publishable key is safe because every table is RLS-guarded. `SERPAPI_API_KEY` is read only by the Vercel Function (and optionally the Edge fallback). Other provider keys remain Edge Function secrets.
 - **Usage enforcement**: `reserve_leads()` is a security-definer RPC doing an atomic check-and-increment — concurrent searches can't overrun an allowance; unused reservations are refunded after each run.
 - **Limits**: one-list (Free), seat counts, and client-workspace gating are enforced by **database triggers**, not the UI.
 - **Idempotency**: `webhook_events` stores provider event IDs; duplicates return `200` without re-processing.
