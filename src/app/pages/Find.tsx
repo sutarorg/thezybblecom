@@ -145,13 +145,21 @@ export function FindPage() {
     []
   );
 
-  const canRun = Boolean(filters.category.trim()) && !!workspace && phase !== "running";
+  /* The button stays clickable unless a search is already in flight (or the
+     workspace context is still loading) — missing input is reported with a
+     toast inside onFindLeads instead of silently disabling the button. */
+  const canRun = phase !== "running" && !ctxLoading;
+  const missingCategory = !filters.category.trim();
 
   /* ------------ run the actual search (explicit user action) ------------ */
   const onFindLeads = async () => {
-    if (!workspace) return;
+    if (phase === "running") return;
     if (!filters.category.trim()) {
       toast("Add a business category to search for.", "error");
+      return;
+    }
+    if (!workspace) {
+      toast("Your workspace is still loading — try again in a moment.", "error");
       return;
     }
     timers.current.forEach((t) => window.clearTimeout(t));
@@ -491,7 +499,11 @@ export function FindPage() {
                 <button
                   type="submit"
                   disabled={!canRun}
-                  className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-brand-600 px-5 text-sm font-medium text-white shadow-[0_1px_2px_rgba(11,99,67,0.22),inset_0_1px_0_rgba(255,255,255,0.12)] transition-all hover:bg-brand-700 active:scale-[0.99] disabled:opacity-50"
+                  aria-disabled={!canRun}
+                  title={missingCategory ? "Add a business type first" : undefined}
+                  className={`inline-flex h-9 items-center justify-center gap-2 rounded-md bg-brand-600 px-5 text-sm font-medium text-white shadow-[0_1px_2px_rgba(11,99,67,0.22),inset_0_1px_0_rgba(255,255,255,0.12)] transition-all hover:bg-brand-700 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 ${
+                    missingCategory && canRun ? "opacity-80" : ""
+                  }`}
                 >
                   {phase === "running" ? (
                     <Loader2 className="size-4 animate-spin" aria-hidden="true" />
