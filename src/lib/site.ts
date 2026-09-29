@@ -10,7 +10,8 @@ export const LANDSCAPE_URL =
 export const LANDSCAPE_ALT =
   "A dreamy anime-style illustrated landscape: bright blue sky with soft white clouds above a wide green valley, wildflowers in the grass and warm rocky mesas on the horizon.";
 
-export const SITE_URL = "https://zybble.app";
+/** Production origin used by canonical and social URLs on every page. */
+export const SITE_URL = "https://zybble.com";
 export const CONTACT_EMAIL = "tejassutar.business@gmail.com";
 export const WEB3FORMS_KEY = "05b0c5ca-dd84-41c9-9611-304238cb58de";
 

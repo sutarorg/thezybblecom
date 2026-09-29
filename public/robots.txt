@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://zybble.app/sitemap.xml
+Sitemap: https://zybble.com/sitemap.xml

@@ -64,7 +64,7 @@ Deno.serve(async (req) => {
     );
     if (inviteErr) throw new HttpError(500, "Couldn't create the invitation.");
 
-    const appUrl = Deno.env.get("APP_URL") ?? "https://zybble.app";
+    const appUrl = Deno.env.get("APP_URL") ?? "https://zybble.com";
     await sendEmail({
       to: email,
       subject: `${inviterName} invited you to “${ws?.name ?? "a workspace"}” on Zybble`,
@@ -75,7 +75,7 @@ Deno.serve(async (req) => {
             <strong style="color:#131514">${inviterName}</strong> invited you to join the
             <strong style="color:#131514">“${ws?.name ?? "workspace"}”</strong> workspace as a <strong style="color:#131514">${role}</strong>.
           </p>
-          <a href="${appUrl}/#/signup?invite=${encodeURIComponent(email)}"
+          <a href="${appUrl}/signup?invite=${encodeURIComponent(email)}"
              style="display:inline-block;background:#0e7a52;color:#fff;font-size:13px;font-weight:500;padding:10px 20px;border-radius:999px;text-decoration:none">
             Accept invitation
           </a>

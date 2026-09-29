@@ -156,7 +156,7 @@ npm run dev
 ```
 
 - Visit `http://localhost:5173` — marketing site.
-- `#/login` / `#/signup` — real auth; `#/overview` — protected dashboard.
+- `/login` / `/signup` — real auth; `/overview` — protected dashboard. Legacy hash links (for example, `/overview#/find`) are automatically replaced with the canonical `/find` path.
 - Without `VITE_` vars the app runs demo mode (mock data, zero persistence, zero crashes).
 
 ## 7 · Deploy to Vercel

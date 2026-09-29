@@ -56,7 +56,7 @@ Deno.serve(async (req) => {
         customerId = customer.id;
       }
 
-      const appUrl = Deno.env.get("APP_URL") ?? "https://zybble.app";
+      const appUrl = Deno.env.get("APP_URL") ?? "https://zybble.com";
       const subscription = await razorpay("/subscriptions", {
         method: "POST",
         body: JSON.stringify({
@@ -83,7 +83,7 @@ Deno.serve(async (req) => {
       );
 
       const shortUrl = subscription.short_url ?? subscription.auth_link;
-      return json({ url: shortUrl ?? `${appUrl}/#/billing`, subscriptionId: subscription.id });
+      return json({ url: shortUrl ?? `${appUrl}/billing`, subscriptionId: subscription.id });
     }
 
     if (action === "sync") {
