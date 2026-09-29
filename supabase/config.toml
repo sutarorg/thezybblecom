@@ -1,0 +1,24 @@
+# Zybble — Supabase configuration
+# Link with: supabase link --project-ref <your-project-ref>
+
+project_id = "zybble"
+
+[functions.search-run]
+verify_jwt = true
+
+[functions.ai-analyze]
+verify_jwt = true
+
+[functions.export-run]
+verify_jwt = true
+
+[functions.team-invite]
+verify_jwt = true
+
+[functions.billing]
+verify_jwt = true
+
+# External webhooks can't carry user JWTs — signature verification
+# inside the function is the security boundary instead.
+[functions.razorpay-webhook]
+verify_jwt = false

@@ -1,0 +1,206 @@
+# Zybble
+
+Zybble is a production SaaS application for **AI-powered business lead discovery**: describe the businesses you need in plain language, Gemini structures the request, SerpApi collects public business data from Google Maps, Zybble normalizes, deduplicates, and organizes it into exportable lead lists — behind real auth, plan entitlements, team workspaces, and Razorpay-billed subscriptions.
+
+```
+Browser (Vite + React SPA)
+   │
+   ├── Supabase Auth (email/password, sessions, reset)
+   ├── Supabase PostgREST (RLS-guarded reads/writes)
+   │
+   └── Supabase Edge Functions  ← every secret lives here, never in the bundle
+         ├── search-run      → Gemini interpret → SerpApi → normalize → dedupe → persist
+         ├── ai-analyze      → Gemini lead intelligence
+         ├── export-run      → server-side CSV generation
+         ├── team-invite     → seats + Resend invitations
+         ├── billing         → Razorpay checkout / sync / cancel
+         └── razorpay-webhook → HMAC-verified, idempotent subscription sync
+                ▼
+         Supabase PostgreSQL (RLS, triggers, atomic usage reservation)
+```
+
+**Demo mode:** with no environment variables the frontend runs entirely on bundled demo data — landing page, dashboard, and every route keep working for previews. Add the two `VITE_` variables and the whole platform comes alive.
+
+---
+
+## Prerequisites
+
+Create accounts/tools before configuring anything:
+
+| Tool | What you need |
+| --- | --- |
+| GitHub | Repository access |
+| Node.js 20+ | `npm` (repo uses npm lockfile) |
+| Supabase | 1 project (free tier is fine) |
+| SerpApi | 1 **freshly rotated** API key |
+| Google AI Studio | 1 Gemini API key |
+| Razorpay | Account with international/USD + subscriptions enabled |
+| Resend | 1 verified sending domain |
+| Vercel | Optional — any static host works |
+
+---
+
+## 1 · Supabase setup
+
+1. Go to **app.supabase.com** → **New project** → pick org, name (`zybble`), a strong DB password, region closest to your users → **Create project**.
+2. Wait for provisioning (~2 min).
+3. Open **Project Settings → API Keys** (older dashboards: **Settings → API**).
+4. If you see **Create new API keys**, click it — you want the **publishable** (`sb_publishable_…`) and **secret** (`sb_secret_…`) pair. Legacy `anon`/`service_role` keys keep working but migrate per current guidance.
+5. Copy the **Project URL** and the **publishable key** → these go into `.env.local` (browser-safe).
+6. **Auth → Providers**: enable **Email**. Recommended settings:
+   - *Confirm email*: **ON** for production.
+   - *Password reset redirect URL*: `https://your-domain.com/#/reset?step=update`
+   - *Site URL*: `https://your-domain.com`
+   - *Additional redirect URLs*: `https://your-domain.com/#/overview`, `http://localhost:5173/#/overview` (dev).
+7. **SQL Editor → New query**: paste the entire contents of [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql) → **Run**.
+8. Verify: **Table Editor** should list `plans, profiles, workspaces, workspace_members, workspace_invitations, subscriptions, payments, invoices, lead_searches, lead_search_jobs, leads, lead_lists, lead_list_members, exports, usage_counters, activity_logs, ai_requests, ai_insights, webhook_events`. Every table shows **RLS Enabled**.
+9. (CLI alternative) `supabase login && supabase link --project-ref <ref> && supabase db push`.
+
+### Deploy the Edge Functions
+
+Install the Supabase CLI (`brew install supabase/tap/supabase` or `npm i -g supabase`), then:
+
+```bash
+supabase login
+supabase link --project-ref YOUR_PROJECT_REF
+
+# Provider secrets — server-side only, never in git
+supabase secrets set \
+  SERPAPI_API_KEY=your_rotated_key \
+  GEMINI_API_KEY=your_gemini_key \
+  RAZORPAY_KEY_ID=rzp_live_xxx \
+  RAZORPAY_KEY_SECRET=xxx \
+  RAZORPAY_WEBHOOK_SECRET=xxx \
+  RAZORPAY_PLAN_GROWTH_ID=plan_xxx \
+  RAZORPAY_PLAN_AGENCY_ID=plan_xxx \
+  RAZORPAY_PLAN_SCALE_ID=plan_xxx \
+  RESEND_API_KEY=re_xxx \
+  RESEND_FROM_EMAIL="Zybble <hello@your-domain.com>" \
+  APP_URL="https://your-domain.com"
+
+supabase functions deploy search-run ai-analyze export-run team-invite billing razorpay-webhook
+```
+
+`razorpay-webhook` is deployed with `verify_jwt = false` (see `supabase/config.toml`) — its HMAC signature **is** the security boundary. All other functions demand the user's JWT.
+
+---
+
+## 2 · SerpApi setup
+
+1. Log in to **serpapi.com** → **Dashboard → API Key**.
+2. Treat any previously shared/pasted key as compromised → **regenerate it** in account settings.
+3. Copy the new key → set it locally (optional, for function testing) and as the Edge secret above (`SERPAPI_API_KEY`).
+4. Test: in SerpApi Playground run `engine=google_maps`, `q=coffee`, `ll=@40.7455,-74.0083,14z` — confirm `local_results` appear.
+5. Watch your monthly search credit; the engine caps at 12 pages (240 leads) per request and stops when `serpapi_pagination.next` disappears.
+
+## 3 · Gemini setup
+
+1. Open **aistudio.google.com** → sign in → **Get API key** → **Create API key** (choose a GCP project).
+2. Copy the key → Edge secret `GEMINI_API_KEY`. Optional override `GEMINI_MODEL` (default `gemini-2.5-flash`).
+3. Test with a `generateContent` request in AI Studio's code snippets — confirm `responseSchema` output returns JSON.
+
+## 4 · Razorpay setup
+
+1. Log in → complete KYC/onboarding (**Test Mode** first).
+2. Settings → **API Keys** → Generate key pair — note `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET`.
+3. Ensure **international collections / USD currency** is enabled for your account (Razorpay Dashboard → Settings → Configuration, or talk to support — international + subscriptions are eligibility-gated features).
+4. Dashboard → **Subscriptions → Plans → Create plan** for each:
+   | Zybble plan | Currency | Amount | Period |
+   | --- | --- | --- | --- |
+   | Growth | USD | $49 | monthly |
+   | Agency | USD | $99 | monthly |
+   | Scale | USD | $199 | monthly |
+5. Copy each `plan_xxx` ID into the Edge secrets.
+6. Settings → **Webhooks → Add webhook**:
+   - URL: `https://YOUR_PROJECT.supabase.co/functions/v1/razorpay-webhook`
+   - Secret: strong random string → `RAZORPAY_WEBHOOK_SECRET`
+   - Events: `subscription.activated · subscription.updated · subscription.resumed · subscription.completed · subscription.cancelled · subscription.halted · subscription.paused · payment.captured · payment.failed`
+7. Test the full subscription lifecycle (`billing` → checkout short_url) in Test Mode before flipping to **live** keys — test and live credentials are never interchangeable.
+
+## 5 · Resend setup
+
+1. **resend.com** → **Domains → Add Domain** → enter your sending domain.
+2. Add the DNS records shown (SPF/DKIM/MX) at your DNS host → **Verify**.
+3. **API Keys → Create** → copy `RESEND_API_KEY` → Edge secrets.
+4. Set `RESEND_FROM_EMAIL` to an address on the verified domain.
+5. Send a test email from the Resend dashboard → confirm inbox delivery.
+
+## 6 · Run locally
+
+```bash
+git clone <your-repo-url> && cd zybble
+npm install
+cp .env.example .env.local   # fill VITE_SUPABASE_URL + VITE_SUPABASE_PUBLISHABLE_KEY
+npm run dev
+```
+
+- Visit `http://localhost:5173` — marketing site.
+- `#/login` / `#/signup` — real auth; `#/overview` — protected dashboard.
+- Without `VITE_` vars the app runs demo mode (mock data, zero persistence, zero crashes).
+
+## 7 · Deploy to Vercel
+
+1. Push the repo to GitHub.
+2. Vercel → **Add New Project → Import Git Repository**.
+3. Framework preset: **Vite** (auto-detected). Build command `npm run build`, output `dist`.
+4. **Environment Variables** (Production + Preview — scoped per current Vercel guidance):
+   - `VITE_SUPABASE_URL`
+   - `VITE_SUPABASE_PUBLISHABLE_KEY`
+   - *(Only these two — Edge secrets never enter Vercel.)*
+5. **Deploy** → test the preview URL end-to-end.
+6. Add your custom domain → then go back and:
+   - Supabase **Auth → URL Configuration**: add the domain as Site URL + allowed redirect URLs.
+   - Confirm the Razorpay webhook URL points to the production project.
+7. Every merge to `main` redeploys automatically.
+
+## Git workflow
+
+```text
+feature branch → pull request → merge to main → auto-deploy
+```
+
+Never commit: `.env`, `.env.local`, any key material. `.gitignore` already excludes them.
+
+## Architecture notes
+
+- **Secrets**: only `VITE_SUPABASE_URL` + `VITE_SUPABASE_PUBLISHABLE_KEY` reach the browser; the publishable key is safe because every table is RLS-guarded. All provider keys exist solely as Edge Function secrets.
+- **Usage enforcement**: `reserve_leads()` is a security-definer RPC doing an atomic check-and-increment — concurrent searches can't overrun an allowance; unused reservations are refunded after each run.
+- **Limits**: one-list (Free), seat counts, and client-workspace gating are enforced by **database triggers**, not the UI.
+- **Idempotency**: `webhook_events` stores provider event IDs; duplicates return `200` without re-processing.
+- **Deduplication**: deterministic `dedupe_key` (place_id → data_id → data_cid → domain → phone → name+address fallback) + `unique(workspace_id, dedupe_key)` upsert — searches are re-runnable without ever doubling leads.
+- **AI honesty**: Gemini never fabricates data; missing fields (e.g. email) are explicitly unavailable.
+
+## Demo data
+
+When backend env vars are absent, the UI falls back to bundled fictional demo businesses (`555` phone numbers, fictional names) so every screen renders meaningfully. Development seeding of a real workspace is optional via SQL after migrations.
+
+---
+
+## Production Launch Checklist
+
+- [ ] Supabase configured
+- [ ] Database migrations applied
+- [ ] RLS verified (Table Editor shows RLS on every table)
+- [ ] Auth tested (signup, email confirm, login, reset flow)
+- [ ] Edge Functions deployed
+- [ ] Edge secrets configured (SerpApi, Gemini, Razorpay, Resend)
+- [ ] SerpApi configured (rotated key, quota visible)
+- [ ] Gemini configured
+- [ ] Razorpay configured (international/USD eligible, plans created)
+- [ ] Razorpay webhook configured + signature verified
+- [ ] Resend configured
+- [ ] Email domain verified (SPF/DKIM passing)
+- [ ] Vercel configured
+- [ ] Production environment variables configured
+- [ ] Custom domain configured
+- [ ] Supabase production redirect URLs configured
+- [ ] Payment flow tested (test subscription → webhook → entitlement flip)
+- [ ] Lead search tested (interpret → fetch → dedupe → persist)
+- [ ] CSV export tested
+- [ ] Usage limits tested (quota block + refund)
+- [ ] Team permissions tested (seats, roles)
+- [ ] Workspace isolation tested (two users, zero cross-visible data)
+- [ ] Security review completed
+- [ ] Production build passed (`npm run build`)
+- [ ] GitHub repository clean
+- [ ] No secrets committed
