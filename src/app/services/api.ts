@@ -377,6 +377,33 @@ export async function listWorkspaces(): Promise<Workspace[]> {
   return (data ?? []).map(mapWorkspace);
 }
 
+/**
+ * Server-side recovery for users whose signup provisioning failed or whose
+ * workspace was removed: the security-definer RPC re-links or creates their
+ * personal workspace exactly once (per-user advisory lock in Postgres), so
+ * it can never produce duplicates. Real rows only — never fabricated data.
+ */
+export async function ensurePersonalWorkspace(): Promise<string | null> {
+  const sb = requireClient();
+  const { data, error } = await sb.rpc("ensure_personal_workspace");
+  if (error) throw new Error(readableError(error.message));
+  return (data as string) ?? null;
+}
+
+/**
+ * All workspaces the user can see, self-healing: if the list comes back
+ * empty we ask the server to (re)provision the personal workspace and list
+ * again before giving up.
+ */
+export async function listWorkspacesWithRecovery(): Promise<Workspace[]> {
+  let all = await listWorkspaces();
+  if (!all.length) {
+    await ensurePersonalWorkspace();
+    all = await listWorkspaces();
+  }
+  return all;
+}
+
 export async function getWorkspace(id: string): Promise<Workspace | null> {
   const sb = getSupabase();
   if (!sb) return null;
@@ -408,10 +435,14 @@ export async function createWorkspace(name: string): Promise<Workspace> {
 }
 
 export async function getDefaultWorkspace(): Promise<Workspace | null> {
-  const all = await listWorkspaces();
+  const all = await listWorkspacesWithRecovery();
   if (!all.length) return null;
   const selected = getSelectedWorkspaceId();
-  return all.find((w) => w.id === selected) ?? all[0];
+  const workspace = all.find((w) => w.id === selected) ?? all[0];
+  /* Drop a stale selection (deleted workspace / different account on this
+     browser) so the next load starts from a valid pointer. */
+  if (selected && workspace.id !== selected) setSelectedWorkspaceId(workspace.id);
+  return workspace;
 }
 
 /* ------------------------------------------------------------------ */

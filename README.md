@@ -77,8 +77,9 @@ Create accounts/tools before configuring anything:
      `https://your-domain.com/overview`, `https://your-domain.com/reset?step=update`,
      `http://localhost:5173/overview`, `http://localhost:5173/reset?step=update`
 7. **SQL Editor → New query**: paste the entire contents of [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql) → **Run**.
-8. Verify: **Table Editor** should list `plans, profiles, workspaces, workspace_members, workspace_invitations, subscriptions, payments, invoices, lead_searches, lead_search_jobs, leads, lead_lists, lead_list_members, exports, usage_counters, activity_logs, ai_requests, ai_insights, webhook_events`. Every table shows **RLS Enabled**.
-9. (CLI alternative) `supabase login && supabase link --project-ref <ref> && supabase db push`.
+8. **Run the second migration the same way**: paste [`supabase/migrations/0002_free_ai_and_workspace_recovery.sql`](supabase/migrations/0002_free_ai_and_workspace_recovery.sql) → **Run**. It (a) enables Zybble AI on the Free plan in the `plans` table (the server-side source of truth for Edge Function entitlement checks), (b) makes signup workspace provisioning idempotent, and (c) adds `ensure_personal_workspace()` — a recovery RPC the app calls automatically when a signed-in user has no workspace, plus a one-time backfill for existing users. It is safe to run on an existing database.
+9. Verify: **Table Editor** should list `plans, profiles, workspaces, workspace_members, workspace_invitations, subscriptions, payments, invoices, lead_searches, lead_search_jobs, leads, lead_lists, lead_list_members, exports, usage_counters, activity_logs, ai_requests, ai_insights, webhook_events`. Every table shows **RLS Enabled**. In `plans`, the `free` row should show `has_ai = true`.
+10. (CLI alternative) `supabase login && supabase link --project-ref <ref> && supabase db push`.
 
 ### Deploy the Edge Functions
 
@@ -198,7 +199,9 @@ Never commit: `.env`, `.env.local`, any key material. `.gitignore` already exclu
 
 ## Demo data
 
-When backend env vars are absent, the UI falls back to bundled fictional demo businesses (`555` phone numbers, fictional names) so every screen renders meaningfully. Development seeding of a real workspace is optional via SQL after migrations.
+There is none. The app ships without any mock/demo data source — every screen renders
+from real Supabase rows or an explicit empty/error state. If the backend is unreachable,
+users see an actionable error, never fictional leads or fake workspaces.
 
 ---
 

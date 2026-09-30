@@ -15,7 +15,8 @@ import {
 } from "lucide-react";
 import { cn } from "../../utils/cn";
 import { AppLayout } from "../components/AppLayout";
-import { Badge, Btn, Card, SectionTitle, Skel } from "../components/ui";
+import { Badge, Btn, Card, SectionTitle } from "../components/ui";
+import { UsageSkeleton } from "../components/skeletons";
 import { planFromId } from "../data/plans";
 import { useAppSeo } from "../hooks";
 import { getUsage, type UsageData } from "../services/api";
@@ -134,16 +135,14 @@ export function UsagePage() {
         </Card>
       ) : null}
 
+      {/* Loading skeleton mirrors the KPI row, chart, and breakdown so the
+          swap to real data causes no layout shift. */}
+      {busy || !data ? (
+        <UsageSkeleton />
+      ) : (
+        <>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {busy || !data
-          ? Array.from({ length: 4 }).map((_, i) => (
-              <Card key={i} className="p-4" aria-hidden="true">
-                <Skel className="h-2.5 w-20" />
-                <Skel className="mt-3 h-6 w-16" />
-                <Skel className="mt-2 h-2 w-28" />
-              </Card>
-            ))
-          : [
+        {[
               { icon: Gauge, label: "Leads used", value: data.used, sub: `${pct}% of monthly allowance` },
               { icon: Layers, label: "Allowance", value: data.allowance, sub: `${plan.label} plan · monthly` },
               { icon: FileSearch, label: "Remaining", value: data.remaining, sub: `resets ${data.resetDate}` },
@@ -151,7 +150,7 @@ export function UsagePage() {
                 icon: Sparkles,
                 label: "AI analyses",
                 value: data.aiRuns,
-                sub: plan.ai ? "included on this plan" : "available on Growth and above",
+                sub: "included on every plan",
               },
             ].map((card) => (
               <Card key={card.label} className="p-4">
@@ -174,21 +173,13 @@ export function UsagePage() {
           <SectionTitle
             title="Leads discovered"
             description={
-              busy
-                ? "Loading your history…"
-                : monthly.length
-                  ? `${totalMonthly.toLocaleString()} leads over your recorded cycles.`
-                  : "Your monthly history appears here once you start searching."
+              monthly.length
+                ? `${totalMonthly.toLocaleString()} leads over your recorded cycles.`
+                : "Your monthly history appears here once you start searching."
             }
             aside={<Badge tone="neutral">by billing cycle</Badge>}
           />
-          {busy ? (
-            <div className="mt-4 flex h-32 items-end gap-2" aria-hidden="true">
-              {Array.from({ length: 6 }).map((_, i) => (
-                <Skel key={i} className="h-full flex-1 rounded-t" />
-              ))}
-            </div>
-          ) : monthly.length === 0 ? (
+          {monthly.length === 0 ? (
             <div className="mt-4 flex h-32 items-center justify-center rounded-md border border-dashed border-black/[0.08]">
               <p className="text-[11.5px] text-ink-mute">No usage recorded yet.</p>
             </div>
@@ -214,13 +205,6 @@ export function UsagePage() {
 
         <Card className="px-4 pt-4">
           <SectionTitle title="Breakdown" />
-          {busy || !data ? (
-            <div className="space-y-3 py-3" aria-hidden="true">
-              {Array.from({ length: 5 }).map((_, i) => (
-                <Skel key={i} className="block h-8 w-full rounded" />
-              ))}
-            </div>
-          ) : (
             <div className="pt-1">
               <UsageRow
                 icon={Search}
@@ -234,7 +218,6 @@ export function UsagePage() {
               <UsageRow icon={Sparkles} label="AI analyses" used={data.aiRuns} tint="bg-brand-50 text-brand-700" />
               <UsageRow icon={Zap} label="Searches run" used={data.searches} tint="bg-neutral-100 text-neutral-500" />
             </div>
-          )}
           <p className="border-t border-black/[0.05] py-3 text-[10.5px] leading-4 text-neutral-400">
             Discovery draws on your monthly allowance. Saving, exporting, and AI analysis don't add extra per-use
             charges on your plan.
@@ -242,7 +225,7 @@ export function UsagePage() {
         </Card>
       </div>
 
-      {!busy && data ? (
+      {data ? (
         <Card className="mt-3 flex flex-wrap items-center gap-3 px-4 py-3">
           <span className="grid size-8 place-items-center rounded-md bg-brand-50 text-brand-700">
             <Gauge className="size-4" aria-hidden="true" />
@@ -261,6 +244,8 @@ export function UsagePage() {
           </Btn>
         </Card>
       ) : null}
+        </>
+      )}
     </AppLayout>
   );
 }

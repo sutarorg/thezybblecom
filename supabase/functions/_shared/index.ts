@@ -109,11 +109,13 @@ export async function getEntitlements(sb: SupabaseClient, userId: string): Promi
     sub && ["active", "trialing"].includes(sub.status) ? sub.plan_id : "free";
 
   const { data: plan } = await sb.from("plans").select("*").eq("id", planId).single();
+  /* Fallback mirrors the seeded `plans` table (see migrations) — Zybble AI is
+     included on every plan, including Free. */
   const base = plan ?? {
     lead_allowance: 50,
     max_lists: 1,
     max_users: 1,
-    has_ai: false,
+    has_ai: true,
     client_workspaces: false,
     priority_processing: false,
   };

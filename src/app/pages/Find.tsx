@@ -35,6 +35,7 @@ import {
   FieldLabel,
   Input,
   SectionTitle,
+  Skel,
   Switch,
   useToast,
 } from "../components/ui";
@@ -45,7 +46,6 @@ import {
   RADIUS_OPTIONS,
   RATING_OPTIONS,
   SORT_OPTIONS,
-  planFromId,
 } from "../data/plans";
 import type { Lead } from "../data/types";
 import { useAppSeo } from "../hooks";
@@ -109,8 +109,7 @@ function ToggleRow({
 export function FindPage() {
   useAppSeo("Find Leads — Zybble", "Describe the businesses you need and collect them as leads.", "/find");
   const toast = useToast();
-  const { workspace, planId, loading: ctxLoading } = useWorkspaceContext();
-  const plan = planFromId(planId);
+  const { workspace, loading: ctxLoading, error: ctxError, refresh } = useWorkspaceContext();
 
   /* ------------ manual filters (the source of truth) ------------ */
   const [filters, setFilters] = useState<SearchFilters>(EMPTY_FILTERS);
@@ -159,7 +158,7 @@ export function FindPage() {
       return;
     }
     if (!workspace) {
-      toast("Your workspace is still loading — try again in a moment.", "error");
+      toast("We couldn't load your workspace yet — retry below.", "error");
       return;
     }
     timers.current.forEach((t) => window.clearTimeout(t));
@@ -198,10 +197,6 @@ export function FindPage() {
   /* ------------ AI: interpret only, never execute ------------ */
   const onInterpret = async () => {
     if (!request.trim() || !workspace) return;
-    if (!plan.ai) {
-      toast("Zybble AI is available on Growth, Agency, and Scale.", "error");
-      return;
-    }
     aiTimers.current.forEach((t) => window.clearTimeout(t));
     aiTimers.current = [];
     setAiPhase("thinking");
@@ -584,16 +579,28 @@ export function FindPage() {
             </Card>
           ) : null}
 
-          {/* idle */}
+          {/* idle — while the workspace context resolves, mirror the empty-state
+              card exactly so nothing shifts once the real state renders */}
           {phase === "idle" && !runError ? (
-            <Card className="p-5">
-              <EmptyState
-                className="border-0 bg-transparent py-8"
-                icon={<Search className="size-4" aria-hidden="true" />}
-                title="Set your criteria above"
-                description="Enter a business type and location, refine what matters, then press Find leads. Or describe what you want to Zybble AI on the right and it will fill the filters in for you."
-              />
-            </Card>
+            ctxLoading ? (
+              <Card className="p-5" aria-hidden="true">
+                <div className="flex flex-col items-center px-6 py-8 text-center">
+                  <Skel className="size-9 rounded-md" />
+                  <Skel className="mt-3 h-3 w-36 rounded" />
+                  <Skel className="mt-2 h-2 w-64 max-w-full rounded" />
+                  <Skel className="mt-1.5 h-2 w-52 max-w-full rounded" />
+                </div>
+              </Card>
+            ) : (
+              <Card className="p-5">
+                <EmptyState
+                  className="border-0 bg-transparent py-8"
+                  icon={<Search className="size-4" aria-hidden="true" />}
+                  title="Set your criteria above"
+                  description="Enter a business type and location, refine what matters, then press Find leads. Or describe what you want to Zybble AI on the right and it will fill the filters in for you."
+                />
+              </Card>
+            )
           ) : null}
 
           {/* results */}
@@ -665,48 +672,36 @@ export function FindPage() {
               </div>
 
               <div className="space-y-3 p-3.5">
-                {!plan.ai ? (
-                  <div className="rounded-md border border-black/[0.06] bg-neutral-50/70 p-3 text-center">
-                    <p className="text-[11.5px] font-medium text-ink">Zybble AI is a paid feature</p>
-                    <p className="mt-1 text-[10.5px] leading-4 text-ink-mute">
-                      Included on Growth, Agency, and Scale. You can still use the manual filters on any plan.
-                    </p>
-                    <Btn variant="outline" size="sm" className="mt-2.5 w-full" href="/billing">
-                      View plans
-                    </Btn>
-                  </div>
-                ) : (
-                  <>
-                    <div>
-                      <FieldLabel htmlFor="ai-request">Describe what you need</FieldLabel>
-                      <textarea
-                        id="ai-request"
-                        rows={3}
-                        value={request}
-                        onChange={(e) => setRequest(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                            e.preventDefault();
-                            onInterpret();
-                          }
-                        }}
-                        placeholder="e.g. Find 100 dentists in Austin with websites and 4+ ratings"
-                        className="w-full resize-y rounded border border-black/[0.09] bg-white px-2.5 py-2 text-[12px] leading-5 text-ink placeholder:text-neutral-400 outline-none transition-colors focus:border-brand-600/50 focus:ring-2 focus:ring-brand-600/15"
-                      />
-                      <button
-                        type="button"
-                        onClick={onInterpret}
-                        disabled={!request.trim() || aiPhase === "thinking"}
-                        className="mt-2 inline-flex h-8 w-full items-center justify-center gap-1.5 rounded bg-ink text-[12px] font-medium text-white transition-all hover:bg-ink/90 active:scale-[0.99] disabled:opacity-40"
-                      >
-                        {aiPhase === "thinking" ? (
-                          <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-                        ) : (
-                          <Wand2 className="size-3.5" aria-hidden="true" />
-                        )}
-                        {aiPhase === "thinking" ? "Interpreting…" : "Fill in my filters"}
-                      </button>
-                    </div>
+                <div>
+                  <FieldLabel htmlFor="ai-request">Describe what you need</FieldLabel>
+                  <textarea
+                    id="ai-request"
+                    rows={3}
+                    value={request}
+                    onChange={(e) => setRequest(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                        e.preventDefault();
+                        onInterpret();
+                      }
+                    }}
+                    placeholder="e.g. Find 100 dentists in Austin with websites and 4+ ratings"
+                    className="w-full resize-y rounded border border-black/[0.09] bg-white px-2.5 py-2 text-[12px] leading-5 text-ink placeholder:text-neutral-400 outline-none transition-colors focus:border-brand-600/50 focus:ring-2 focus:ring-brand-600/15"
+                  />
+                  <button
+                    type="button"
+                    onClick={onInterpret}
+                    disabled={!request.trim() || aiPhase === "thinking" || !workspace}
+                    className="mt-2 inline-flex h-8 w-full items-center justify-center gap-1.5 rounded bg-ink text-[12px] font-medium text-white transition-all hover:bg-ink/90 active:scale-[0.99] disabled:opacity-40"
+                  >
+                    {aiPhase === "thinking" ? (
+                      <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Wand2 className="size-3.5" aria-hidden="true" />
+                    )}
+                    {aiPhase === "thinking" ? "Interpreting…" : "Fill in my filters"}
+                  </button>
+                </div>
 
                     {/* four interpretation stages */}
                     {aiPhase === "thinking" || aiPhase === "ready" ? (
@@ -788,8 +783,6 @@ export function FindPage() {
                         a search on its own.
                       </p>
                     ) : null}
-                  </>
-                )}
 
                 {/* insights from the last run */}
                 {stats?.insights?.length ? (
@@ -819,8 +812,30 @@ export function FindPage() {
         </div>
       </div>
 
-      {ctxLoading ? null : !workspace ? (
-        <p className="mt-3 text-[11px] text-ink-mute">Loading your workspace…</p>
+      {/* Workspace context failed to resolve — actionable error, never a
+          silent "still loading" state and never fabricated data. */}
+      {!ctxLoading && !workspace ? (
+        <Card className="mt-3 flex items-start gap-3 p-4">
+          <span className="grid size-8 shrink-0 place-items-center rounded-md bg-red-50 text-red-600">
+            <TriangleAlert className="size-4" aria-hidden="true" />
+          </span>
+          <div className="min-w-0">
+            <p className="text-[13px] font-medium text-ink">We couldn't load your workspace</p>
+            <p className="mt-0.5 text-xs leading-5 text-ink-mute">
+              {ctxError ??
+                "Your workspace couldn't be reached. Your searches need one — retry below or reload the page."}
+            </p>
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              <Btn variant="primary" size="sm" onClick={() => refresh()}>
+                <RotateCcw className="size-3.5" aria-hidden="true" />
+                Retry
+              </Btn>
+              <Btn variant="outline" size="sm" onClick={() => window.location.reload()}>
+                Reload page
+              </Btn>
+            </div>
+          </div>
+        </Card>
       ) : null}
     </AppLayout>
   );

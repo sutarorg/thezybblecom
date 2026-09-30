@@ -17,6 +17,7 @@ import {
   formatDate,
   useToast,
 } from "../components/ui";
+import { WorkspacesSkeleton } from "../components/skeletons";
 import { planFromId } from "../data/plans";
 import type { Workspace } from "../data/types";
 import { useAppSeo } from "../hooks";
@@ -117,21 +118,7 @@ export function WorkspacesPage() {
       ) : null}
 
       {busy ? (
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3" aria-hidden="true">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <Card key={i} className="p-4">
-              <div className="flex items-center gap-2.5">
-                <span className="skel size-9 rounded-md" />
-                <div className="flex-1 space-y-1.5">
-                  <span className="skel block h-2.5 w-36 rounded" />
-                  <span className="skel block h-2 w-24 rounded" />
-                </div>
-              </div>
-              <span className="skel mt-4 block h-1.5 w-full rounded" />
-              <span className="skel mt-3 block h-2 w-2/3 rounded" />
-            </Card>
-          ))}
-        </div>
+        <WorkspacesSkeleton count={3} />
       ) : workspaces.length === 0 ? (
         <EmptyState
           icon={<Building2 className="size-4" aria-hidden="true" />}

@@ -28,7 +28,7 @@ import { useAuthUser } from "../services/hooks";
 import {
   getSelectedWorkspaceId,
   getUsage,
-  listWorkspaces,
+  listWorkspacesWithRecovery,
   setSelectedWorkspaceId,
   signOut,
 } from "../services/api";
@@ -253,7 +253,10 @@ export function AppLayout({
     let mounted = true;
 
     const load = () => {
-      listWorkspaces()
+      /* Self-healing: if the user has no workspace (failed signup trigger,
+         removed workspace), the recovery RPC provisions one server-side
+         before we re-list. Never fabricates data. */
+      listWorkspacesWithRecovery()
         .then((ws) => {
           if (!mounted) return;
           /* Store the result even when empty — the UI needs the empty state. */

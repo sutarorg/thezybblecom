@@ -1,7 +1,8 @@
 /* ------------------------------------------------------------------ */
 /* Supabase browser client — publishable key only.                     */
-/* When env vars are absent the app runs in demo mode with mock data,  */
-/* so the marketing preview keeps working without a backend.           */
+/* When env vars are absent the app refuses to authenticate and shows  */
+/* an explicit "backend not configured" screen. There is no demo/mock  */
+/* data path anywhere in the product.                                  */
 /* ------------------------------------------------------------------ */
 import { createClient, type SupabaseClient, type Session } from "@supabase/supabase-js";
 

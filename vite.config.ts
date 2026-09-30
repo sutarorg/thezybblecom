@@ -16,4 +16,9 @@ export default defineConfig({
       "@": path.resolve(__dirname, "src"),
     },
   },
+  preview: {
+    // Preview servers may run behind a proxy host (e.g. sandbox previews).
+    host: true,
+    allowedHosts: true,
+  },
 });
