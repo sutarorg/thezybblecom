@@ -14,12 +14,12 @@ const MAX_PER_RUN = 240;
 const MAX_BATCHES = 12;
 const PAGE_SIZE = 20;
 
-class ApiError extends Error {
-  constructor(
-    readonly status: number,
-    message: string
-  ) {
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
     super(message);
+    this.status = status;
   }
 }
 
@@ -215,23 +215,38 @@ async function refundLeads(sb: SupabaseClient, workspaceId: string, count: numbe
   }
 }
 
-async function serpApiMaps(
+/**
+ * SerpApi returns HTTP 200 with an `error` string when a query simply has no
+ * results left. That is the end of pagination, not a provider outage.
+ */
+const EMPTY_RESULT_HINTS = [
+  "hasn't returned any results",
+  "has not returned any results",
+  "no results found",
+  "google maps hasn't returned",
+];
+
+export async function serpApiMaps(
   apiKey: string,
-  params: { q: string; start: number }
+  params: { q: string; start: number; ll?: string | null }
 ): Promise<Record<string, unknown>> {
   const search = new URLSearchParams({
     engine: "google_maps",
     type: "search",
     q: params.q,
+    google_domain: "google.com",
+    hl: "en",
     api_key: apiKey,
   });
+  // `ll` is required by SerpApi for pages 2+ (and strongly improves relevance).
+  if (params.ll) search.set("ll", params.ll);
   if (params.start > 0) search.set("start", String(params.start));
 
   let response: Response;
   try {
     response = await fetch(`https://serpapi.com/search.json?${search.toString()}`, {
       headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(20_000),
+      signal: AbortSignal.timeout(30_000),
     });
   } catch {
     throw new ApiError(502, "The business-data provider couldn't be reached. Try again shortly.");
@@ -241,6 +256,9 @@ async function serpApiMaps(
   const providerMessage = typeof payload.error === "string" ? payload.error : "";
   if (!response.ok || providerMessage) {
     const lower = providerMessage.toLowerCase();
+    if (response.ok && EMPTY_RESULT_HINTS.some((hint) => lower.includes(hint))) {
+      return { local_results: [] };
+    }
     if (response.status === 401 || response.status === 403 || lower.includes("api key")) {
       throw new ApiError(
         502,
@@ -257,6 +275,43 @@ async function serpApiMaps(
 
 function stringValue(value: unknown) {
   return typeof value === "string" ? value : "";
+}
+
+/** SerpApi returns `local_results` for searches and `place_results` when the
+ *  query resolves to a single business. Accept both shapes. */
+export function pageResults(page: Record<string, unknown>): ProviderResult[] {
+  if (Array.isArray(page.local_results)) return page.local_results as ProviderResult[];
+  if (page.local_results && typeof page.local_results === "object") {
+    return [page.local_results as ProviderResult];
+  }
+  if (Array.isArray(page.place_results)) return page.place_results as ProviderResult[];
+  if (page.place_results && typeof page.place_results === "object") {
+    return [page.place_results as ProviderResult];
+  }
+  return [];
+}
+
+/** Build the `@lat,lng,zoom` value SerpApi needs for pagination. */
+export function llFromPage(
+  page: Record<string, unknown>,
+  results: ProviderResult[]
+): string | null {
+  const fromParams = stringValue(
+    (page.search_parameters as Record<string, unknown> | undefined)?.ll
+  );
+  if (fromParams) return fromParams;
+
+  const points: { lat: number; lng: number }[] = [];
+  for (const result of results) {
+    const gps = objectValue(result.gps_coordinates);
+    const lat = Number(gps.latitude);
+    const lng = Number(gps.longitude);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) points.push({ lat, lng });
+  }
+  if (!points.length) return null;
+  const lat = points.reduce((sum, p) => sum + p.lat, 0) / points.length;
+  const lng = points.reduce((sum, p) => sum + p.lng, 0) / points.length;
+  return `@${lat.toFixed(7)},${lng.toFixed(7)},13z`;
 }
 
 function stringArray(value: unknown): string[] {
@@ -562,20 +617,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let dedupeRemoved = 0;
     let providerError: ApiError | null = null;
 
+    let ll: string | null = null;
+
     for (let batch = 0; batch < MAX_BATCHES && rows.length < filters.quantity; batch++) {
       let page: Record<string, unknown>;
       try {
-        page = await serpApiMaps(apiKey, { q: query, start: batch * PAGE_SIZE });
+        page = await serpApiMaps(apiKey, { q: query, start: batch * PAGE_SIZE, ll });
       } catch (error) {
         providerError = error instanceof ApiError
           ? error
           : new ApiError(502, "The business-data provider failed. Try again shortly.");
         break;
       }
-      const localResults = Array.isArray(page.local_results)
-        ? (page.local_results as ProviderResult[])
-        : [];
+      const localResults = pageResults(page);
       if (!localResults.length) break;
+
+      // SerpApi requires `ll` for pages 2+. Google never echoes one back when the
+      // caller omitted it, so anchor the rest of the run on the first page's
+      // coordinates — otherwise every search was capped at a single page.
+      if (!ll) ll = llFromPage(page, localResults);
 
       for (const result of localResults) {
         const row = normalize(result, {
@@ -593,7 +653,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
 
       const pagination = objectValue(page.serpapi_pagination);
-      if (!pagination.next || localResults.length < PAGE_SIZE) break;
+      const exhausted = localResults.length < PAGE_SIZE;
+      // Page 1 legitimately has no `next` until `ll` is known, so only trust
+      // the absence of `next` once we're already paginating with coordinates.
+      const noMorePages = batch > 0 && !pagination.next;
+      if (exhausted || noMorePages || !ll) break;
     }
 
     if (providerError && rows.length === 0) throw providerError;

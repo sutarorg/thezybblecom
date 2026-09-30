@@ -149,6 +149,13 @@ export async function reserveLeads(
 /* ------------------------------------------------------------------ */
 /* SerpApi                                                             */
 /* ------------------------------------------------------------------ */
+export const SERPAPI_EMPTY_HINTS = [
+  "hasn't returned any results",
+  "has not returned any results",
+  "no results found",
+  "google maps hasn't returned",
+];
+
 export async function serpApiMaps(params: {
   q: string;
   ll?: string | null;
@@ -156,24 +163,78 @@ export async function serpApiMaps(params: {
   hl?: string;
   gl?: string;
 }) {
-  const key = Deno.env.get("SERPAPI_API_KEY");
+  const key = Deno.env.get("SERPAPI_API_KEY") ?? Deno.env.get("SERPAPI_KEY");
   if (!key) throw new HttpError(500, "SerpApi isn't configured on the server.");
 
-  const search = new URLSearchParams({ engine: "google_maps", q: params.q, api_key: key });
+  const search = new URLSearchParams({
+    engine: "google_maps",
+    type: "search",
+    q: params.q,
+    google_domain: "google.com",
+    hl: params.hl ?? "en",
+    api_key: key,
+  });
+  if (params.gl) search.set("gl", params.gl);
+  // SerpApi requires `ll` for pages 2+ of the Google Maps engine.
   if (params.ll) search.set("ll", params.ll);
   if (params.start) search.set("start", String(params.start));
-  search.set("type", "search");
 
-  const res = await fetch(`https://serpapi.com/search?${search.toString()}`, {
-    headers: { Accept: "application/json" },
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    console.error("serpapi error", res.status, text.slice(0, 200));
+  let res: Response;
+  try {
+    res = await fetch(`https://serpapi.com/search.json?${search.toString()}`, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch {
+    throw new HttpError(502, "The business-data provider couldn't be reached. Try again shortly.");
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const payload = (await res.json().catch(() => ({}))) as Record<string, any>;
+  const message = typeof payload.error === "string" ? payload.error : "";
+  if (!res.ok || message) {
+    const lower = message.toLowerCase();
+    // A "no results" answer is the end of pagination, not a provider failure.
+    if (res.ok && SERPAPI_EMPTY_HINTS.some((hint) => lower.includes(hint))) {
+      return { local_results: [] } as Record<string, any>;
+    }
+    console.error("serpapi error", res.status, message.slice(0, 200));
+    if (res.status === 401 || res.status === 403 || lower.includes("api key")) {
+      throw new HttpError(502, "The SerpApi key on the server was rejected. Update SERPAPI_API_KEY.");
+    }
+    if (res.status === 429 || lower.includes("limit") || lower.includes("credit")) {
+      throw new HttpError(502, "The SerpApi search-credit limit has been reached.");
+    }
     throw new HttpError(502, "The business-data provider failed. Try again shortly.");
   }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (await res.json()) as Record<string, any>;
+  return payload;
+}
+
+/** Normalize SerpApi Maps payloads into a flat result array. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function serpApiResults(page: Record<string, any> | null | undefined): Record<string, any>[] {
+  if (!page) return [];
+  const local = page.local_results;
+  if (Array.isArray(local)) return local;
+  if (local && typeof local === "object") return [local];
+  const place = page.place_results;
+  if (Array.isArray(place)) return place;
+  if (place && typeof place === "object") return [place];
+  return [];
+}
+
+/** Build the `@lat,lng,zoom` value SerpApi needs to paginate. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function serpApiLl(page: Record<string, any>, results: Record<string, any>[]): string | null {
+  const fromParams = page?.search_parameters?.ll;
+  if (typeof fromParams === "string" && fromParams) return fromParams;
+  const points = results
+    .map((r) => ({ lat: Number(r?.gps_coordinates?.latitude), lng: Number(r?.gps_coordinates?.longitude) }))
+    .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
+  if (!points.length) return null;
+  const lat = points.reduce((s, p) => s + p.lat, 0) / points.length;
+  const lng = points.reduce((s, p) => s + p.lng, 0) / points.length;
+  return `@${lat.toFixed(7)},${lng.toFixed(7)},13z`;
 }
 
 /* ------------------------------------------------------------------ */

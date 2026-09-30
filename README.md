@@ -117,7 +117,15 @@ supabase functions deploy search-run ai-interpret ai-analyze export-run team-inv
 3. Copy the new key → set `SERPAPI_API_KEY` as a **server-only Vercel environment variable** for Production and Preview, then redeploy. Do not prefix it with `VITE_`; that would expose it to the browser bundle.
 4. If you run the app outside Vercel, also set it as a Supabase Edge Function secret (`supabase secrets set SERPAPI_API_KEY=...`) so the documented `search-run` fallback can run.
 5. Test: in SerpApi Playground run `engine=google_maps`, `q=coffee`, `ll=@40.7455,-74.0083,14z` — confirm `local_results` appear.
-6. Watch your monthly search credit; the engine caps at 12 pages (240 leads) per request and stops when `serpapi_pagination.next` disappears.
+6. Watch your monthly search credit; the engine caps at 12 pages (240 leads) per request and stops when a page returns fewer than 20 results.
+7. Local development: `npm run dev` now executes `api/search-run.ts` inside Vite, so put `SERPAPI_API_KEY` (plus `VITE_SUPABASE_URL` / `VITE_SUPABASE_PUBLISHABLE_KEY`) in `.env.local` and searches run against the real Vercel code path.
+
+**How the Google Maps engine is called** (matches [serpapi.com/google-maps-api](https://serpapi.com/google-maps-api)):
+
+- `engine=google_maps&type=search&q=<category> in <location>&google_domain=google.com&hl=en`
+- Pagination uses `start=0,20,40,…`, and SerpApi **requires `ll`** (`@lat,lng,zoom`) for every page after the first. Zybble derives `ll` from the GPS coordinates returned on page 1 and reuses it for the rest of the run.
+- A `200` response carrying `error: "Google Maps hasn't returned any results…"` means the result set is exhausted — it is treated as the end of pagination, not as a provider outage.
+- On Vercel, `vercel.json` must exclude `/api/*` from the SPA rewrite, otherwise `/api/search-run` is served `index.html` and every search fails.
 
 ## 3 · Gemini setup
 
