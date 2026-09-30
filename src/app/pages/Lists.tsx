@@ -32,6 +32,7 @@ import {
   relative,
   useToast,
 } from "../components/ui";
+import { ListsSkeleton } from "../components/skeletons";
 import { planFromId } from "../data/plans";
 import type { LeadList } from "../data/types";
 import { navigate, useAppSeo } from "../hooks";
@@ -176,22 +177,7 @@ export function ListsPage() {
       ) : null}
 
       {busy ? (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3" aria-hidden="true">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <Card key={i} className="p-4">
-              <div className="flex items-center gap-2.5">
-                <span className="skel size-8 rounded-md" />
-                <div className="flex-1 space-y-1.5">
-                  <span className="skel block h-2.5 w-32 rounded" />
-                  <span className="skel block h-2 w-20 rounded" />
-                </div>
-              </div>
-              <span className="skel mt-3 block h-2 w-full rounded" />
-              <span className="skel mt-1.5 block h-2 w-2/3 rounded" />
-              <span className="skel mt-3 block h-5 w-16 rounded" />
-            </Card>
-          ))}
-        </div>
+        <ListsSkeleton count={6} />
       ) : filtered.length === 0 ? (
         <EmptyState
           icon={<ListChecks className="size-4" aria-hidden="true" />}

@@ -17,10 +17,10 @@ import {
   Pagination,
   PopItem,
   Popover,
-  TableSkeleton,
   formatDate,
   useToast,
 } from "../components/ui";
+import { SearchHistorySkeleton } from "../components/skeletons";
 import type { SearchRecord } from "../data/types";
 import { navigate, useAppSeo } from "../hooks";
 import { deleteSearch, getSearches } from "../services/api";
@@ -150,9 +150,7 @@ export function SearchHistoryPage() {
       ) : null}
 
       {busy ? (
-        <div className="rounded-lg border border-black/[0.06] bg-white">
-          <TableSkeleton rows={8} cols={5} />
-        </div>
+        <SearchHistorySkeleton rows={8} />
       ) : filtered.length === 0 ? (
         <EmptyState
           icon={<History className="size-4" aria-hidden="true" />}

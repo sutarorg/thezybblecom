@@ -21,10 +21,10 @@ import {
   EmptyState,
   MetaText,
   SectionTitle,
-  Skel,
   formatDate,
   useToast,
 } from "../components/ui";
+import { BillingInvoicesSkeleton, BillingSummarySkeleton } from "../components/skeletons";
 import { PLANS } from "../../lib/site";
 import { planFromId } from "../data/plans";
 import { useAppSeo } from "../hooks";
@@ -114,14 +114,11 @@ export function BillingPage() {
         </Card>
       ) : null}
 
+      {busy ? (
+        <BillingSummarySkeleton />
+      ) : (
       <div className="grid gap-3 lg:grid-cols-3">
         <Card className="p-4 lg:col-span-2">
-          {busy ? (
-            <div aria-hidden="true">
-              <Skel className="h-10 w-48 rounded" />
-              <Skel className="mt-4 h-2 w-full rounded" />
-            </div>
-          ) : (
             <>
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="flex items-center gap-3">
@@ -179,14 +176,10 @@ export function BillingPage() {
                 </div>
               </div>
             </>
-          )}
         </Card>
 
         <Card className="p-4">
           <SectionTitle title="Seats" />
-          {busy ? (
-            <Skel className="mt-3 block h-14 w-full rounded" />
-          ) : (
             <>
               <p className="font-display mt-3 text-2xl font-semibold tracking-[-0.02em] text-ink">
                 {billing?.seats.used ?? 1}
@@ -199,9 +192,9 @@ export function BillingPage() {
                 Manage team
               </Btn>
             </>
-          )}
         </Card>
       </div>
+      )}
 
       {/* plans */}
       <div className="mt-6">
@@ -270,9 +263,7 @@ export function BillingPage() {
       <div className="mt-6">
         <SectionTitle title="Payment history" description="Invoices confirmed by our payment provider." className="mb-3" />
         {busy ? (
-          <Card className="p-4">
-            <Skel className="block h-24 w-full rounded" />
-          </Card>
+          <BillingInvoicesSkeleton />
         ) : !billing?.invoices.length ? (
           <EmptyState
             icon={<FileText className="size-4" aria-hidden="true" />}

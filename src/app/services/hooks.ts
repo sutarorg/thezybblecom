@@ -68,13 +68,33 @@ export function useWorkspace(user: AppUser | null | "loading") {
 
   const refresh = useCallback(() => {
     setLoading(true);
+    /*
+     * Never hang forever: if the workspace lookup (including the
+     * self-provisioning recovery) exceeds this budget, surface an
+     * actionable error instead of an endless "loading" state.
+     */
+    const budget = window.setTimeout(() => {
+      setLoading(false);
+      setError((current) =>
+        current ??
+        "Your workspace is taking longer than expected to load. Check your connection and try again."
+      );
+    }, 15000);
+
     getDefaultWorkspace()
       .then((ws) => {
+        window.clearTimeout(budget);
         setWorkspace(ws);
-        setError(null);
+        setError(ws ? null : "We couldn't load your workspace. Please try again.");
       })
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false));
+      .catch((e: Error) => {
+        window.clearTimeout(budget);
+        setError(e.message || "We couldn't load your workspace. Please try again.");
+      })
+      .finally(() => {
+        window.clearTimeout(budget);
+        setLoading(false);
+      });
   }, []);
 
   useEffect(() => {

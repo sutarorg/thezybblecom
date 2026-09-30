@@ -48,7 +48,7 @@ export const PACK_DATA_AI: Compact[] = [
     a: ["Zybble AI only works from the **available business data** — it can't confirm facts beyond that source, so verify before you act.", "It's an interpretation layer, not a verification service."],
     f: ["d-verify", "ai-summary", "how-ai"] },
   { id: "ai-free-plan", q: "Is AI included on the Free plan?", c: "ai", k: "free ai included plan available",
-    a: ["Zybble AI starts on **Growth ($49/mo)**. The Free plan includes natural-language search, phone and email data, 1 list, and CSV export."],
+    a: ["Yes — Zybble AI is included on **every plan, including Free**. The Free plan still caps volume at 50 leads a month and 1 list."],
     cta: ["View pricing", "/#pricing"], f: ["ai-availability", "plan-growth", "plan-free"] },
   { id: "ai-bulk", q: "Can AI analyze a whole list?", c: "ai", k: "bulk all many list batch every",
     a: ["Analysis runs per business, so you can work through the leads that matter most in a list rather than spending it everywhere."],

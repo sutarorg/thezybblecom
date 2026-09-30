@@ -29,6 +29,7 @@ import {
   Switch,
   useToast,
 } from "../components/ui";
+import { SettingsSkeleton } from "../components/skeletons";
 import { planFromId } from "../data/plans";
 import { navigate, useAppSeo } from "../hooks";
 import { updateProfile, updatePassword } from "../services/api";
@@ -89,7 +90,7 @@ export function SettingsPage() {
   useAppSeo("Settings — Zybble", "Account, workspace, notifications, and security preferences.", "/settings");
   const toast = useToast();
   const [tab, setTab] = useState<TabId>("profile");
-  const { user, workspace, planId } = useWorkspaceContext();
+  const { user, workspace, planId, loading: ctxLoading } = useWorkspaceContext();
   const plan = planFromId(planId);
 
   /* profile — hydrated from the signed-in account */
@@ -164,6 +165,11 @@ export function SettingsPage() {
 
   return (
     <AppLayout title="Settings" description="Account, workspace, and product preferences." wide>
+      {/* While the account context resolves, mirror the tab rail + card so
+          the real form swaps in without layout shift. */}
+      {ctxLoading || !user ? (
+        <SettingsSkeleton />
+      ) : (
       <div className="grid gap-3 lg:grid-cols-[200px_minmax(0,1fr)]">
         {/* tab rail */}
         <nav aria-label="Settings sections" className="lg:sticky lg:top-[60px] lg:self-start">
@@ -442,6 +448,7 @@ export function SettingsPage() {
           ) : null}
         </div>
       </div>
+      )}
 
       {/* delete confirmation */}
       <ConfirmDialog

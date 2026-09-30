@@ -534,48 +534,8 @@ export function ConfirmDialog({
 /* ------------------------------------------------------------------ */
 /* Skeleton                                                            */
 /* ------------------------------------------------------------------ */
-export function Skel({ className }: { className?: string }) {
-  return <span className={cn("skel inline-block rounded", className)} aria-hidden="true" />;
-}
-
-export function TableSkeleton({ rows = 6, cols = 6 }: { rows?: number; cols?: number }) {
-  return (
-    <div className="px-3 py-3" aria-hidden="true">
-      {Array.from({ length: rows }).map((_, i) => (
-        <div key={i} className="flex items-center gap-3 border-b border-black/[0.04] py-3 last:border-0">
-          <Skel className="size-4 rounded" />
-          <Skel className="size-6 rounded-md" />
-          <div className="flex-1 space-y-1.5">
-            <Skel className="h-2.5 w-44" />
-            <Skel className="h-2 w-28" />
-          </div>
-          {Array.from({ length: Math.max(1, cols - 3) }).map((__, j) => (
-            <Skel key={j} className="h-2.5 w-16" />
-          ))}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-export function CardGridSkeleton({ count = 6 }: { count?: number }) {
-  return (
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3" aria-hidden="true">
-      {Array.from({ length: count }).map((_, i) => (
-        <Card key={i} className="p-4">
-          <div className="flex items-center gap-2.5">
-            <Skel className="size-8 rounded-md" />
-            <div className="flex-1 space-y-1.5">
-              <Skel className="h-2.5 w-32" />
-              <Skel className="h-2 w-20" />
-            </div>
-          </div>
-          <Skel className="mt-3 h-2 w-full" />
-          <Skel className="mt-1.5 h-2 w-2/3" />
-        </Card>
-      ))}
-    </div>
-  );
+export function Skel({ className, style }: { className?: string; style?: React.CSSProperties }) {
+  return <span className={cn("skel inline-block rounded", className)} style={style} aria-hidden="true" />;
 }
 
 /* ------------------------------------------------------------------ */

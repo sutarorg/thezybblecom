@@ -119,6 +119,7 @@ export const PLANS: Plan[] = [
       "50 leads per month",
       "Phone & email data",
       "CSV export",
+      "Zybble AI",
       "1 lead list",
       "1 user",
     ],
@@ -189,7 +190,7 @@ export const FAQS: { q: string; a: string }[] = [
   },
   {
     q: "How does Zybble AI work?",
-    a: "On Growth plans and above, Zybble AI reads the available business data for a lead and summarizes what it means — local presence, review activity, and how reachable they are. AI output is generated from available data, so verify before you act on it.",
+    a: "Zybble AI is included on every plan, including Free. It reads the available business data for a lead and summarizes what it means — local presence, review activity, and how reachable they are. AI output is generated from available data, so verify before you act on it.",
   },
   {
     q: "Can I export my leads?",

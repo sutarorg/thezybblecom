@@ -21,11 +21,11 @@ import {
   PopItem,
   PopSep,
   Popover,
-  TableSkeleton,
   formatDate,
   relative,
   useToast,
 } from "../components/ui";
+import { TeamSkeleton } from "../components/skeletons";
 import { planFromId } from "../data/plans";
 import type { Role, TeamMember } from "../data/types";
 import { useAppSeo } from "../hooks";
@@ -154,9 +154,7 @@ export function TeamPage() {
       ) : null}
 
       {busy ? (
-        <div className="rounded-lg border border-black/[0.06] bg-white">
-          <TableSkeleton rows={3} cols={5} />
-        </div>
+        <TeamSkeleton rows={3} />
       ) : members.length === 0 ? (
         <EmptyState
           icon={<Users className="size-4" aria-hidden="true" />}

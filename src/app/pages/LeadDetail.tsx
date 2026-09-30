@@ -41,7 +41,6 @@ import {
   relative,
   useToast,
 } from "../components/ui";
-import { planFromId } from "../data/plans";
 import type { Lead, LeadList } from "../data/types";
 import { useAppSeo } from "../hooks";
 import {
@@ -83,8 +82,7 @@ const OPEN_META: Record<Lead["open_state"], { tone: "green" | "neutral"; label: 
 
 export function LeadDetailPage({ id }: { id: string }) {
   const toast = useToast();
-  const { workspace, planId, loading: ctxLoading } = useWorkspaceContext();
-  const plan = planFromId(planId);
+  const { workspace, loading: ctxLoading } = useWorkspaceContext();
 
   const [lead, setLead] = useState<Lead | null>(null);
   const [loading, setLoading] = useState(true);
@@ -194,10 +192,6 @@ export function LeadDetailPage({ id }: { id: string }) {
   /* ---------------- handlers ---------------- */
   const runAi = async () => {
     if (aiBusy || !workspace) return;
-    if (!plan.ai) {
-      toast("Zybble AI is available on Growth, Agency, and Scale.", "error");
-      return;
-    }
     setAiBusy(true);
     const { result, error } = await analyzeLead(lead.id, workspace.id);
     setAiBusy(false);
@@ -604,12 +598,8 @@ export function LeadDetailPage({ id }: { id: string }) {
             actions={[
               {
                 id: "analyze",
-                label: plan.ai
-                  ? aiLines.length
-                    ? "Re-analyze this lead"
-                    : "Analyze this lead"
-                  : "Zybble AI — upgrade to use",
-                hint: plan.ai ? "Reads the business data above" : "Included on Growth and above",
+                label: aiLines.length ? "Re-analyze this lead" : "Analyze this lead",
+                hint: "Reads the business data above",
                 icon: <Sparkles className="size-3" aria-hidden="true" />,
                 onClick: runAi,
                 busy: aiBusy,

@@ -66,7 +66,7 @@ export const PACK_EXTRA: Compact[] = [
   { id: "x-ai-writes-emails", q: "Does it write outreach emails?", c: "ai", k: "write email copy message draft template generate",
     a: ["Zybble AI's documented job is interpreting searches and analyzing businesses — including possible outreach angles you can build your own message from."], f: ["ai-outreach", "ai-summary", "csv-export"] },
   { id: "x-ai-cost", q: "Does using AI cost extra?", c: "ai", k: "cost extra charge credits price ai usage",
-    a: ["No — Zybble AI is included in the plan price on Growth, Agency, and Scale."], cta: ["View pricing", "/#pricing"], f: ["ai-availability", "p-hidden-fees", "plan-growth"] },
+    a: ["No — Zybble AI is included in the plan price on every plan, including Free."], cta: ["View pricing", "/#pricing"], f: ["ai-availability", "p-hidden-fees", "plan-growth"] },
 
   /* ——— Workflow ——— */
   { id: "x-w-team-share", q: "Can teammates see my lists?", c: "team", k: "share see teammates visible collaborate together",

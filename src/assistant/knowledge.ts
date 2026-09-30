@@ -302,11 +302,11 @@ const CORE_INTENTS: Record<string, Intent> = {
     answer: [
       {
         type: "p",
-        text: "Zybble AI is included on **Growth ($49/mo)**, **Agency ($99/mo)**, and **Scale ($199/mo)**.",
+        text: "Zybble AI is included on **every plan, including Free** — interpretation on /find and per-lead analysis.",
       },
       {
         type: "p",
-        text: "The **Free** plan covers the essentials: natural-language search, phone and email data, 1 list, and CSV export.",
+        text: "Paid plans raise volume, lists, seats, and add client workspaces — AI isn't gated behind an upgrade.",
       },
     ],
     cta: { label: "View pricing", href: "/#pricing" },
@@ -452,7 +452,7 @@ const CORE_INTENTS: Record<string, Intent> = {
       },
       {
         type: "p",
-        text: "For everyday prospecting, **Growth ($49/mo)** raises that to 5,000 leads and adds Zybble AI. Agencies add team seats and client workspaces on **Agency** and **Scale**.",
+        text: "For everyday prospecting, **Growth ($49/mo)** raises that to 5,000 leads with unlimited lists. Agencies add team seats and client workspaces on **Agency** and **Scale**.",
       },
     ],
     cta: { label: "View pricing", href: "/#pricing" },
@@ -565,7 +565,7 @@ const CORE_INTENTS: Record<string, Intent> = {
     answer: [
       {
         type: "p",
-        text: "That maps to **Growth — $49/mo**: 5,000 leads a month, unlimited lists, Zybble AI, phone and email data, and CSV export.",
+        text: "That maps to **Growth — $49/mo**: 5,000 leads a month, unlimited lists, phone and email data, and CSV export.",
       },
       {
         type: "p",
@@ -629,7 +629,7 @@ const CORE_INTENTS: Record<string, Intent> = {
       },
       {
         type: "p",
-        text: "Team plans also include client workspaces, plus Zybble AI and unlimited lists.",
+        text: "Team plans also add client workspaces and unlimited lists — Zybble AI is on every plan.",
       },
     ],
     cta: { label: "View pricing", href: "/#pricing" },

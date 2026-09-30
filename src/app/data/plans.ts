@@ -26,7 +26,7 @@ export const PLAN_CATALOG: Record<PlanId, PlanCapability> = {
     leadAllowance: 50,
     maxLists: 1,
     maxUsers: 1,
-    ai: false,
+    ai: true,
     clientWorkspaces: false,
     priorityProcessing: false,
   },

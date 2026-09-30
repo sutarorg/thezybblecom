@@ -32,7 +32,7 @@ Deno.serve(async (req) => {
 
     const entitlements = await getEntitlements(sb, user.id);
     if (!entitlements.allowances.ai) {
-      throw new HttpError(403, "Zybble AI is included on Growth, Agency, and Scale.");
+      throw new HttpError(403, "Zybble AI isn't available on your current plan.");
     }
 
     // cached insight first

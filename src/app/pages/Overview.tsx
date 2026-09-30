@@ -24,6 +24,7 @@ import {
   Skel,
   relative,
 } from "../components/ui";
+import { OverviewSkeleton } from "../components/skeletons";
 import type { ActivityItem, LeadList, SearchRecord } from "../data/types";
 import { useAppSeo } from "../hooks";
 import { getOverview, type OverviewData } from "../services/api";
@@ -124,18 +125,14 @@ export function OverviewPage() {
         </Card>
       ) : null}
 
-      {/* KPI row */}
+      {/* Loading skeleton mirrors the full page (KPI row, two-column
+          sections, list cards) so the swap causes no layout shift. */}
       {busy ? (
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5" aria-hidden="true">
-          {Array.from({ length: 5 }).map((_, i) => (
-            <Card key={i} className="p-4">
-              <Skel className="h-2.5 w-20" />
-              <Skel className="mt-3 h-6 w-16" />
-              <Skel className="mt-2 h-2 w-24" />
-            </Card>
-          ))}
-        </div>
-      ) : kpi ? (
+        <OverviewSkeleton />
+      ) : (
+        <>
+      {/* KPI row */}
+      {kpi ? (
         <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
           <KpiCard label="Leads found" value={kpi.leadsFound} sub="in this workspace" icon={Search} />
           <KpiCard label="Leads saved" value={kpi.leadsSaved} sub="across your lists" icon={ListChecks} />
@@ -165,19 +162,7 @@ export function OverviewPage() {
               </a>
             ) : null}
           </div>
-          {busy ? (
-            <div className="px-4 pb-4 pt-1" aria-hidden="true">
-              {Array.from({ length: 4 }).map((_, i) => (
-                <div key={i} className="flex items-center gap-3 py-2.5">
-                  <Skel className="size-6 rounded-md" />
-                  <div className="flex-1 space-y-1.5">
-                    <Skel className="h-2.5 w-56" />
-                    <Skel className="h-2 w-32" />
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : searches.length === 0 ? (
+          {searches.length === 0 ? (
             <div className="px-4 pb-4">
               <EmptyState
                 className="border-0 bg-transparent py-8"
@@ -227,9 +212,9 @@ export function OverviewPage() {
           <Card className="p-4">
             <SectionTitle
               title="Usage this cycle"
-              aside={!busy && kpi ? <span className="text-xs font-medium text-ink">{usedPct}%</span> : null}
+              aside={kpi ? <span className="text-xs font-medium text-ink">{usedPct}%</span> : null}
             />
-            {busy || !kpi ? (
+            {!kpi ? (
               <>
                 <Skel className="mt-3 block h-1.5 w-full rounded-full" />
                 <Skel className="mt-2 block h-2 w-40 rounded" />
@@ -260,16 +245,7 @@ export function OverviewPage() {
             <div className="flex items-center justify-between px-4 pb-1 pt-4">
               <SectionTitle title="Recent activity" />
             </div>
-            {busy ? (
-              <div className="px-4 pb-4" aria-hidden="true">
-                {Array.from({ length: 4 }).map((_, i) => (
-                  <div key={i} className="py-2.5">
-                    <Skel className="h-2.5 w-full" />
-                    <Skel className="mt-1.5 h-2 w-2/3" />
-                  </div>
-                ))}
-              </div>
-            ) : activity.length === 0 ? (
+            {activity.length === 0 ? (
               <p className="px-4 pb-5 pt-1 text-[11.5px] leading-5 text-ink-mute">
                 Activity from you and your team will appear here.
               </p>
@@ -309,17 +285,7 @@ export function OverviewPage() {
             </a>
           ) : null}
         </div>
-        {busy ? (
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-hidden="true">
-            {Array.from({ length: 4 }).map((_, i) => (
-              <Card key={i} className="p-4">
-                <Skel className="h-2.5 w-28" />
-                <Skel className="mt-3 h-5 w-14" />
-                <Skel className="mt-2 h-2 w-32" />
-              </Card>
-            ))}
-          </div>
-        ) : lists.length === 0 ? (
+        {lists.length === 0 ? (
           <EmptyState
             icon={<ListChecks className="size-4" aria-hidden="true" />}
             title="No lists yet"
@@ -355,6 +321,8 @@ export function OverviewPage() {
           </div>
         )}
       </div>
+        </>
+      )}
     </AppLayout>
   );
 }

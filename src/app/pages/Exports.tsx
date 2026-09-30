@@ -20,10 +20,10 @@ import {
   EmptyState,
   Input,
   MetaText,
-  TableSkeleton,
   formatDate,
   useToast,
 } from "../components/ui";
+import { ExportsSkeleton } from "../components/skeletons";
 import type { ExportRecord } from "../data/types";
 import { useAppSeo } from "../hooks";
 import { downloadExport, getExports } from "../services/api";
@@ -175,9 +175,7 @@ export function ExportsPage() {
       ) : null}
 
       {busy ? (
-        <div className="rounded-lg border border-black/[0.06] bg-white">
-          <TableSkeleton rows={6} cols={5} />
-        </div>
+        <ExportsSkeleton rows={6} />
       ) : filtered.length === 0 ? (
         <EmptyState
           icon={<FileDown className="size-4" aria-hidden="true" />}
