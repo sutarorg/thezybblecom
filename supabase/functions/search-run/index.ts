@@ -17,6 +17,8 @@ import {
   requireWorkspaceRole,
   reserveLeads,
   serpApiMaps,
+  serpApiResults,
+  serpApiLl,
   serviceClient,
   GEMINI_MODEL,
 } from "../_shared/index.ts";
@@ -333,19 +335,22 @@ Deno.serve(async (req) => {
     let batches = 0;
     let providerError: string | null = null;
     const target = requestedCount;
+    let ll: string | null = null;
 
     try {
       while (collected.length < target && batches < MAX_BATCHES && !providerError) {
         const start = batches * 20;
         let page;
         try {
-          page = await serpApiMaps({ q: interpretation!.location ? `${interpretation!.q}` : interpretation!.q, ll: null, start });
+          page = await serpApiMaps({ q: interpretation!.q, ll, start });
         } catch (e) {
           providerError = e instanceof HttpError ? e.message : "Provider unavailable";
           break;
         }
-        const results: LocalResult[] = page?.local_results ?? [];
+        const results: LocalResult[] = serpApiResults(page);
         if (!results.length) break;
+        // SerpApi needs `ll` for page 2 onwards; anchor it on page 1's results.
+        if (!ll) ll = serpApiLl(page, results);
 
         for (const raw of results) {
           const normalized = normalize(raw, { query: interpretation!.q, location: interpretation!.location });
@@ -373,7 +378,8 @@ Deno.serve(async (req) => {
         }
         batches++;
         const hasNext = Boolean(page?.serpapi_pagination?.next);
-        if (!hasNext || results.length < 20) break;
+        if (results.length < 20 || !ll) break;
+        if (batches > 1 && !hasNext) break;
       }
     } catch (e) {
       providerError = e instanceof Error ? e.message : "Provider error";
