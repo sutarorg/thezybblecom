@@ -1,5 +1,10 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import {
+  OpenAIError,
+  getOpenAIModel,
+  openAIJson,
+} from "../supabase/functions/_shared/openai";
 
 type VercelRequest = IncomingMessage & { body?: unknown };
 type VercelResponse = ServerResponse & { status(code: number): VercelResponse; json(body: unknown): void };
@@ -8,7 +13,10 @@ type JsonObject = Record<string, unknown>;
 export const maxDuration = 30;
 
 class ApiError extends Error {
-  constructor(readonly status: number, message: string, readonly code = "ai_error") { super(message); }
+  constructor(readonly status: number, message: string, readonly code = "ai_error") {
+    super(message);
+    this.name = "ApiError";
+  }
 }
 
 function env(...names: string[]) {
@@ -25,7 +33,9 @@ function bodyOf(req: VercelRequest): JsonObject {
     try {
       const parsed = JSON.parse(req.body) as unknown;
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as JsonObject;
-    } catch { throw new ApiError(400, "The AI request wasn't valid JSON.", "invalid_json"); }
+    } catch {
+      throw new ApiError(400, "The AI request wasn't valid JSON.", "invalid_json");
+    }
   }
   throw new ApiError(400, "An AI request is required.", "missing_body");
 }
@@ -47,15 +57,16 @@ function userClient(token: string): SupabaseClient {
   });
 }
 
-const RESPONSE_SCHEMA = {
+export const INTERPRET_RESPONSE_SCHEMA: Record<string, unknown> = {
   type: "object",
+  additionalProperties: false,
   properties: {
-    category: { type: "string" },
-    location: { type: "string" },
-    quantity: { type: "integer" },
-    minRating: { type: "string", enum: ["", "3", "3.5", "4", "4.5"] },
-    priceLevel: { type: "string", enum: ["", "1", "2", "3", "4"] },
-    businessSize: { type: "string", enum: ["", "small", "medium", "enterprise"] },
+    category: { type: "string", description: "The requested business category." },
+    location: { type: ["string", "null"], description: "Only the location stated by the user, otherwise null." },
+    quantity: { type: ["integer", "null"], description: "The requested quantity, otherwise null." },
+    minRating: { type: ["string", "null"], enum: [null, "3", "3.5", "4", "4.5"] },
+    priceLevel: { type: ["string", "null"], enum: [null, "1", "2", "3", "4"] },
+    businessSize: { type: ["string", "null"], enum: [null, "small", "medium", "enterprise"] },
     requireWebsite: { type: "boolean" },
     requirePhone: { type: "boolean" },
     requireEmail: { type: "boolean" },
@@ -63,92 +74,57 @@ const RESPONSE_SCHEMA = {
     summary: { type: "string" },
     notes: { type: "array", items: { type: "string" } },
   },
-  required: ["category", "summary"],
+  required: [
+    "category",
+    "location",
+    "quantity",
+    "minRating",
+    "priceLevel",
+    "businessSize",
+    "requireWebsite",
+    "requirePhone",
+    "requireEmail",
+    "openNow",
+    "summary",
+    "notes",
+  ],
 };
 
-function geminiBody(request: string, mode: "full" | "no-thinking" | "json-only") {
-  const system = "You turn a user's lead-discovery request into search-form filters. Do not invent requirements. You only fill the form; you never claim to run a search. Business size must only be set when the user explicitly asks for small, medium, or enterprise businesses. Return concise JSON.";
-  const body: JsonObject = {
-    systemInstruction: { parts: [{ text: system }] },
-    contents: [{ role: "user", parts: [{ text: `User request: ${request}` }] }],
-    generationConfig: {
-      responseMimeType: "application/json",
-      temperature: 0.15,
-      maxOutputTokens: 512,
-      ...(mode !== "json-only" ? { responseSchema: RESPONSE_SCHEMA } : {}),
-      ...(mode === "full" ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
-    },
-  };
-  if (mode === "json-only") {
-    body.contents = [{ role: "user", parts: [{ text: `Return only JSON with keys category, location, quantity, minRating, priceLevel, businessSize, requireWebsite, requirePhone, requireEmail, openNow, summary, notes. User request: ${request}` }] }];
-  }
-  return body;
+const INTERPRET_INSTRUCTIONS = `You turn a user's lead-discovery request into search-form filters.
+You only fill the form; you do not run a search, consume quota, create leads, or claim that results were found.
+Do not invent requirements. Use null for optional values the user did not request and false for requirements the user did not state.
+Only set businessSize to small, medium, or enterprise when the user actually requests that size.
+Keep category suitable for a Google Maps business search. Keep summary and notes concise.`;
+
+function explicitlyRequestedBusinessSize(request: string, size: string) {
+  const text = request.toLowerCase();
+  if (size === "small") return /\bsmall(?:[- ](?:business(?:es)?|compan(?:y|ies)|firm(?:s)?|organization(?:s)?|sized))?\b/.test(text);
+  if (size === "medium") return /\bmedium(?:[- ](?:business(?:es)?|compan(?:y|ies)|firm(?:s)?|organization(?:s)?|sized))?\b/.test(text);
+  return /\benterprise(?:s)?\b|\blarge[- ](?:business(?:es)?|compan(?:y|ies)|firm(?:s)?|organization(?:s)?|sized)\b/.test(text);
 }
 
-async function callGemini(request: string): Promise<JsonObject> {
-  const apiKey = env("GEMINI_API_KEY");
-  const model = env("GEMINI_MODEL") || "gemini-2.5-flash";
-  if (!apiKey) throw new ApiError(500, "Gemini isn't configured on the server.", "missing_key");
-
-  let lastPayload: JsonObject = {};
-  for (const mode of ["full", "no-thinking", "json-only"] as const) {
-    let response: Response;
-    try {
-      response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-        signal: AbortSignal.timeout(25_000),
-        body: JSON.stringify(geminiBody(request, mode)),
-      });
-    } catch {
-      throw new ApiError(502, "The AI service couldn't be reached — try again in a moment.", "provider_unreachable");
-    }
-
-    const payload = (await response.json().catch(() => ({}))) as JsonObject;
-    lastPayload = payload;
-    if (!response.ok) {
-      const error = payload.error as JsonObject | undefined;
-      const providerMessage = typeof error?.message === "string" ? error.message : "";
-      const lower = providerMessage.toLowerCase();
-      console.warn("gemini interpret error", { status: response.status, mode, model, message: providerMessage.slice(0, 240) });
-      if (response.status === 400 && (lower.includes("api key") || lower.includes("apikey"))) throw new ApiError(502, "The Gemini API key was rejected. Update GEMINI_API_KEY.", "invalid_key");
-      if (response.status === 401 || response.status === 403) throw new ApiError(502, "The AI provider rejected the server credentials.", "provider_auth");
-      if (response.status === 429) throw new ApiError(429, "Zybble AI is rate-limited — try again shortly.", "rate_limited");
-      if (response.status === 400 && mode !== "json-only") continue; // unsupported schema/thinking config; retry simpler
-      if (response.status >= 500) throw new ApiError(502, "The AI provider is temporarily unavailable.", "provider_unavailable");
-      throw new ApiError(502, "The AI provider rejected the request configuration.", "invalid_provider_request");
-    }
-
-    const candidates = payload.candidates as JsonObject[] | undefined;
-    const content = candidates?.[0]?.content as JsonObject | undefined;
-    const parts = content?.parts as JsonObject[] | undefined;
-    const text = parts?.map((part) => part.text).filter((x): x is string => typeof x === "string").join("\n").trim();
-    if (!text) {
-      console.warn("gemini empty interpret response", { mode, model, finishReason: candidates?.[0]?.finishReason });
-      throw new ApiError(502, "The AI service returned an empty response.", "empty_response");
-    }
-    try {
-      return JSON.parse(text) as JsonObject;
-    } catch {
-      const match = text.match(/\{[\s\S]*\}/);
-      if (match) return JSON.parse(match[0]) as JsonObject;
-      throw new ApiError(502, "The AI service returned malformed data.", "malformed_response");
-    }
-  }
-  console.warn("gemini interpret exhausted retries", { model, payloadKeys: Object.keys(lastPayload) });
-  throw new ApiError(502, "The AI service couldn't complete that request — try again.", "provider_failed");
-}
-
-function cleanResult(raw: JsonObject) {
+export function cleanInterpretResult(raw: JsonObject, request = "") {
   const filters: JsonObject = {};
   if (typeof raw.category === "string" && raw.category.trim()) filters.category = raw.category.trim().slice(0, 80);
   if (typeof raw.location === "string" && raw.location.trim()) filters.location = raw.location.trim().slice(0, 100);
-  if (typeof raw.quantity === "number" && Number.isFinite(raw.quantity)) filters.quantity = Math.max(1, Math.min(240, Math.round(raw.quantity)));
+  if (typeof raw.quantity === "number" && Number.isFinite(raw.quantity)) {
+    filters.quantity = Math.max(1, Math.min(240, Math.round(raw.quantity)));
+  }
   if (typeof raw.minRating === "string" && ["3", "3.5", "4", "4.5"].includes(raw.minRating)) filters.minRating = raw.minRating;
   if (typeof raw.priceLevel === "string" && ["1", "2", "3", "4"].includes(raw.priceLevel)) filters.priceLevel = raw.priceLevel;
-  if (typeof raw.businessSize === "string" && ["small", "medium", "enterprise"].includes(raw.businessSize)) filters.businessSize = raw.businessSize;
-  for (const key of ["requireWebsite", "requirePhone", "requireEmail", "openNow"] as const) if (raw[key] === true) filters[key] = true;
-  if (!filters.category) throw new ApiError(502, "Zybble AI couldn't identify a business category. Try rephrasing.", "category_missing");
+  if (
+    typeof raw.businessSize === "string" &&
+    ["small", "medium", "enterprise"].includes(raw.businessSize) &&
+    explicitlyRequestedBusinessSize(request, raw.businessSize)
+  ) {
+    filters.businessSize = raw.businessSize;
+  }
+  for (const key of ["requireWebsite", "requirePhone", "requireEmail", "openNow"] as const) {
+    if (raw[key] === true) filters[key] = true;
+  }
+  if (!filters.category) {
+    throw new ApiError(502, "Zybble AI couldn't identify a business category. Try rephrasing.", "category_missing");
+  }
   return {
     filters,
     summary: typeof raw.summary === "string" ? raw.summary.slice(0, 240) : "Search filters prepared.",
@@ -161,7 +137,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
-    return res.status(405).json({ error: "Method not allowed" });
+    return res.status(405).json({ error: "Method not allowed", code: "method_not_allowed" });
   }
 
   try {
@@ -190,20 +166,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const { data: plan } = await sb.from("plans").select("has_ai").eq("id", planId).maybeSingle();
     if (plan?.has_ai === false) throw new ApiError(403, "Zybble AI isn't available on your current plan.", "ai_not_entitled");
 
-    const result = cleanResult(await callGemini(request));
+    const output = await openAIJson({
+      instructions: INTERPRET_INSTRUCTIONS,
+      input: `User request: ${request}`,
+      schema: INTERPRET_RESPONSE_SCHEMA,
+      schemaName: "zybble_search_filters",
+      maxOutputTokens: 2_000,
+      timeoutMs: 25_000,
+    });
+    const result = cleanInterpretResult(output, request);
     await sb.from("ai_requests").insert({
       workspace_id: workspaceId,
       user_id: auth.user.id,
       kind: "interpret",
       input: { request, filters: result.filters },
       status: "completed",
-      model: env("GEMINI_MODEL") || "gemini-2.5-flash",
+      model: getOpenAIModel(),
     }).then(() => undefined);
 
     return res.status(200).json(result);
   } catch (error) {
-    const apiError = error instanceof ApiError ? error : new ApiError(500, "The AI service couldn't complete that action. Please try again.", "unknown");
-    if (!(error instanceof ApiError)) console.error("ai-interpret error", error);
+    const apiError = error instanceof ApiError
+      ? error
+      : error instanceof OpenAIError
+        ? new ApiError(error.status, error.message, error.code)
+        : new ApiError(500, "The AI service couldn't complete that action. Please try again.", "unknown");
+    if (!(error instanceof ApiError) && !(error instanceof OpenAIError)) {
+      console.error("ai-interpret error", { name: error instanceof Error ? error.name : "Unknown", message: error instanceof Error ? error.message : "Unknown error" });
+    }
     return res.status(apiError.status).json({ error: apiError.message, code: apiError.code });
   }
 }

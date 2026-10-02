@@ -451,17 +451,60 @@ export function Dialog({
   label: string;
   maxWidth?: string;
 }) {
+  const panelRef = useRef<HTMLDivElement>(null);
   useMountOverlay(open, onClose);
+  useEffect(() => {
+    if (!open) return;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusableSelector = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const focusFirst = () => {
+      const autoFocus = panelRef.current?.querySelector<HTMLElement>("[data-dialog-autofocus]");
+      const first = panelRef.current?.querySelector<HTMLElement>(focusableSelector);
+      (autoFocus ?? first ?? panelRef.current)?.focus();
+    };
+    const frame = requestAnimationFrame(focusFirst);
+    const trapFocus = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || !panelRef.current) return;
+      const focusable = [...panelRef.current.querySelectorAll<HTMLElement>(focusableSelector)].filter((element) => !element.hasAttribute("disabled"));
+      if (!focusable.length) {
+        event.preventDefault();
+        panelRef.current.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", trapFocus);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", trapFocus);
+      previouslyFocused?.focus();
+    };
+  }, [open]);
   if (!open) return null;
   return createPortal(
     <>
       <Backdrop onClose={onClose} />
-      <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+      <div
+        className="fixed inset-0 z-[70] flex items-center justify-center p-3 sm:p-4"
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget) onClose();
+        }}
+      >
         <div
+          ref={panelRef}
           role="dialog"
           aria-modal="true"
           aria-label={label}
-          className={cn("pop-in w-full rounded-xl border border-black/[0.07] bg-white shadow-pop", maxWidth)}
+          tabIndex={-1}
+          className={cn("pop-in max-h-[calc(100vh-24px)] w-full overflow-y-auto overflow-x-hidden rounded-xl border border-black/[0.07] bg-white shadow-pop thin-scroll", maxWidth)}
         >
           {children}
         </div>

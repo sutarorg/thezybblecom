@@ -1,6 +1,6 @@
 # Zybble
 
-Zybble is a production SaaS application for **AI-powered business lead discovery**: describe the businesses you need in plain language, Gemini structures the request, SerpApi collects public business data from Google Maps, Zybble normalizes, deduplicates, and organizes it into exportable lead lists — behind real auth, plan entitlements, team workspaces, and Razorpay-billed subscriptions.
+Zybble is a production SaaS application for **AI-powered business lead discovery**: describe the businesses you need in plain language, OpenAI o4-mini structures the request, SerpApi collects public business data from Google Maps, Zybble normalizes, deduplicates, and organizes it into exportable lead lists — behind real auth, plan entitlements, team workspaces, and Razorpay-billed subscriptions.
 
 ```
 Browser (Vite + React SPA, clean URLs via BrowserRouter)
@@ -13,8 +13,8 @@ Browser (Vite + React SPA, clean URLs via BrowserRouter)
    │
    └── Supabase Edge Functions
          ├── search-run       → fallback for local/non-Vercel deployments
-         ├── ai-interpret     → Gemini fills the search form (never runs a search)
-         ├── ai-analyze       → Gemini lead intelligence
+         ├── ai-interpret     → OpenAI o4-mini fills the search form (never runs a search)
+         ├── ai-analyze       → OpenAI o4-mini lead intelligence
          ├── export-run       → server-side CSV generation
          ├── team-invite      → seats + Resend invitations
          ├── billing          → Razorpay checkout / sync / cancel
@@ -56,7 +56,7 @@ Create accounts/tools before configuring anything:
 | Node.js 20+ | `npm` (repo uses npm lockfile) |
 | Supabase | 1 project (free tier is fine) |
 | SerpApi | 1 **freshly rotated** API key |
-| Google AI Studio | 1 Gemini API key |
+| OpenAI | 1 API key with Responses API access |
 | Razorpay | Account with international/USD + subscriptions enabled |
 | Resend | 1 verified sending domain |
 | Vercel | Optional — any static host works |
@@ -92,7 +92,8 @@ supabase link --project-ref YOUR_PROJECT_REF
 # Provider secrets — server-side only, never in git
 supabase secrets set \
   SERPAPI_API_KEY=your_rotated_key \
-  GEMINI_API_KEY=your_gemini_key \
+  OPENAI_API_KEY=your_openai_key \
+  OPENAI_MODEL=o4-mini \
   RAZORPAY_KEY_ID=rzp_live_xxx \
   RAZORPAY_KEY_SECRET=xxx \
   RAZORPAY_WEBHOOK_SECRET=xxx \
@@ -127,11 +128,11 @@ supabase functions deploy search-run ai-interpret ai-analyze export-run team-inv
 - A `200` response carrying `error: "Google Maps hasn't returned any results…"` means the result set is exhausted — it is treated as the end of pagination, not as a provider outage.
 - On Vercel, `vercel.json` must exclude `/api/*` from the SPA rewrite, otherwise `/api/search-run` is served `index.html` and every search fails.
 
-## 3 · Gemini setup
+## 3 · OpenAI setup
 
-1. Open **aistudio.google.com** → sign in → **Get API key** → **Create API key** (choose a GCP project).
-2. Copy the key → Edge secret `GEMINI_API_KEY`. Optional override `GEMINI_MODEL` (default `gemini-2.5-flash`).
-3. Test with a `generateContent` request in AI Studio's code snippets — confirm `responseSchema` output returns JSON.
+1. Create a server API key in the **OpenAI platform** with access to the Responses API.
+2. Copy the key to the server/Edge secret `OPENAI_API_KEY`. Optional override `OPENAI_MODEL` defaults to `o4-mini`.
+3. Never prefix either value with `VITE_`; both values are server-only. AI interpretation uses strict Structured Outputs through `POST /v1/responses`.
 
 ## 4 · Razorpay setup
 
@@ -181,7 +182,7 @@ npm run dev
    - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_PUBLISHABLE_KEY`
    - `SERPAPI_API_KEY` — server-only; used by `/api/search-run` and never included in the Vite bundle
-   - `GEMINI_API_KEY` and optional `GEMINI_MODEL` — server-only; used by `/api/ai-interpret`. Also set these as Supabase Edge Function secrets when using the non-Vercel fallback.
+   - `OPENAI_API_KEY` and optional `OPENAI_MODEL` — server-only; used by `/api/ai-interpret`. Also set these as Supabase Edge Function secrets when using the non-Vercel fallback.
    - Razorpay, Resend, and Supabase secret/service-role keys remain Supabase Edge Function secrets and must not be added to the browser bundle.
 5. **Redeploy after adding or changing an environment variable** — existing deployments do not receive new values retroactively — then test the preview URL end-to-end.
 6. Add your custom domain → then go back and:
@@ -199,12 +200,12 @@ Never commit: `.env`, `.env.local`, any key material. `.gitignore` already exclu
 
 ## Architecture notes
 
-- **Secrets**: only `VITE_SUPABASE_URL` + `VITE_SUPABASE_PUBLISHABLE_KEY` reach the browser; the publishable key is safe because every table is RLS-guarded. `SERPAPI_API_KEY` is read only by the Vercel Function (and optionally the Edge fallback). Other provider keys remain Edge Function secrets.
+- **Secrets**: only `VITE_SUPABASE_URL` + `VITE_SUPABASE_PUBLISHABLE_KEY` reach the browser; the publishable key is safe because every table is RLS-guarded. `SERPAPI_API_KEY` and `OPENAI_API_KEY` are read only by server functions (Vercel and the Edge fallback). Razorpay, Resend, and Supabase secret keys remain Edge Function secrets.
 - **Usage enforcement**: `reserve_leads()` is a security-definer RPC doing an atomic check-and-increment — concurrent searches can't overrun an allowance; unused reservations are refunded after each run.
 - **Limits**: one-list (Free), seat counts, and client-workspace gating are enforced by **database triggers**, not the UI.
 - **Idempotency**: `webhook_events` stores provider event IDs; duplicates return `200` without re-processing.
 - **Deduplication**: deterministic `dedupe_key` (place_id → data_id → data_cid → domain → phone → name+address fallback) + `unique(workspace_id, dedupe_key)` upsert — searches are re-runnable without ever doubling leads.
-- **AI honesty**: Gemini never fabricates data; missing fields (e.g. email) are explicitly unavailable.
+- **AI honesty**: Zybble AI is instructed never to fabricate data; missing fields (e.g. email) are explicitly unavailable.
 
 ## Demo data
 
@@ -221,9 +222,9 @@ users see an actionable error, never fictional leads or fake workspaces.
 - [ ] RLS verified (Table Editor shows RLS on every table)
 - [ ] Auth tested (signup, email confirm, login, reset flow)
 - [ ] Edge Functions deployed
-- [ ] Edge secrets configured (SerpApi, Gemini, Razorpay, Resend)
+- [ ] Edge secrets configured (SerpApi, OpenAI, Razorpay, Resend)
 - [ ] SerpApi configured (rotated key, quota visible)
-- [ ] Gemini configured
+- [ ] OpenAI configured
 - [ ] Razorpay configured (international/USD eligible, plans created)
 - [ ] Razorpay webhook configured + signature verified
 - [ ] Resend configured

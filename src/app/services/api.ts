@@ -7,6 +7,7 @@ import { getSupabase, BACKEND_ENABLED } from "./supabase";
 import { planFromId, planLabel } from "../data/plans";
 import { mergeTags, validateTag } from "../lib/tags";
 import { formatAppDate, setRuntimePreferences, type RuntimePreferences } from "../lib/datetime";
+import { parseApiResponse } from "./api-response";
 import type {
   ActivityItem,
   ExportRecord,
@@ -583,6 +584,7 @@ export async function runSearch(
   } = await sb.auth.getSession();
   if (!session) return { error: "Your session expired — sign in again." };
 
+  let sameOriginError = "";
   try {
     const response = await fetch("/api/search-run", {
       method: "POST",
@@ -592,37 +594,53 @@ export async function runSearch(
       },
       body: JSON.stringify({ workspaceId, filters }),
     });
-    const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.includes("application/json")) {
-      const data = await response.json();
-      if (!response.ok || data?.error) {
-        return { error: String(data?.error ?? "The search couldn't complete.") };
-      }
-      return searchRunResponse(data);
-    }
-    if (response.status !== 404 && !contentType.includes("text/html")) {
-      return { error: "The search server returned an invalid response. Please try again." };
-    }
+    const parsed = await parseApiResponse<Record<string, unknown>>(response, "search");
+    if (parsed.data) return searchRunResponse(parsed.data);
+    if (!parsed.shouldFallback) return { error: parsed.error ?? "The search couldn't complete." };
+    sameOriginError = parsed.error ?? "";
   } catch {
-    // A local Vite server has no API route; fall through to the Edge Function.
+    // The same-origin route may be unavailable; use the Edge Function below.
+    sameOriginError = "We couldn't reach the search server. Check your connection and try again.";
   }
 
   const { data, error } = await sb.functions.invoke("search-run", {
     body: { workspaceId, filters },
   });
-  if (error) return { error: await readFunctionError(error) };
-  if (data?.error) return { error: data.error };
+  if (error) {
+    const fallbackError = await readFunctionError(error);
+    return { error: fallbackError || sameOriginError || "The search couldn't complete." };
+  }
+  if (data?.error) return { error: String(data.error) };
   return searchRunResponse(data);
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function searchRunResponse(data: any): { result: SearchRunResult } {
+function searchRunResponse(data: unknown): { result?: SearchRunResult; error?: string } {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return { error: "The search server returned incomplete data. Please try again." };
+  }
+  const body = data as Record<string, unknown>;
+  const stats = body.stats;
+  const leads = body.leads;
+  if (
+    typeof body.searchId !== "string" ||
+    !Array.isArray(leads) ||
+    !stats ||
+    typeof stats !== "object" ||
+    Array.isArray(stats) ||
+    typeof (stats as Record<string, unknown>).savedCount !== "number" ||
+    !leads.every((lead) => lead && typeof lead === "object" && typeof (lead as Record<string, unknown>).id === "string" && typeof (lead as Record<string, unknown>).name === "string")
+  ) {
+    return { error: "The search server returned incomplete lead data. Please try again." };
+  }
+  const typedStats = stats as SearchRunResult["stats"];
   return {
     result: {
-      searchId: data.searchId,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      leads: (data.leads ?? []).map((lead: any) => mapLead(lead)),
-      stats: data.stats,
+      searchId: body.searchId,
+      leads: leads.map((lead) => mapLead(lead)),
+      stats: {
+        ...typedStats,
+        insights: Array.isArray(typedStats.insights) ? typedStats.insights.map(String) : [],
+      },
     },
   };
 }
@@ -646,9 +664,8 @@ export async function interpretRequest(
   } = await sb.auth.getSession();
   if (!session) return { error: "Your session expired — sign in again." };
 
-  /* Prefer the same-origin server function, where GEMINI_API_KEY can be kept
-     alongside the existing SerpApi server secret. Non-Vercel deployments may
-     omit that route, so a genuine 404/SPA response falls back to Supabase. */
+  /* Prefer the same-origin server function, where OPENAI_API_KEY remains
+     server-only. Non-Vercel deployments retain the Supabase fallback. */
   try {
     const response = await fetch("/api/ai-interpret", {
       method: "POST",
@@ -658,17 +675,9 @@ export async function interpretRequest(
       },
       body: JSON.stringify({ workspaceId, request }),
     });
-    const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.includes("application/json")) {
-      const data = await response.json();
-      if (!response.ok || data?.error) {
-        return { error: String(data?.error ?? "Zybble AI couldn't interpret that request.") };
-      }
-      return { result: data as Interpretation };
-    }
-    if (response.status !== 404 && !contentType.includes("text/html")) {
-      return { error: "The AI server returned an invalid response. Please try again." };
-    }
+    const parsed = await parseApiResponse<Interpretation>(response, "AI");
+    if (parsed.data) return { result: parsed.data };
+    if (!parsed.shouldFallback) return { error: parsed.error ?? "Zybble AI couldn't interpret that request." };
   } catch {
     // Same-origin route unavailable; use the deployed Edge Function below.
   }
@@ -952,15 +961,9 @@ export async function runExport(opts: {
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
       body: JSON.stringify(opts),
     });
-    const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.includes("application/json")) {
-      const data = await response.json();
-      if (!response.ok || data?.error) return { error: String(data?.error ?? "Export failed.") };
-      return { export: data as { id: string; file_name: string; lead_count: number; status: string; csv?: string } };
-    }
-    if (response.status !== 404 && !contentType.includes("text/html")) {
-      return { error: "The export server returned an invalid response." };
-    }
+    const parsed = await parseApiResponse<{ id: string; file_name: string; lead_count: number; status: string; csv?: string }>(response, "export");
+    if (parsed.data) return { export: parsed.data };
+    if (!parsed.shouldFallback) return { error: parsed.error ?? "Export failed." };
   } catch {
     // Same-origin route unavailable; fall back to Edge Function below.
   }
@@ -1066,15 +1069,9 @@ export async function inviteMember(workspaceId: string, email: string, role: "ad
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
       body: JSON.stringify({ workspaceId, email, role }),
     });
-    const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.includes("application/json")) {
-      const data = await response.json();
-      if (!response.ok || data?.error) return { error: String(data?.error ?? "Invitation failed.") };
-      return { ok: true as const, emailSent: Boolean(data.emailSent) };
-    }
-    if (response.status !== 404 && !contentType.includes("text/html")) {
-      return { error: "The invite server returned an invalid response." };
-    }
+    const parsed = await parseApiResponse<{ emailSent?: boolean }>(response, "invite");
+    if (parsed.data) return { ok: true as const, emailSent: Boolean(parsed.data.emailSent) };
+    if (!parsed.shouldFallback) return { error: parsed.error ?? "Invitation failed." };
   } catch {
     // Same-origin route unavailable; fall back to Edge Function below.
   }
@@ -1170,7 +1167,7 @@ export async function analyzeLead(leadId: string, workspaceId: string) {
   });
   if (error) return { error: await readFunctionError(error) };
   if (data?.error) return { error: data.error };
-  return { result: data as { summary: string; points: string[]; model: string } };
+  return { result: data as { summary: string; points: string[]; outreach_angle?: string; model: string } };
 }
 
 export async function getLeadInsight(

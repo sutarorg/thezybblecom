@@ -29,6 +29,7 @@ import {
   IconBtn,
   Pagination,
   PopItem as MenuItem,
+  PopLabel,
   PopSep,
   Popover,
   Skel,
@@ -73,19 +74,21 @@ export function LeadsTable({
   listNames = {},
   emptyState,
   onAddToList,
+  selectionClearSignal,
 }: {
   leads: Lead[];
   loading?: boolean;
   error?: string | null;
   onRetry?: () => void;
   pageSize?: number;
-  onBulk?: (action: "list" | "export" | "tag" | "delete" | "status:new" | "status:contacted", ids: string[]) => void | Promise<void>;
+  onBulk?: (action: "list" | "export" | "tag" | "delete" | "status:new" | "status:contacted", ids: string[]) => void | boolean | Promise<void | boolean>;
   mode?: "default" | "search-results";
   visibleColumns?: LeadColumnId[];
   noLists?: boolean;
   listNames?: Record<string, string>;
   emptyState?: React.ReactNode;
   onAddToList?: (ids: string[]) => void;
+  selectionClearSignal?: number;
 }) {
   const toast = useToast();
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -121,6 +124,10 @@ export function LeadsTable({
   useEffect(() => {
     setSelected((s) => new Set([...s].filter((id) => sorted.some((l) => l.id === id))));
   }, [sorted]);
+  useEffect(() => {
+    if (selectionClearSignal === undefined) return;
+    setSelected(new Set());
+  }, [selectionClearSignal]);
 
   const allOnPage = pageRows.length > 0 && pageRows.every((l) => selected.has(l.id));
   const togglePage = () => {
@@ -195,12 +202,12 @@ export function LeadsTable({
     <Card className="overflow-hidden">
       {/* bulk toolbar */}
       {selected.size > 0 && !searchMode ? (
-        <div className="flex flex-wrap items-center gap-2 border-b border-black/[0.06] bg-brand-50/60 px-3 py-2">
-          <span className="inline-flex h-5 items-center gap-1 rounded bg-brand-600 px-1.5 text-[11px] font-semibold text-white">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-black/[0.06] bg-brand-50/60 px-3 py-2">
+          <span className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded bg-brand-600 px-2 text-[11px] font-semibold text-white shadow-sm">
             <Check className="size-3" aria-hidden="true" />
             {selected.size} selected
           </span>
-          <div className="ml-auto flex flex-wrap items-center gap-1">
+          <div className="flex w-full min-w-0 flex-wrap items-center gap-1.5 sm:ml-auto sm:w-auto">
             <Btn
               variant="outline"
               size="sm"
@@ -233,23 +240,30 @@ export function LeadsTable({
             </Btn>
             <Popover
               align="end"
-              width="w-40"
+              width="w-44"
               trigger={(_, toggle) => (
                 <Btn variant="outline" size="sm" onClick={toggle}>
                   <Check className="size-3.5" aria-hidden="true" />
-                  Edit status
+                  Status
                 </Btn>
               )}
             >
-              <MenuItem onClick={() => void onBulk?.("status:new", [...selected])}>New</MenuItem>
-              <MenuItem onClick={() => void onBulk?.("status:contacted", [...selected])}>Contacted</MenuItem>
+              <PopLabel>Set selected leads to</PopLabel>
+              <MenuItem onClick={async () => {
+                const completed = await onBulk?.("status:new", [...selected]);
+                if (completed === true) setSelected(new Set());
+              }}>New</MenuItem>
+              <MenuItem onClick={async () => {
+                const completed = await onBulk?.("status:contacted", [...selected]);
+                if (completed === true) setSelected(new Set());
+              }}>Contacted</MenuItem>
             </Popover>
             <Btn
               variant="outline"
               size="sm"
               onClick={async () => {
-                await onBulk?.("delete", [...selected]);
-                setSelected(new Set());
+                const completed = await onBulk?.("delete", [...selected]);
+                if (completed === true) setSelected(new Set());
               }}
             >
               <Trash2 className="size-3.5" aria-hidden="true" />

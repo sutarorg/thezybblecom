@@ -28,6 +28,12 @@ const MAX_PER_RUN = 240;
 const MAX_BATCHES_PER_PLAN = 12;
 const PAGE_SIZE = 20;
 const MAX_PROVIDER_PAGES_TOTAL = 30;
+// Leave a hard finalization window inside Vercel's 60-second limit for quota
+// refunds, history updates, and loading the persisted response.
+const EXECUTION_BUDGET_MS = 46_000;
+const COLLECTION_BUDGET_MS = 38_000;
+const PROVIDER_TIMEOUT_MS = 8_000;
+const ENRICHMENT_TIMEOUT_MS = 3_500;
 
 type SearchFilters = {
   category: string;
@@ -49,6 +55,7 @@ type LeadRow = Record<string, unknown> & { dedupe_key: string; email?: string | 
 export class ApiError extends Error {
   constructor(readonly status: number, message: string, readonly code = "api_error") {
     super(message);
+    this.name = "ApiError";
   }
 }
 
@@ -121,9 +128,13 @@ function serverClient(token: string): SupabaseClient {
   const url = env("SUPABASE_URL", "VITE_SUPABASE_URL");
   const key = env("SUPABASE_PUBLISHABLE_KEY", "VITE_SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY");
   if (!url || !key) throw new ApiError(500, "The search server isn't connected to Supabase.", "supabase_config");
+  const databaseFetch: typeof fetch = (input, init = {}) => fetch(input, {
+    ...init,
+    signal: AbortSignal.timeout(4_000),
+  });
   return createClient(url, key, {
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-    global: { headers: { Authorization: `Bearer ${token}` } },
+    global: { headers: { Authorization: `Bearer ${token}` }, fetch: databaseFetch },
   });
 }
 
@@ -145,13 +156,29 @@ async function reserveLeads(sb: SupabaseClient, workspaceId: string, delta: numb
 }
 
 async function refundLeads(sb: SupabaseClient, workspaceId: string, count: number) {
-  if (count < 1) return;
-  try { await sb.rpc("reserve_leads", { ws: workspaceId, delta: -count }); } catch { /* best effort */ }
+  if (count < 1) return true;
+  try {
+    const { error } = await sb.rpc("reserve_leads", { ws: workspaceId, delta: -count });
+    if (!error) return true;
+    console.error("lead quota refund failed", { workspaceId, count, code: error.code });
+  } catch (error) {
+    console.error("lead quota refund failed", {
+      workspaceId,
+      count,
+      name: error instanceof Error ? error.name : "Unknown",
+      message: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+  return false;
 }
 
 const EMPTY_RESULT_HINTS = ["hasn't returned any results", "has not returned any results", "no results found", "google maps hasn't returned"];
 
-export async function serpApiMaps(apiKey: string, params: { q: string; start: number; ll?: string | null }): Promise<Record<string, unknown>> {
+export async function serpApiMaps(
+  apiKey: string,
+  params: { q: string; start: number; ll?: string | null },
+  timeoutMs = PROVIDER_TIMEOUT_MS,
+): Promise<Record<string, unknown>> {
   const search = new URLSearchParams({
     engine: "google_maps",
     type: "search",
@@ -167,25 +194,77 @@ export async function serpApiMaps(apiKey: string, params: { q: string; start: nu
   try {
     response = await fetch(`https://serpapi.com/search.json?${search.toString()}`, {
       headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(Math.max(1, timeoutMs)),
     });
-  } catch {
-    throw new ApiError(502, "The business-data provider couldn't be reached. Try again shortly.", "provider_unreachable");
+  } catch (error) {
+    const timedOut = error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+    throw new ApiError(
+      timedOut ? 504 : 502,
+      timedOut
+        ? "The business-data provider took too long to respond."
+        : "The business-data provider couldn't be reached. Try again shortly.",
+      timedOut ? "provider_timeout" : "provider_unreachable",
+    );
   }
 
-  const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-  const providerMessage = typeof payload.error === "string" ? payload.error : "";
-  if (!response.ok || providerMessage) {
-    const lower = providerMessage.toLowerCase();
-    if (response.ok && EMPTY_RESULT_HINTS.some((hint) => lower.includes(hint))) return { local_results: [] };
-    console.error("serpapi error", { status: response.status, message: providerMessage.slice(0, 220) });
-    if (response.status === 401 || response.status === 403 || lower.includes("api key")) {
-      throw new ApiError(502, "The business-data provider key was rejected. Check SERPAPI_API_KEY.", "provider_auth");
+  const raw = await response.text().catch(() => "");
+  let payload: Record<string, unknown> | null = null;
+  if (raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) payload = parsed as Record<string, unknown>;
+    } catch {
+      payload = null;
     }
-    if (response.status === 429 || lower.includes("limit") || lower.includes("credit")) {
-      throw new ApiError(502, "The business-data provider quota has been reached.", "provider_quota");
+  }
+  const providerMessage = payload && typeof payload.error === "string" ? payload.error : "";
+  const lower = providerMessage.toLowerCase();
+
+  if (!response.ok) {
+    const category = response.status === 401 || response.status === 403
+      ? "provider_auth"
+      : response.status === 429
+        ? "provider_quota"
+        : response.status >= 500
+          ? "provider_unavailable"
+          : "provider_failed";
+    console.error("serpapi request failed", {
+      status: response.status,
+      category,
+      responseKind: payload ? "json" : raw.trim() ? "non_json" : "empty",
+    });
+    if (response.status === 401 || response.status === 403 || lower.includes("api key")) {
+      throw new ApiError(502, "The business-data provider credentials were rejected.", "provider_auth");
+    }
+    if (response.status === 429 || lower.includes("limit") || lower.includes("credit") || lower.includes("quota")) {
+      throw new ApiError(429, "The business-data provider quota has been reached.", "provider_quota");
+    }
+    throw new ApiError(502, "The business-data provider failed. Try again shortly.", category);
+  }
+
+  if (!raw.trim()) {
+    console.error("serpapi response failed validation", { status: response.status, category: "empty_response" });
+    throw new ApiError(502, "The business-data provider returned an empty response.", "provider_empty");
+  }
+  if (!payload) {
+    console.error("serpapi response failed validation", { status: response.status, category: "malformed_response", bodyLength: raw.length });
+    throw new ApiError(502, "The business-data provider returned malformed data.", "provider_malformed");
+  }
+  if (providerMessage) {
+    if (EMPTY_RESULT_HINTS.some((hint) => lower.includes(hint))) return { local_results: [] };
+    console.error("serpapi JSON error", { status: response.status, category: "provider_error" });
+    if (lower.includes("limit") || lower.includes("credit") || lower.includes("quota")) {
+      throw new ApiError(429, "The business-data provider quota has been reached.", "provider_quota");
     }
     throw new ApiError(502, "The business-data provider failed. Try again shortly.", "provider_failed");
+  }
+  for (const key of ["local_results", "place_results"] as const) {
+    if (!(key in payload) || payload[key] == null) continue;
+    const value = payload[key];
+    const valid = Array.isArray(value)
+      ? value.every((item) => item && typeof item === "object" && !Array.isArray(item))
+      : typeof value === "object" && !Array.isArray(value);
+    if (!valid) throw new ApiError(502, "The business-data provider returned malformed result data.", "provider_malformed");
   }
   return payload;
 }
@@ -328,10 +407,14 @@ function baseNormalize(result: ProviderResult, meta: { query: string; location: 
   };
 }
 
-async function enrichRow(row: LeadRow, filters: SearchFilters): Promise<LeadRow> {
+async function enrichRow(row: LeadRow, filters: SearchFilters, collectionDeadline: number): Promise<LeadRow> {
   const needsWebsiteFetch = Boolean(row.website && ((filters.requireEmail && !(row.emails as string[])?.length) || filters.businessSize));
-  if (!needsWebsiteFetch) return row;
-  const enrichment = await enrichPublicWebsite(row.website as string | null).catch(() => null);
+  if (!needsWebsiteFetch || Date.now() >= collectionDeadline) return row;
+  const enrichmentDeadline = Math.min(collectionDeadline, Date.now() + ENRICHMENT_TIMEOUT_MS);
+  const enrichment = await enrichPublicWebsite(row.website as string | null, {
+    deadlineAt: enrichmentDeadline,
+    requestTimeoutMs: 1_500,
+  }).catch(() => null);
   if (!enrichment) return row;
   const emails = [...new Set([...(row.emails ?? []), ...enrichment.emails])];
   const size: BusinessSizeResult = row.business_size === "unknown" ? enrichment.employeeSize : {
@@ -382,16 +465,31 @@ async function existingKeys(sb: SupabaseClient, workspaceId: string, keys: strin
   return out;
 }
 
-async function updateSearch(sb: SupabaseClient, searchId: string, values: Record<string, unknown>) {
-  await sb.from("lead_searches").update(values).eq("id", searchId);
+async function updateSearch(sb: SupabaseClient, searchId: string, values: Record<string, unknown>, strict = false) {
+  const { error } = await sb.from("lead_searches").update(values).eq("id", searchId);
+  if (!error) return;
+  console.error("search status update failed", { searchId, code: error.code, message: error.message });
+  if (strict) throw new ApiError(500, "The search completed but its history couldn't be updated.", "search_finalize_failed");
+}
+
+function validLeadResponse(rows: Record<string, unknown>[]) {
+  return rows.every((row) =>
+    typeof row.id === "string" &&
+    typeof row.name === "string" &&
+    row.name.trim().length > 0 &&
+    (row.business_size === "unknown" || row.business_size === "small" || row.business_size === "medium" || row.business_size === "enterprise")
+  );
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const startedAt = Date.now();
+  const collectionDeadline = startedAt + COLLECTION_BUDGET_MS;
+  const executionDeadline = startedAt + EXECUTION_BUDGET_MS;
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
-    return res.status(405).json({ error: "Method not allowed" });
+    return res.status(405).json({ error: "Method not allowed", code: "method_not_allowed" });
   }
 
   let sb: SupabaseClient | null = null;
@@ -399,6 +497,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   let searchId = "";
   let reserved = 0;
   let saved = 0;
+  let refundAttempted = false;
 
   try {
     const apiKey = env("SERPAPI_API_KEY", "SERPAPI_KEY", "SERP_API_KEY");
@@ -460,18 +559,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let providerError: ApiError | null = null;
     let pagesTried = 0;
     let exhausted = true;
+    let deadlineReached = false;
 
-    for (const planQuery of plans) {
+    searchLoop: for (const planQuery of plans) {
       if (candidates.length >= filters.quantity || pagesTried >= MAX_PROVIDER_PAGES_TOTAL) break;
+      if (Date.now() >= collectionDeadline) {
+        deadlineReached = true;
+        break;
+      }
       let ll: string | null = null;
       for (let batch = 0; batch < MAX_BATCHES_PER_PLAN && candidates.length < filters.quantity && pagesTried < MAX_PROVIDER_PAGES_TOTAL; batch++) {
+        const remaining = collectionDeadline - Date.now();
+        if (remaining <= 250) {
+          deadlineReached = true;
+          break searchLoop;
+        }
         pagesTried++;
         let page: Record<string, unknown>;
         try {
-          page = await serpApiMaps(apiKey, { q: planQuery, start: batch * PAGE_SIZE, ll });
+          page = await serpApiMaps(apiKey, { q: planQuery, start: batch * PAGE_SIZE, ll }, Math.min(PROVIDER_TIMEOUT_MS, remaining));
         } catch (error) {
           providerError = error instanceof ApiError ? error : new ApiError(502, "The business-data provider failed.", "provider_failed");
-          break;
+          if (Date.now() >= collectionDeadline) deadlineReached = true;
+          break searchLoop;
         }
         const results = pageResults(page);
         if (!results.length) break;
@@ -488,13 +598,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const existing = await existingKeys(sb, workspaceId, normalizedBatch.map((r) => r.dedupe_key));
         const unseenBases = normalizedBatch.filter((base) => !existing.has(base.dedupe_key));
         for (let i = 0; i < unseenBases.length && candidates.length < filters.quantity; i += 5) {
-          const enrichedRows = await Promise.all(unseenBases.slice(i, i + 5).map((base) => enrichRow(base, filters)));
+          if (Date.now() >= collectionDeadline) {
+            deadlineReached = true;
+            break;
+          }
+          const enrichedRows = await Promise.all(
+            unseenBases.slice(i, i + 5).map((base) => enrichRow(base, filters, collectionDeadline))
+          );
           for (const enriched of enrichedRows) {
             if (!matchesFilters(enriched, filters)) continue;
             candidates.push(enriched);
             if (candidates.length >= filters.quantity) break;
           }
         }
+        if (deadlineReached) break searchLoop;
 
         const pagination = objectValue(page.serpapi_pagination);
         const noMorePages = batch > 0 && !pagination.next;
@@ -506,10 +623,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     if (providerError && candidates.length === 0) throw providerError;
+    if (deadlineReached && candidates.length === 0) {
+      throw new ApiError(504, "The search timed out before any matching leads were collected. Please try again.", "search_timeout");
+    }
     sortRows(candidates, filters.sort);
 
     const savedIds: string[] = [];
     for (let index = 0; index < candidates.length; index += 50) {
+      if (index > 0 && Date.now() >= executionDeadline) {
+        deadlineReached = true;
+        break;
+      }
       const chunk = candidates.slice(index, index + 50).map((row) => ({
         ...row,
         workspace_id: workspaceId,
@@ -525,26 +649,31 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         throw new ApiError(500, "The leads were found but couldn't be saved. Try again.", "lead_save_failed");
       }
       for (const item of inserted ?? []) savedIds.push(item.id);
+      saved = savedIds.length;
     }
-    saved = savedIds.length;
 
-    await refundLeads(sb, workspaceId, Math.max(0, reserved - saved));
+    const refundCount = Math.max(0, reserved - saved);
+    refundAttempted = refundCount > 0;
+    const refunded = await refundLeads(sb, workspaceId, refundCount);
+    if (!refunded) throw new ApiError(500, "Usage accounting couldn't be finalized. Please contact support before retrying.", "usage_refund_failed");
     reserved = saved;
 
-    const status = providerError || saved < filters.quantity ? "partial" : "completed";
-    const reason = providerError
-      ? "provider"
-      : saved < filters.quantity
-        ? exhausted
-          ? "provider_exhausted"
-          : "not_enough_new_matches"
-        : null;
+    const status = providerError || deadlineReached || saved < filters.quantity ? "partial" : "completed";
+    const reason = deadlineReached
+      ? "deadline_reached"
+      : providerError
+        ? providerError.code
+        : saved < filters.quantity
+          ? exhausted
+            ? "provider_exhausted"
+            : "not_enough_new_matches"
+          : null;
     await updateSearch(sb, searchId, {
       status,
       result_count: saved,
       completed_at: new Date().toISOString(),
-      error: providerError?.message ?? reason,
-    });
+      error: status === "completed" ? null : providerError?.message ?? reason,
+    }, true);
 
     let leads: Record<string, unknown>[] = [];
     if (savedIds.length) {
@@ -555,6 +684,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         .order("created_at", { ascending: false });
       if (error) throw new ApiError(500, "The leads were saved but couldn't be loaded.", "lead_load_failed");
       leads = (data ?? []) as unknown as Record<string, unknown>[];
+      if (leads.length !== savedIds.length || !validLeadResponse(leads)) {
+        throw new ApiError(500, "The leads were saved but couldn't be returned safely. Refresh your leads and try again.", "lead_response_invalid");
+      }
     }
 
     const message = saved >= filters.quantity
@@ -583,7 +715,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
   } catch (error) {
     const apiError = error instanceof ApiError ? error : new ApiError(500, "The service couldn't complete that action. Please try again.", "unknown");
-    if (sb && workspaceId && reserved > saved) await refundLeads(sb, workspaceId, reserved - saved);
+    if (sb && workspaceId && reserved > saved && !refundAttempted) await refundLeads(sb, workspaceId, reserved - saved);
     if (sb && searchId) {
       await updateSearch(sb, searchId, {
         status: "failed",
@@ -592,8 +724,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         error: apiError.message,
       });
     }
-    if (!(error instanceof ApiError)) console.error("search-run error", error);
-    else console.warn("search-run failed", { status: apiError.status, code: apiError.code, message: apiError.message });
+    const diagnostics = {
+      name: error instanceof Error ? error.name : "Unknown",
+      message: error instanceof Error ? error.message : "Unknown error",
+      searchId: searchId || undefined,
+      workspaceId: workspaceId || undefined,
+      code: apiError.code,
+      providerCategory: apiError.code.startsWith("provider_") ? apiError.code : undefined,
+      elapsedMs: Date.now() - startedAt,
+    };
+    if (error instanceof ApiError) console.warn("search-run failed", diagnostics);
+    else console.error("search-run unexpected error", diagnostics);
     return res.status(apiError.status).json({ error: apiError.message, code: apiError.code });
   }
 }

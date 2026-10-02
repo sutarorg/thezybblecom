@@ -3,6 +3,7 @@
 // Secrets live only here (Deno.env), never in the browser bundle.
 // ============================================================================
 import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.0";
+import { OpenAIError, getOpenAIModel, openAIJson } from "./openai.ts";
 
 export const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -17,12 +18,12 @@ export function json(body: unknown, status = 200) {
   });
 }
 
-export function errorJson(message: string, status = 400) {
-  return json({ error: message }, status);
+export function errorJson(message: string, status = 400, code?: string) {
+  return json({ error: message, ...(code ? { code } : {}) }, status);
 }
 
 /** Server client — uses the secret key; bypasses RLS. NEVER NEXT_PUBLIC. */
-export function serviceClient(): SupabaseClient {
+export function serviceClient(requestTimeoutMs?: number): SupabaseClient {
   const url = Deno.env.get("SUPABASE_URL")!;
   let key = Deno.env.get("SUPABASE_SECRET_KEY");
   if (!key) {
@@ -31,7 +32,13 @@ export function serviceClient(): SupabaseClient {
   }
   key ??= Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!key) throw new Error("Server Supabase secret is not configured");
-  return createClient(url, key, { auth: { persistSession: false } });
+  const timedFetch = requestTimeoutMs
+    ? (input: RequestInfo | URL, init: RequestInit = {}) => fetch(input, { ...init, signal: AbortSignal.timeout(requestTimeoutMs) })
+    : undefined;
+  return createClient(url, key, {
+    auth: { persistSession: false },
+    ...(timedFetch ? { global: { fetch: timedFetch } } : {}),
+  });
 }
 
 /** Resolve the calling user from the Authorization header. */
@@ -48,17 +55,23 @@ export async function callerFromRequest(req: Request, sb: SupabaseClient) {
 }
 
 export class HttpError extends Error {
-  status: number;
-  constructor(status: number, message: string) {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly code = "edge_error",
+  ) {
     super(message);
-    this.status = status;
+    this.name = "HttpError";
   }
 }
 
 export function handleError(e: unknown) {
-  if (e instanceof HttpError) return errorJson(e.message, e.status);
-  console.error("edge error:", e);
-  return errorJson("The service couldn't complete that action. Please try again.", 500);
+  if (e instanceof HttpError || e instanceof OpenAIError) return errorJson(e.message, e.status, e.code);
+  console.error("edge error", {
+    name: e instanceof Error ? e.name : "Unknown",
+    message: e instanceof Error ? e.message : "Unknown error",
+  });
+  return errorJson("The service couldn't complete that action. Please try again.", 500, "unknown");
 }
 
 /* ------------------------------------------------------------------ */
@@ -162,9 +175,10 @@ export async function serpApiMaps(params: {
   start?: number;
   hl?: string;
   gl?: string;
+  timeoutMs?: number;
 }) {
   const key = Deno.env.get("SERPAPI_API_KEY") ?? Deno.env.get("SERPAPI_KEY");
-  if (!key) throw new HttpError(500, "SerpApi isn't configured on the server.");
+  if (!key) throw new HttpError(500, "SerpApi isn't configured on the server.", "serpapi_config");
 
   const search = new URLSearchParams({
     engine: "google_maps",
@@ -175,7 +189,6 @@ export async function serpApiMaps(params: {
     api_key: key,
   });
   if (params.gl) search.set("gl", params.gl);
-  // SerpApi requires `ll` for pages 2+ of the Google Maps engine.
   if (params.ll) search.set("ll", params.ll);
   if (params.start) search.set("start", String(params.start));
 
@@ -183,29 +196,57 @@ export async function serpApiMaps(params: {
   try {
     res = await fetch(`https://serpapi.com/search.json?${search.toString()}`, {
       headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(Math.max(1, params.timeoutMs ?? 8_000)),
     });
-  } catch {
-    throw new HttpError(502, "The business-data provider couldn't be reached. Try again shortly.");
+  } catch (error) {
+    const timedOut = error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+    throw new HttpError(
+      timedOut ? 504 : 502,
+      timedOut ? "The business-data provider took too long to respond." : "The business-data provider couldn't be reached. Try again shortly.",
+      timedOut ? "provider_timeout" : "provider_unreachable",
+    );
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const payload = (await res.json().catch(() => ({}))) as Record<string, any>;
-  const message = typeof payload.error === "string" ? payload.error : "";
-  if (!res.ok || message) {
-    const lower = message.toLowerCase();
-    // A "no results" answer is the end of pagination, not a provider failure.
-    if (res.ok && SERPAPI_EMPTY_HINTS.some((hint) => lower.includes(hint))) {
-      return { local_results: [] } as Record<string, any>;
+  const raw = await res.text().catch(() => "");
+  let payload: Record<string, unknown> | null = null;
+  if (raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) payload = parsed as Record<string, unknown>;
+    } catch {
+      payload = null;
     }
-    console.error("serpapi error", res.status, message.slice(0, 200));
+  }
+  const message = payload && typeof payload.error === "string" ? payload.error : "";
+  const lower = message.toLowerCase();
+
+  if (!res.ok) {
+    const category = res.status === 401 || res.status === 403 ? "provider_auth" : res.status === 429 ? "provider_quota" : "provider_failed";
+    console.error("serpapi request failed", { status: res.status, category, responseKind: payload ? "json" : raw.trim() ? "non_json" : "empty" });
     if (res.status === 401 || res.status === 403 || lower.includes("api key")) {
-      throw new HttpError(502, "The SerpApi key on the server was rejected. Update SERPAPI_API_KEY.");
+      throw new HttpError(502, "The business-data provider credentials were rejected.", "provider_auth");
     }
-    if (res.status === 429 || lower.includes("limit") || lower.includes("credit")) {
-      throw new HttpError(502, "The SerpApi search-credit limit has been reached.");
+    if (res.status === 429 || lower.includes("limit") || lower.includes("credit") || lower.includes("quota")) {
+      throw new HttpError(429, "The business-data provider quota has been reached.", "provider_quota");
     }
-    throw new HttpError(502, "The business-data provider failed. Try again shortly.");
+    throw new HttpError(502, "The business-data provider failed. Try again shortly.", category);
+  }
+  if (!raw.trim()) throw new HttpError(502, "The business-data provider returned an empty response.", "provider_empty");
+  if (!payload) throw new HttpError(502, "The business-data provider returned malformed data.", "provider_malformed");
+  if (message) {
+    if (SERPAPI_EMPTY_HINTS.some((hint) => lower.includes(hint))) return { local_results: [] };
+    if (lower.includes("limit") || lower.includes("credit") || lower.includes("quota")) {
+      throw new HttpError(429, "The business-data provider quota has been reached.", "provider_quota");
+    }
+    throw new HttpError(502, "The business-data provider failed. Try again shortly.", "provider_failed");
+  }
+  for (const key of ["local_results", "place_results"] as const) {
+    if (!(key in payload) || payload[key] == null) continue;
+    const value = payload[key];
+    const valid = Array.isArray(value)
+      ? value.every((item) => item && typeof item === "object" && !Array.isArray(item))
+      : typeof value === "object" && !Array.isArray(value);
+    if (!valid) throw new HttpError(502, "The business-data provider returned malformed result data.", "provider_malformed");
   }
   return payload;
 }
@@ -238,55 +279,10 @@ export function serpApiLl(page: Record<string, any>, results: Record<string, any
 }
 
 /* ------------------------------------------------------------------ */
-/* Gemini                                                              */
+/* OpenAI Responses API                                                */
 /* ------------------------------------------------------------------ */
-const GEMINI_MODEL = Deno.env.get("GEMINI_MODEL") ?? "gemini-2.5-flash";
-
-export async function geminiJson(options: {
-  system: string;
-  prompt: string;
-  schema: Record<string, unknown>;
-  maxOutputTokens?: number;
-}): Promise<Record<string, unknown>> {
-  const key = Deno.env.get("GEMINI_API_KEY");
-  if (!key) throw new HttpError(500, "Gemini isn't configured on the server.");
-
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: options.system }] },
-        contents: [{ role: "user", parts: [{ text: options.prompt }] }],
-        generationConfig: {
-          responseMimeType: "application/json",
-          responseSchema: options.schema,
-          temperature: 0.15,
-          maxOutputTokens: options.maxOutputTokens ?? 1024,
-          // Gemini 2.5 otherwise spends part of this small JSON budget on
-          // hidden reasoning and can return no content for a simple form fill.
-          thinkingConfig: { thinkingBudget: 0 },
-        },
-      }),
-    }
-  );
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    console.error("gemini error", res.status, text.slice(0, 200));
-    throw new HttpError(502, "The AI service is busy — try again in a moment.");
-  }
-  const payload = await res.json();
-  const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new HttpError(502, "The AI service returned an empty response.");
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new HttpError(502, "The AI service returned malformed data.");
-  }
-}
-
-export { GEMINI_MODEL };
+export { openAIJson };
+export const OPENAI_MODEL = getOpenAIModel();
 
 /* ------------------------------------------------------------------ */
 /* Razorpay REST client (server-side only)                             */
