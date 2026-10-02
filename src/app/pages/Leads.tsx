@@ -1,7 +1,7 @@
 /* ------------------------------------------------------------------ */
 /* Zybble app — Leads database (server-paginated, real data only)      */
 /* ------------------------------------------------------------------ */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
@@ -9,6 +9,7 @@ import {
   Download,
   FileSearch,
   Filter,
+  LoaderCircle,
   Mail,
   Phone,
   Search,
@@ -28,6 +29,7 @@ import {
   PopLabel,
   PopSep,
   Popover,
+  Textarea,
   useToast,
 } from "../components/ui";
 import type { Lead, LeadStatus } from "../data/types";
@@ -78,9 +80,13 @@ export function LeadsPage() {
   const [tagDialogIds, setTagDialogIds] = useState<string[]>([]);
   const [newListName, setNewListName] = useState("");
   const [newListDescription, setNewListDescription] = useState("");
+  const [listQuery, setListQuery] = useState("");
   const [bulkTag, setBulkTag] = useState("");
   const [tagMode, setTagMode] = useState<"add" | "remove">("add");
   const [savingDialog, setSavingDialog] = useState(false);
+  const savingDialogRef = useRef(false);
+  const [savingTarget, setSavingTarget] = useState<string | null>(null);
+  const [selectionClearSignal, setSelectionClearSignal] = useState(0);
 
   const [facets, setFacets] = useState<{ cities: string[]; categories: string[]; tags: string[] }>({
     cities: [],
@@ -145,6 +151,22 @@ export function LeadsPage() {
 
   const activeCount =
     [city, category, rating, status, tag].filter(Boolean).length + (withWebsite ? 1 : 0) + (withEmail ? 1 : 0);
+  const filteredLists = useMemo(() => {
+    const value = listQuery.trim().toLowerCase();
+    return value ? lists.filter((list) => list.name.toLowerCase().includes(value)) : lists;
+  }, [listQuery, lists]);
+
+  const closeListDialog = () => {
+    if (savingDialogRef.current) return;
+    setListDialogIds([]);
+    setListQuery("");
+  };
+  const closeTagDialog = () => {
+    if (savingDialogRef.current) return;
+    setTagDialogIds([]);
+    setBulkTag("");
+    setTagMode("add");
+  };
 
   const clearFilters = () => {
     setCity("");
@@ -160,57 +182,86 @@ export function LeadsPage() {
   const isEmptyAccount = !loading && !hasAnyFilter && rows.length === 0;
 
   const addSelectedToExistingList = async (listId: string) => {
+    if (savingDialogRef.current) return;
+    const leadIds = [...listDialogIds];
+    if (!leadIds.length) return;
+    savingDialogRef.current = true;
     setSavingDialog(true);
+    setSavingTarget(`list:${listId}`);
     try {
-      await addToList(listId, listDialogIds);
-      setRows((r) => r.map((lead) => (listDialogIds.includes(lead.id) ? { ...lead, list_ids: [...new Set([...lead.list_ids, listId])] } : lead)));
-      toast(`${listDialogIds.length} ${listDialogIds.length === 1 ? "lead" : "leads"} added to list`);
+      await addToList(listId, leadIds);
+      const newlyAdded = rows.filter((lead) => leadIds.includes(lead.id) && !lead.list_ids.includes(listId)).length;
+      setRows((current) => current.map((lead) => (leadIds.includes(lead.id) ? { ...lead, list_ids: [...new Set([...lead.list_ids, listId])] } : lead)));
+      if (newlyAdded > 0) {
+        setLists((current) => current.map((list) => list.id === listId ? { ...list, lead_count: list.lead_count + newlyAdded } : list));
+      }
+      toast(`${leadIds.length} ${leadIds.length === 1 ? "lead" : "leads"} added to list`);
       setListDialogIds([]);
+      setListQuery("");
+      setSelectionClearSignal((signal) => signal + 1);
     } catch (e) {
       toast((e as Error).message, "error");
     } finally {
+      savingDialogRef.current = false;
       setSavingDialog(false);
+      setSavingTarget(null);
     }
   };
 
   const createListAndAdd = async () => {
-    if (!workspace || !newListName.trim()) return;
+    if (!workspace || !newListName.trim() || savingDialogRef.current) return;
+    const leadIds = [...listDialogIds];
+    if (!leadIds.length) return;
+    savingDialogRef.current = true;
     setSavingDialog(true);
+    setSavingTarget("create-list");
     try {
       const list = await createList(workspace.id, newListName.trim(), newListDescription.trim());
-      await addToList(list.id, listDialogIds);
-      setLists((ls) => [{ ...list, lead_count: listDialogIds.length }, ...ls]);
-      setListNames((m) => ({ ...m, [list.id]: list.name }));
-      setRows((r) => r.map((lead) => (listDialogIds.includes(lead.id) ? { ...lead, list_ids: [...new Set([...lead.list_ids, list.id])] } : lead)));
+      await addToList(list.id, leadIds);
+      setLists((current) => [{ ...list, lead_count: leadIds.length }, ...current]);
+      setListNames((current) => ({ ...current, [list.id]: list.name }));
+      setRows((current) => current.map((lead) => (leadIds.includes(lead.id) ? { ...lead, list_ids: [...new Set([...lead.list_ids, list.id])] } : lead)));
       setNewListName("");
       setNewListDescription("");
+      setListQuery("");
       setListDialogIds([]);
-      toast(`Created “${list.name}” and added ${listDialogIds.length} ${listDialogIds.length === 1 ? "lead" : "leads"}`);
+      setSelectionClearSignal((signal) => signal + 1);
+      toast(`Created “${list.name}” and added ${leadIds.length} ${leadIds.length === 1 ? "lead" : "leads"}`);
     } catch (e) {
       toast((e as Error).message, "error");
     } finally {
+      savingDialogRef.current = false;
       setSavingDialog(false);
+      setSavingTarget(null);
     }
   };
 
   const applyBulkTag = async () => {
-    if (!bulkTag.trim()) return;
+    if (!bulkTag.trim() || savingDialogRef.current) return;
+    const leadIds = [...tagDialogIds];
+    const normalizedTag = bulkTag.trim().toLowerCase();
+    const mode = tagMode;
+    if (!leadIds.length) return;
+    savingDialogRef.current = true;
     setSavingDialog(true);
+    setSavingTarget("tag");
     try {
-      await applyTagToLeads(tagDialogIds, bulkTag, tagMode);
-      setRows((r) => r.map((lead) => {
-        if (!tagDialogIds.includes(lead.id)) return lead;
-        const normalized = bulkTag.trim().toLowerCase();
-        return { ...lead, tags: tagMode === "add" ? [...new Set([...lead.tags, normalized])] : lead.tags.filter((t) => t !== normalized) };
+      await applyTagToLeads(leadIds, normalizedTag, mode);
+      setRows((current) => current.map((lead) => {
+        if (!leadIds.includes(lead.id)) return lead;
+        return { ...lead, tags: mode === "add" ? [...new Set([...lead.tags, normalizedTag])] : lead.tags.filter((value) => value !== normalizedTag) };
       }));
-      if (tagMode === "add") setFacets((f) => ({ ...f, tags: [...new Set([...f.tags, bulkTag.trim().toLowerCase()])].sort() }));
+      if (mode === "add") setFacets((current) => ({ ...current, tags: [...new Set([...current.tags, normalizedTag])].sort() }));
       setBulkTag("");
       setTagDialogIds([]);
-      toast(tagMode === "add" ? "Tag applied" : "Tag removed");
+      setSelectionClearSignal((signal) => signal + 1);
+      toast(mode === "add" ? `Tag “${normalizedTag}” added` : `Tag “${normalizedTag}” removed`);
     } catch (e) {
       toast((e as Error).message, "error");
     } finally {
+      savingDialogRef.current = false;
       setSavingDialog(false);
+      setSavingTarget(null);
     }
   };
 
@@ -463,7 +514,8 @@ export function LeadsPage() {
         listNames={listNames}
         visibleColumns={visibleCols}
         emptyState={emptyState}
-        onAddToList={(ids) => setListDialogIds(ids)}
+        selectionClearSignal={selectionClearSignal}
+        onAddToList={(ids) => setListDialogIds([...ids])}
         onBulk={async (action, ids) => {
           if (!workspace) return;
           if (action === "list") setListDialogIds(ids);
@@ -474,8 +526,10 @@ export function LeadsPage() {
               await Promise.all(ids.map((id) => updateLeadStatus(id, next)));
               setRows((r) => r.map((lead) => (ids.includes(lead.id) ? { ...lead, status: next } : lead)));
               toast(`Status updated to ${next === "new" ? "New" : "Contacted"}`);
+              return true;
             } catch (e) {
               toast((e as Error).message, "error");
+              return false;
             }
           }
           if (action === "delete") {
@@ -483,8 +537,10 @@ export function LeadsPage() {
               await deleteLeads(ids);
               setRows((r) => r.filter((x) => !ids.includes(x.id)));
               toast("Leads removed");
+              return true;
             } catch (e) {
               toast((e as Error).message, "error");
+              return false;
             }
           }
           if (action === "export") {
@@ -499,76 +555,193 @@ export function LeadsPage() {
         }}
       />
 
-      <Dialog open={listDialogIds.length > 0} onClose={() => setListDialogIds([])} label="Add selected leads to a list" maxWidth="max-w-lg">
-        <DialogHeader title="Add to list" description={`${listDialogIds.length} selected ${listDialogIds.length === 1 ? "lead" : "leads"}`} onClose={() => setListDialogIds([])} />
-        <div className="grid gap-4 px-4 py-4 sm:grid-cols-2">
-          <div>
-            <p className="text-xs font-semibold text-ink">Existing lists</p>
-            <div className="mt-2 max-h-56 space-y-1 overflow-y-auto thin-scroll pr-1">
-              {lists.length ? lists.map((list) => (
-                <button
-                  key={list.id}
-                  type="button"
-                  disabled={savingDialog}
-                  onClick={() => addSelectedToExistingList(list.id)}
-                  className="flex w-full items-center justify-between gap-2 rounded border border-black/[0.06] px-2.5 py-2 text-left text-xs hover:bg-neutral-50 disabled:opacity-50"
-                >
-                  <span className="min-w-0">
-                    <span className="block truncate font-medium text-ink">{list.name}</span>
-                    <span className="text-[10.5px] text-neutral-400">{list.lead_count} leads</span>
-                  </span>
-                  <span className="font-medium text-brand-700">Add</span>
-                </button>
-              )) : <p className="rounded border border-dashed border-black/[0.08] p-3 text-[11px] text-ink-mute">No lists yet — create one here.</p>}
+      <Dialog open={listDialogIds.length > 0} onClose={closeListDialog} label="Add selected leads to a list" maxWidth="max-w-2xl">
+        <DialogHeader
+          title="Add to list"
+          description={`${listDialogIds.length} selected ${listDialogIds.length === 1 ? "lead" : "leads"}`}
+          onClose={closeListDialog}
+        />
+        <div className="grid min-w-0 sm:grid-cols-2">
+          <section className="min-w-0 border-b border-black/[0.05] px-4 py-4 sm:border-b-0 sm:border-r">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs font-semibold text-ink">Existing lists</p>
+              <span className="text-[10.5px] text-ink-mute">{lists.length} total</span>
             </div>
-          </div>
-          <div>
-            <p className="text-xs font-semibold text-ink">Create list</p>
-            <div className="mt-2 space-y-2">
+            {lists.length > 5 ? (
+              <div className="relative mt-2">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-neutral-300" aria-hidden="true" />
+                <Input
+                  data-dialog-autofocus
+                  value={listQuery}
+                  onChange={(event) => setListQuery(event.target.value)}
+                  placeholder="Search lists…"
+                  aria-label="Search existing lists"
+                  disabled={savingDialog}
+                  className="pl-8"
+                />
+              </div>
+            ) : null}
+            <div className="mt-2 max-h-64 space-y-1 overflow-y-auto pr-1 thin-scroll">
+              {filteredLists.length ? filteredLists.map((list, index) => {
+                const alreadyAdded = listDialogIds.every((id) => rows.find((lead) => lead.id === id)?.list_ids.includes(list.id));
+                const savingThisList = savingTarget === `list:${list.id}`;
+                return (
+                  <button
+                    key={list.id}
+                    type="button"
+                    data-dialog-autofocus={lists.length <= 5 && index === 0 ? "" : undefined}
+                    disabled={savingDialog || alreadyAdded}
+                    onClick={() => void addSelectedToExistingList(list.id)}
+                    aria-label={alreadyAdded ? `All selected leads are already in ${list.name}` : `Add selected leads to ${list.name}`}
+                    className={cn(
+                      "flex w-full min-w-0 items-center justify-between gap-3 rounded-md border px-2.5 py-2 text-left text-xs outline-none transition-colors focus-visible:border-brand-600/40 focus-visible:ring-2 focus-visible:ring-brand-600/15 disabled:cursor-default",
+                      alreadyAdded ? "border-brand-600/10 bg-brand-50/50" : "border-black/[0.07] bg-white hover:border-black/[0.12] hover:bg-neutral-50",
+                      savingDialog && !savingThisList && "opacity-50"
+                    )}
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate font-medium text-ink">{list.name}</span>
+                      <span className="text-[10.5px] text-neutral-400">{list.lead_count.toLocaleString()} {list.lead_count === 1 ? "lead" : "leads"}</span>
+                    </span>
+                    <span className="inline-flex shrink-0 items-center gap-1 font-medium text-brand-700">
+                      {savingThisList ? <LoaderCircle className="size-3 animate-spin" aria-hidden="true" /> : alreadyAdded ? <Check className="size-3" aria-hidden="true" /> : null}
+                      {savingThisList ? "Adding…" : alreadyAdded ? "Added" : "Add"}
+                    </span>
+                  </button>
+                );
+              }) : (
+                <p className="rounded-md border border-dashed border-black/[0.09] px-3 py-5 text-center text-[11px] leading-5 text-ink-mute">
+                  {lists.length ? "No lists match that search." : "No lists yet — create one here."}
+                </p>
+              )}
+            </div>
+          </section>
+
+          <section className="min-w-0 px-4 py-4">
+            <p className="text-xs font-semibold text-ink">Create a new list</p>
+            <p className="mt-0.5 text-[11px] leading-4 text-ink-mute">Create the list and add this selection in one step.</p>
+            <form
+              className="mt-3 space-y-3"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void createListAndAdd();
+              }}
+            >
               <div>
                 <FieldLabel htmlFor="bulk-list-name">List name</FieldLabel>
-                <Input id="bulk-list-name" value={newListName} onChange={(e) => setNewListName(e.target.value)} placeholder="e.g. Florida dentists" />
+                <Input
+                  id="bulk-list-name"
+                  data-dialog-autofocus={lists.length === 0 ? "" : undefined}
+                  value={newListName}
+                  onChange={(event) => setNewListName(event.target.value)}
+                  placeholder="e.g. Florida dentists"
+                  disabled={savingDialog}
+                  maxLength={100}
+                />
               </div>
               <div>
-                <FieldLabel htmlFor="bulk-list-description">Description optional</FieldLabel>
-                <Input id="bulk-list-description" value={newListDescription} onChange={(e) => setNewListDescription(e.target.value)} placeholder="Why this list exists" />
+                <FieldLabel htmlFor="bulk-list-description">Description <span className="font-normal text-ink-mute">(optional)</span></FieldLabel>
+                <Textarea
+                  id="bulk-list-description"
+                  value={newListDescription}
+                  onChange={(event) => setNewListDescription(event.target.value)}
+                  placeholder="Why this list exists"
+                  disabled={savingDialog}
+                  maxLength={300}
+                  className="min-h-[70px] resize-none"
+                />
               </div>
-              <Btn variant="primary" size="sm" className="w-full" disabled={!newListName.trim() || savingDialog} onClick={createListAndAdd}>
-                Create and add leads
+              <Btn variant="primary" size="sm" type="submit" className="w-full" disabled={!newListName.trim() || savingDialog}>
+                {savingTarget === "create-list" ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" /> : null}
+                {savingTarget === "create-list" ? "Creating and adding…" : "Create and add leads"}
               </Btn>
-            </div>
-          </div>
+            </form>
+          </section>
         </div>
       </Dialog>
 
-      <Dialog open={tagDialogIds.length > 0} onClose={() => setTagDialogIds([])} label="Tag selected leads" maxWidth="max-w-md">
-        <DialogHeader title="Bulk tag leads" description="Tags must be a single lowercase word." onClose={() => setTagDialogIds([])} />
-        <div className="space-y-3 px-4 py-4">
+      <Dialog open={tagDialogIds.length > 0} onClose={closeTagDialog} label="Tag selected leads" maxWidth="max-w-md">
+        <DialogHeader
+          title="Tag leads"
+          description={`${tagDialogIds.length} selected ${tagDialogIds.length === 1 ? "lead" : "leads"}`}
+          onClose={closeTagDialog}
+        />
+        <form
+          className="space-y-4 px-4 py-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void applyBulkTag();
+          }}
+        >
           {facets.tags.length ? (
             <div>
               <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-neutral-400">Existing tags</p>
-              <div className="flex flex-wrap gap-1">
-                {facets.tags.map((t) => <button key={t} type="button" onClick={() => setBulkTag(t)} className="rounded bg-neutral-100 px-1.5 py-1 text-[11px] text-ink-soft hover:bg-brand-50 hover:text-brand-700">{t}</button>)}
+              <div className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto pr-1 thin-scroll" aria-label="Existing tags">
+                {facets.tags.map((value) => {
+                  const active = bulkTag.trim().toLowerCase() === value;
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      disabled={savingDialog}
+                      aria-pressed={active}
+                      onClick={() => setBulkTag(value)}
+                      className={cn(
+                        "rounded border px-2 py-1 text-[11px] font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-brand-600/20 disabled:opacity-50",
+                        active ? "border-brand-600/20 bg-brand-50 text-brand-700" : "border-black/[0.07] bg-neutral-50 text-ink-soft hover:border-black/[0.12] hover:bg-neutral-100"
+                      )}
+                    >
+                      {value}
+                    </button>
+                  );
+                })}
               </div>
             </div>
           ) : null}
-          <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
-            <div>
-              <FieldLabel htmlFor="bulk-tag">Tag</FieldLabel>
-              <Input id="bulk-tag" value={bulkTag} onChange={(e) => setBulkTag(e.target.value)} placeholder="priority" />
-            </div>
-            <div>
-              <FieldLabel>Action</FieldLabel>
-              <select value={tagMode} onChange={(e) => setTagMode(e.target.value as "add" | "remove")} className="h-8 rounded border border-black/[0.09] bg-white px-2 text-xs text-ink">
-                <option value="add">Add</option>
-                <option value="remove">Remove</option>
-              </select>
+
+          <div>
+            <FieldLabel htmlFor="bulk-tag">Tag</FieldLabel>
+            <Input
+              id="bulk-tag"
+              data-dialog-autofocus
+              value={bulkTag}
+              onChange={(event) => setBulkTag(event.target.value)}
+              placeholder="priority"
+              disabled={savingDialog}
+              autoComplete="off"
+              maxLength={40}
+            />
+            <p className="mt-1 text-[10.5px] text-ink-mute">Use one lowercase word. Hyphens and underscores are allowed.</p>
+          </div>
+
+          <div>
+            <p className="mb-1.5 text-xs font-medium text-ink">Action</p>
+            <div className="grid grid-cols-2 rounded-md border border-black/[0.08] bg-neutral-50 p-0.5" role="group" aria-label="Tag action">
+              {(["add", "remove"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  disabled={savingDialog}
+                  aria-pressed={tagMode === mode}
+                  onClick={() => setTagMode(mode)}
+                  className={cn(
+                    "h-7 rounded text-xs font-medium outline-none transition-all focus-visible:ring-2 focus-visible:ring-brand-600/20",
+                    tagMode === mode ? "border border-black/[0.07] bg-white text-ink shadow-sm" : "text-ink-mute hover:text-ink"
+                  )}
+                >
+                  {mode === "add" ? "Add" : "Remove"}
+                </button>
+              ))}
             </div>
           </div>
-          <Btn variant="primary" size="sm" className="w-full" disabled={!bulkTag.trim() || savingDialog} onClick={applyBulkTag}>
-            Apply to {tagDialogIds.length} {tagDialogIds.length === 1 ? "lead" : "leads"}
+
+          <Btn variant="primary" size="sm" type="submit" className="w-full" disabled={!bulkTag.trim() || savingDialog}>
+            {savingTarget === "tag" ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" /> : null}
+            {savingTarget === "tag"
+              ? tagMode === "add" ? "Adding tag…" : "Removing tag…"
+              : `${tagMode === "add" ? "Add" : "Remove"} tag ${tagMode === "add" ? "to" : "from"} ${tagDialogIds.length} ${tagDialogIds.length === 1 ? "lead" : "leads"}`}
           </Btn>
-        </div>
+        </form>
       </Dialog>
     </AppLayout>
   );

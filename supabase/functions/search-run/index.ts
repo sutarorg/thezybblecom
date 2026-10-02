@@ -1,7 +1,7 @@
 // ============================================================================
 // search-run — the Zybble lead engine.
-// Auth → workspace auth → entitlement → usage reservation → Gemini interpret
-// → SerpApi paginated fetch → normalize → dedupe → persist → account usage.
+// Auth → workspace auth → entitlement → usage reservation → optional OpenAI
+// interpretation → SerpApi fetch → normalize → dedupe → persist → accounting.
 // ============================================================================
 import {
   HttpError,
@@ -9,28 +9,31 @@ import {
   callerFromRequest,
   corsHeaders,
   errorJson,
-  geminiJson,
   getEntitlements,
   handleError,
   json,
   logActivity,
+  openAIJson,
   requireWorkspaceRole,
   reserveLeads,
   serpApiMaps,
   serpApiResults,
   serpApiLl,
   serviceClient,
-  GEMINI_MODEL,
+  OPENAI_MODEL,
 } from "../_shared/index.ts";
 
 const MAX_PER_RUN = 240; // v1 cap per search (12 pages × 20)
 const MAX_BATCHES = 12;
+const SEARCH_BUDGET_MS = 48_000;
+const PROVIDER_TIMEOUT_MS = 8_000;
+const WEBSITE_TIMEOUT_MS = 2_500;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type LocalResult = Record<string, any>;
 
 /* ------------------------------------------------------------------ */
-/* Fallback interpretation when Gemini is unavailable                   */
+/* Deterministic fallback for legacy raw-query requests                 */
 /* ------------------------------------------------------------------ */
 function fallbackInterpret(query: string) {
   const lower = query.toLowerCase();
@@ -193,15 +196,86 @@ function extractEmail(t: any): string | null {
   return null;
 }
 
+function privateHost(hostname: string) {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host === "::1") return true;
+  const match = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (!match) return host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:");
+  const a = Number(match[1]);
+  const b = Number(match[2]);
+  return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+async function enrichWebsiteRow(row: Record<string, unknown>, deadlineAt: number) {
+  const website = typeof row.website === "string" ? row.website : "";
+  if (!website || Date.now() >= deadlineAt) return row;
+  let url: URL;
+  try {
+    url = new URL(/^https?:\/\//i.test(website) ? website : `https://${website}`);
+  } catch {
+    return row;
+  }
+  if (!["http:", "https:"].includes(url.protocol) || privateHost(url.hostname)) return row;
+
+  try {
+    const timeoutMs = Math.max(1, Math.min(WEBSITE_TIMEOUT_MS, deadlineAt - Date.now()));
+    const addresses = await Promise.race([
+      Promise.all([
+        Deno.resolveDns(url.hostname, "A").catch(() => [] as string[]),
+        Deno.resolveDns(url.hostname, "AAAA").catch(() => [] as string[]),
+      ]).then((sets) => sets.flat()),
+      new Promise<string[]>((_, reject) => setTimeout(() => reject(new Error("DNS timeout")), timeoutMs)),
+    ]);
+    if (!addresses.length || addresses.some(privateHost)) return row;
+    const response = await fetch(url, {
+      redirect: "error",
+      headers: { Accept: "text/html,text/plain;q=0.8", "User-Agent": "ZybbleBot/1.0 (+https://zybble.com)" },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok || !/text\/html|text\/plain|application\/xhtml\+xml/i.test(response.headers.get("content-type") ?? "")) return row;
+    const text = (await response.text()).slice(0, 300_000);
+    const siteDomain = domainOf(website)?.toLowerCase() ?? "";
+    const emails = new Set<string>(Array.isArray(row.emails) ? row.emails.map(String) : []);
+    for (const match of text.toLowerCase().matchAll(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+/gi)) {
+      const email = match[0].replace(/[.,;:]+$/, "");
+      const emailDomain = email.split("@")[1]?.replace(/^www\./, "") ?? "";
+      if (siteDomain && emailDomain !== siteDomain && !emailDomain.endsWith(`.${siteDomain}`)) continue;
+      emails.add(email);
+      if (emails.size >= 8) break;
+    }
+    const employeeMatch = text.replace(/<[^>]+>/g, " ").match(/(?:team of|employees|staff|team members|people)\D{0,18}(\d[\d,]*)|(\d[\d,]*)\s+(?:employees|staff|team members|people)\b/i);
+    const employeeCount = employeeMatch ? Number((employeeMatch[1] ?? employeeMatch[2]).replace(/,/g, "")) : null;
+    const size = employeeCount ? (employeeCount >= 250 ? "enterprise" : employeeCount >= 50 ? "medium" : "small") : row.business_size;
+    const emailList = [...emails];
+    return {
+      ...row,
+      email: emailList[0] ?? row.email ?? null,
+      emails: emailList,
+      business_size: row.business_size === "unknown" && employeeCount ? size : row.business_size,
+      employee_count: row.business_size === "unknown" && employeeCount ? employeeCount : row.employee_count,
+      business_size_source: row.business_size === "unknown" && employeeCount ? "website" : row.business_size_source,
+      business_size_confidence: row.business_size === "unknown" && employeeCount ? 0.75 : row.business_size_confidence,
+    };
+  } catch {
+    return row;
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Main handler                                                        */
 /* ------------------------------------------------------------------ */
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
-  if (req.method !== "POST") return errorJson("Method not allowed", 405);
+  if (req.method !== "POST") return errorJson("Method not allowed", 405, "method_not_allowed");
+
+  const deadlineAt = Date.now() + SEARCH_BUDGET_MS;
+  let accounting: { sb: ReturnType<typeof serviceClient>; workspaceId: string; searchId: string } | null = null;
+  let reserved = 0;
+  let saved = 0;
+  let refundAttempted = false;
 
   try {
-    const sb = serviceClient();
+    const sb = serviceClient(8_000);
     const body = await req.json().catch(() => ({}));
     const workspaceId = String(body.workspaceId ?? "");
     if (!workspaceId) throw new HttpError(400, "workspaceId is required");
@@ -248,26 +322,32 @@ Deno.serve(async (req) => {
       if (!query || query.length < 2) throw new HttpError(400, "Describe the businesses you need.");
       if (query.length > 400) throw new HttpError(400, "Keep the request under 400 characters.");
       try {
-        const planned = await geminiJson({
-          system: INTERPRET_SYSTEM,
-          prompt: `User request: ${query}`,
+        const planned = await openAIJson({
+          instructions: `${INTERPRET_SYSTEM}\nOnly structure the request. Do not run a search or invent requirements.`,
+          input: `User request: ${query}`,
+          schemaName: "zybble_legacy_search_plan",
           schema: {
             type: "object",
+            additionalProperties: false,
             properties: {
               q: { type: "string" },
-              category: { type: "string" },
-              location: { type: "string" },
+              category: { type: ["string", "null"] },
+              location: { type: ["string", "null"] },
               requested_count: { type: "integer" },
               filters: {
                 type: "object",
+                additionalProperties: false,
                 properties: {
                   require_website: { type: "boolean" },
-                  min_rating: { type: "number" },
+                  min_rating: { type: ["number", "null"] },
                 },
+                required: ["require_website", "min_rating"],
               },
             },
-            required: ["q", "requested_count"],
+            required: ["q", "category", "location", "requested_count", "filters"],
           },
+          maxOutputTokens: 1_600,
+          timeoutMs: 20_000,
         });
         interpretation = {
           q: String(planned.q || query),
@@ -283,7 +363,10 @@ Deno.serve(async (req) => {
           },
         };
       } catch (e) {
-        console.warn("Gemini interpret failed — using fallback:", e);
+        console.warn("AI interpretation failed; using deterministic fallback", {
+          name: e instanceof Error ? e.name : "Unknown",
+          message: e instanceof Error ? e.message : "Unknown error",
+        });
         interpretation = fallbackInterpret(query);
       }
       await sb.from("ai_requests").insert({
@@ -292,7 +375,7 @@ Deno.serve(async (req) => {
         kind: "interpret",
         input: { query, plan: interpretation },
         status: "completed",
-        model: GEMINI_MODEL,
+        model: OPENAI_MODEL,
       });
     }
 
@@ -312,7 +395,8 @@ Deno.serve(async (req) => {
       })
       .select()
       .single();
-    if (searchErr) throw new HttpError(500, "Couldn't start the search.");
+    if (searchErr) throw new HttpError(500, "Couldn't start the search.", "search_start_failed");
+    accounting = { sb, workspaceId, searchId: searchRow.id };
 
     const { data: jobRow } = await sb
       .from("lead_search_jobs")
@@ -326,52 +410,67 @@ Deno.serve(async (req) => {
       .single();
 
     /* 3 — atomic usage reservation upfront; refund the unused remainder after */
-    let reserved = requestedCount;
+    reserved = requestedCount;
     try {
       await reserveLeads(sb, workspaceId, reserved);
     } catch (e) {
+      reserved = 0;
       await sb.from("lead_searches").update({ status: "failed", error: "quota" }).eq("id", searchRow.id);
       throw e;
     }
 
     /* 4 — SerpApi pagination: controlled batches */
-    const collected: LocalResult[] = [];
+    const collected: Record<string, unknown>[] = [];
     const seenKeys = new Set<string>();
     let dedupeRemoved = 0;
     let batches = 0;
-    let providerError: string | null = null;
+    let providerError: HttpError | null = null;
+    let deadlineReached = false;
     const target = requestedCount;
     let ll: string | null = null;
 
     try {
       while (collected.length < target && batches < MAX_BATCHES && !providerError) {
+        const remaining = deadlineAt - Date.now();
+        if (remaining <= 250) {
+          deadlineReached = true;
+          break;
+        }
         const start = batches * 20;
-        let page;
+        let page: Record<string, unknown>;
         try {
-          page = await serpApiMaps({ q: interpretation!.q, ll, start });
+          page = await serpApiMaps({
+            q: interpretation!.q,
+            ll,
+            start,
+            timeoutMs: Math.min(PROVIDER_TIMEOUT_MS, remaining),
+          });
         } catch (e) {
-          providerError = e instanceof HttpError ? e.message : "Provider unavailable";
+          providerError = e instanceof HttpError
+            ? e
+            : new HttpError(502, "The business-data provider failed. Try again shortly.", "provider_failed");
+          if (Date.now() >= deadlineAt) deadlineReached = true;
           break;
         }
         const results: LocalResult[] = serpApiResults(page);
         if (!results.length) break;
-        // SerpApi needs `ll` for page 2 onwards; anchor it on page 1's results.
         if (!ll) ll = serpApiLl(page, results);
 
-        for (const raw of results) {
+        const req = interpretation as unknown as Record<string, unknown>;
+        const needsEnrichment = Boolean(req.require_email || req.business_size);
+        const normalizedResults = await Promise.all(results.map(async (raw) => {
           const normalized = normalize(raw, { query: interpretation!.q, location: interpretation!.location });
+          return needsEnrichment ? enrichWebsiteRow(normalized, deadlineAt) : normalized;
+        }));
 
-          /* apply the user's explicit requirements */
-          const req = interpretation as unknown as Record<string, unknown>;
+        for (const normalized of normalizedResults) {
           if (interpretation.filters?.require_website && !normalized.website) continue;
           if (req.require_phone && !normalized.phone) continue;
-          if (req.require_email && !normalized.email) continue;
+          if (req.require_email && !(Array.isArray(normalized.emails) && normalized.emails.length)) continue;
           if (req.open_now && normalized.open_state !== "open") continue;
           const minR = interpretation.filters?.min_rating;
           if (minR != null && Number(normalized.rating ?? 0) < minR) continue;
-          if (req.price_level != null && normalized.price_level != null && normalized.price_level !== req.price_level) {
-            continue;
-          }
+          if (req.price_level != null && normalized.price_level != null && normalized.price_level !== req.price_level) continue;
           if (req.business_size && normalized.business_size !== req.business_size) continue;
 
           const key = String(normalized.dedupe_key);
@@ -380,30 +479,43 @@ Deno.serve(async (req) => {
             continue;
           }
           seenKeys.add(key);
-          collected.push(raw);
+          collected.push(normalized);
           if (collected.length >= target) break;
         }
+        if (Date.now() >= deadlineAt) {
+          deadlineReached = true;
+          break;
+        }
         batches++;
-        const hasNext = Boolean(page?.serpapi_pagination?.next);
+        const pagination = page.serpapi_pagination && typeof page.serpapi_pagination === "object"
+          ? page.serpapi_pagination as Record<string, unknown>
+          : {};
+        const hasNext = Boolean(pagination.next);
         if (results.length < 20 || !ll) break;
         if (batches > 1 && !hasNext) break;
       }
     } catch (e) {
-      providerError = e instanceof Error ? e.message : "Provider error";
+      providerError = e instanceof HttpError
+        ? e
+        : new HttpError(502, "The business-data provider failed. Try again shortly.", "provider_failed");
     }
 
-    /* 5 — normalize again into row shape + DB-level dedupe via upsert */
-    await sb.from("lead_search_jobs").update({ status: "normalizing" }).eq("id", jobRow!.id);
-    const rows = collected.map((raw) => ({
-      ...normalize(raw, { query: interpretation!.q, location: interpretation!.location }),
+    if (providerError && collected.length === 0) throw providerError;
+    if (deadlineReached && collected.length === 0) {
+      throw new HttpError(504, "The search timed out before any matching leads were collected. Please try again.", "search_timeout");
+    }
+
+    /* 5 — rows are normalized and enriched; prepare them for persistence. */
+    if (jobRow) await sb.from("lead_search_jobs").update({ status: "normalizing" }).eq("id", jobRow.id);
+    const rows = collected.map((normalized) => ({
+      ...normalized,
       workspace_id: workspaceId,
       search_id: searchRow.id,
       collector_id: user.id,
     }));
 
     /* 6 — insert with per-row conflict skip (case-insensitive dedupe via unique key) */
-    await sb.from("lead_search_jobs").update({ status: "saving", processed_count: rows.length }).eq("id", jobRow!.id);
-    let saved = 0;
+    if (jobRow) await sb.from("lead_search_jobs").update({ status: "saving", processed_count: rows.length }).eq("id", jobRow.id);
     const savedIds: string[] = [];
     if (rows.length) {
       const chunkSize = 50;
@@ -413,31 +525,32 @@ Deno.serve(async (req) => {
           .from("leads")
           .upsert(chunk, { onConflict: "workspace_id,dedupe_key", ignoreDuplicates: true })
           .select("id");
-        if (!error && inserted) {
-          saved += inserted.length;
-          savedIds.push(...inserted.map((r: { id: string }) => r.id));
-        }
+        if (error) throw new HttpError(500, "The leads were found but couldn't be saved. Try again.", "lead_save_failed");
+        savedIds.push(...(inserted ?? []).map((r: { id: string }) => r.id));
+        saved = savedIds.length;
       }
     }
 
     /* 7 — refund unused reserved leads */
     const unused = Math.max(0, reserved - saved);
-    if (unused > 0) {
-      try {
-        await reserveLeads(sb, workspaceId, -unused);
-      } catch { /* refund best-effort */ }
-    }
+    refundAttempted = unused > 0;
+    if (unused > 0) await reserveLeads(sb, workspaceId, -unused);
+    reserved = saved;
 
     /* 8 — finalize rows */
-    const status = providerError && saved === 0 ? "failed" : providerError ? "partial" : saved < requestedCount ? "partial" : "completed";
-    await sb
+    const status = providerError || deadlineReached || saved < requestedCount ? "partial" : "completed";
+    const reason = deadlineReached ? "deadline_reached" : providerError?.code ?? (saved < requestedCount ? "not_enough_new_matches" : null);
+    const { error: finalizeError } = await sb
       .from("lead_searches")
-      .update({ status, result_count: saved, completed_at: new Date().toISOString(), error: providerError })
+      .update({ status, result_count: saved, completed_at: new Date().toISOString(), error: status === "completed" ? null : providerError?.message ?? reason })
       .eq("id", searchRow.id);
-    await sb
-      .from("lead_search_jobs")
-      .update({ status: status === "failed" ? "failed" : "completed", processed_count: saved, completed_at: new Date().toISOString(), error: providerError })
-      .eq("id", jobRow!.id);
+    if (finalizeError) throw new HttpError(500, "The search completed but its history couldn't be updated.", "search_finalize_failed");
+    if (jobRow) {
+      await sb
+        .from("lead_search_jobs")
+        .update({ status: "completed", processed_count: saved, completed_at: new Date().toISOString(), error: status === "completed" ? null : providerError?.message ?? reason })
+        .eq("id", jobRow.id);
+    }
 
     await logActivity(sb, {
       workspaceId,
@@ -447,36 +560,61 @@ Deno.serve(async (req) => {
       meta: { searchId: searchRow.id, saved, plan: entitlements.plan },
     });
 
-    if (providerError && saved === 0) {
-      return errorJson("The business-data provider failed before any leads could be collected. Please try again.", 502);
+    /* 9 — return exactly the fresh, validated leads saved by this run. */
+    let fresh: Record<string, unknown>[] = [];
+    if (savedIds.length) {
+      const { data, error } = await sb
+        .from("leads")
+        .select("*, lead_notes(id, body, created_at), lead_list_members(list_id)")
+        .in("id", savedIds)
+        .order("created_at", { ascending: false });
+      if (error) throw new HttpError(500, "The leads were saved but couldn't be loaded.", "lead_load_failed");
+      fresh = (data ?? []) as Record<string, unknown>[];
+      if (fresh.length !== savedIds.length || fresh.some((lead) => typeof lead.id !== "string" || typeof lead.name !== "string")) {
+        throw new HttpError(500, "The leads were saved but couldn't be returned safely. Refresh your leads and try again.", "lead_response_invalid");
+      }
     }
 
-    /* 9 — return the fresh page of leads */
-    const { data: fresh } = await sb
-      .from("leads")
-      .select("*, lead_notes(id, body, created_at), lead_list_members(list_id)")
-      .eq("search_id", searchRow.id)
-      .order("created_at", { ascending: false })
-      .limit(60);
-
+    const message = saved >= requestedCount
+      ? `${saved} new lead${saved === 1 ? "" : "s"} collected`
+      : saved > 0
+        ? `Search partially completed — ${saved} new lead${saved === 1 ? "" : "s"} collected`
+        : "Search completed — no new matching leads were available";
     return json({
       searchId: searchRow.id,
-      leads: fresh ?? [],
+      leads: fresh,
       stats: {
         requested: requestedCount,
         found: saved,
         savedCount: saved,
         remaining: Math.max(0, requestedCount - saved),
+        status,
+        reason,
+        message,
         interpretation,
-        insights: [
-          `Searched “${interpretation!.q}”.`,
-          saved >= requestedCount
-            ? `${saved} new lead${saved === 1 ? "" : "s"} collected.`
-            : `Search partially completed — ${saved} new lead${saved === 1 ? "" : "s"} collected.`,
-        ],
+        dedupeRemoved,
+        insights: [`Searched “${interpretation!.q}”.`, message],
       },
     });
   } catch (e) {
+    if (accounting && reserved > saved && !refundAttempted) {
+      try {
+        await reserveLeads(accounting.sb, accounting.workspaceId, -(reserved - saved));
+        reserved = saved;
+      } catch (refundError) {
+        console.error("lead quota refund failed", {
+          workspaceId: accounting.workspaceId,
+          searchId: accounting.searchId,
+          message: refundError instanceof Error ? refundError.message : "Unknown error",
+        });
+      }
+    }
+    if (accounting) {
+      await accounting.sb
+        .from("lead_searches")
+        .update({ status: "failed", result_count: saved, completed_at: new Date().toISOString(), error: e instanceof Error ? e.message : "Search failed" })
+        .eq("id", accounting.searchId);
+    }
     return handleError(e);
   }
 });

@@ -5,6 +5,30 @@ import { businessSizeFromPublicText, domainOf, type BusinessSizeResult } from ".
 const MAX_BYTES = 750_000;
 const TIMEOUT_MS = 8_000;
 const MAX_REDIRECTS = 3;
+
+type EnrichmentOptions = {
+  deadlineAt?: number;
+  requestTimeoutMs?: number;
+};
+
+function timeoutFor(options: EnrichmentOptions) {
+  const remaining = options.deadlineAt ? options.deadlineAt - Date.now() : TIMEOUT_MS;
+  return Math.max(1, Math.min(options.requestTimeoutMs ?? TIMEOUT_MS, remaining));
+}
+
+async function within<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Enrichment timed out")), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 const EMAIL_RE = /(?<![\w.%+-])([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+)(?![\w.%+-])/gi;
 
 function isPrivateIp(ip: string) {
@@ -49,21 +73,27 @@ function normalizeWebsite(raw: string | null | undefined): URL | null {
   }
 }
 
-async function fetchLimited(url: URL, redirects = 0): Promise<{ text: string; finalUrl: URL; contentType: string }> {
-  await assertPublicHost(url);
+async function fetchLimited(
+  url: URL,
+  options: EnrichmentOptions,
+  redirects = 0,
+): Promise<{ text: string; finalUrl: URL; contentType: string }> {
+  const timeoutMs = timeoutFor(options);
+  if (timeoutMs <= 1) throw new Error("Enrichment deadline reached");
+  await within(assertPublicHost(url), timeoutMs);
   const response = await fetch(url, {
     redirect: "manual",
     headers: {
       Accept: "text/html,application/xhtml+xml,text/plain;q=0.8,*/*;q=0.2",
       "User-Agent": "ZybbleBot/1.0 (+https://zybble.com)",
     },
-    signal: AbortSignal.timeout(TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutFor(options)),
   });
   if ([301, 302, 303, 307, 308].includes(response.status)) {
     if (redirects >= MAX_REDIRECTS) throw new Error("Too many redirects");
     const location = response.headers.get("location");
     if (!location) throw new Error("Redirect without location");
-    return fetchLimited(new URL(location, url), redirects + 1);
+    return fetchLimited(new URL(location, url), options, redirects + 1);
   }
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const contentType = response.headers.get("content-type") ?? "";
@@ -126,7 +156,10 @@ function contactUrls(base: URL) {
   return paths.map((path) => new URL(path, base));
 }
 
-export async function enrichPublicWebsite(website: string | null | undefined): Promise<{
+export async function enrichPublicWebsite(
+  website: string | null | undefined,
+  options: EnrichmentOptions = {},
+): Promise<{
   emails: string[];
   employeeSize: BusinessSizeResult;
   pagesChecked: number;
@@ -138,8 +171,9 @@ export async function enrichPublicWebsite(website: string | null | undefined): P
   let combinedText = "";
   let pagesChecked = 0;
   for (const url of contactUrls(base)) {
+    if (options.deadlineAt && Date.now() >= options.deadlineAt) break;
     try {
-      const page = await fetchLimited(url);
+      const page = await fetchLimited(url, options);
       pagesChecked++;
       combinedText += `\n${page.text.slice(0, 200_000)}`;
       for (const email of extractEmails(page.text, siteDomain)) emails.add(email);
