@@ -4,7 +4,7 @@ import {
   OpenAIError,
   getOpenAIModel,
   openAIJson,
-} from "../supabase/functions/_shared/openai";
+} from "./_lib/openai";
 
 type VercelRequest = IncomingMessage & { body?: unknown };
 type VercelResponse = ServerResponse & { status(code: number): VercelResponse; json(body: unknown): void };

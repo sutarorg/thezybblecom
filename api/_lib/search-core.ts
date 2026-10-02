@@ -1,4 +1,4 @@
-import { normalizeLocation, type NormalizedLocation } from "../../src/app/lib/location";
+import { normalizeLocation, type NormalizedLocation } from "./location";
 
 export type BusinessSize = "unknown" | "small" | "medium" | "enterprise";
 export type BusinessSizeSource = "provider" | "website" | "unknown";
