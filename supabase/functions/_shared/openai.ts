@@ -31,6 +31,14 @@ function serverEnv(name: string) {
   return runtime.Deno?.env?.get(name)?.trim() || runtime.process?.env?.[name]?.trim() || "";
 }
 
+/** Where to fix a missing server variable, phrased for the active runtime. */
+function runtimeConfigHint(variableName: string) {
+  const runtime = globalThis as unknown as RuntimeGlobals;
+  return runtime.Deno
+    ? `Set ${variableName} as a Supabase Edge Function secret (supabase secrets set ${variableName}=…), then redeploy the function.`
+    : `Add ${variableName} in Vercel → Project → Settings → Environment Variables, then redeploy.`;
+}
+
 export function getOpenAIModel() {
   return serverEnv("OPENAI_MODEL") || "o4-mini";
 }
@@ -68,7 +76,11 @@ export async function openAIJson(options: {
   const apiKey = serverEnv("OPENAI_API_KEY");
   const model = getOpenAIModel();
   if (!apiKey) {
-    throw new OpenAIError(500, "Zybble AI isn't configured on the server.", "missing_key");
+    throw new OpenAIError(
+      500,
+      `Zybble AI isn't configured on the server. Missing server environment variable: OPENAI_API_KEY. ${runtimeConfigHint("OPENAI_API_KEY")}`,
+      "missing_key",
+    );
   }
 
   let response: Response;

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import handler, { ApiError, pageResults, serpApiMaps } from "./search-run";
 
@@ -165,5 +165,130 @@ describe("search-run handler", () => {
     await handler(req, res);
     expect(getStatus()).toBe(400);
     expect(getBody()).toMatchObject({ code: "filter_invalid" });
+  });
+});
+
+describe("search-run server-side Supabase configuration", () => {
+  const SUPABASE_VARS = ["SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY"] as const;
+  const saved = new Map<string, string | undefined>();
+
+  beforeEach(() => {
+    for (const name of SUPABASE_VARS) saved.set(name, process.env[name]);
+  });
+
+  afterEach(() => {
+    for (const name of SUPABASE_VARS) {
+      const value = saved.get(name);
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function setSupabaseEnv(values: Partial<Record<(typeof SUPABASE_VARS)[number], string>>) {
+    for (const name of SUPABASE_VARS) delete process.env[name];
+    for (const [name, value] of Object.entries(values)) process.env[name] = value;
+  }
+
+  it("fails with an actionable error naming every missing server variable", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    process.env.SERPAPI_API_KEY = "test-serp-key";
+    setSupabaseEnv({});
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      headers: { authorization: "Bearer token" },
+      body: { workspaceId: "11111111-1111-1111-1111-111111111111", filters: { category: "cafes" } },
+    });
+    await handler(req, res);
+    expect(getStatus()).toBe(500);
+    const body = getBody() as { error: string; code: string };
+    expect(body.code).toBe("supabase_config");
+    expect(body.error).toContain("Missing server environment variables: SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY (or SUPABASE_ANON_KEY).");
+    expect(body.error).toContain("Vercel → Project → Settings → Environment Variables");
+    // VITE_* browser build variables must never satisfy the server lookup.
+    expect(body.error).toContain("VITE_SUPABASE_*");
+  });
+
+  it("names only SUPABASE_URL when just the URL is missing", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    process.env.SERPAPI_API_KEY = "test-serp-key";
+    setSupabaseEnv({ SUPABASE_PUBLISHABLE_KEY: "sb_publishable_test" });
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      headers: { authorization: "Bearer token" },
+      body: { workspaceId: "11111111-1111-1111-1111-111111111111", filters: { category: "cafes" } },
+    });
+    await handler(req, res);
+    expect(getStatus()).toBe(500);
+    const body = getBody() as { error: string; code: string };
+    expect(body.code).toBe("supabase_config");
+    expect(body.error).toContain("Missing server environment variable: SUPABASE_URL.");
+    expect(body.error).not.toContain("Missing server environment variable: SUPABASE_PUBLISHABLE_KEY");
+  });
+
+  it("accepts the legacy SUPABASE_ANON_KEY fallback and trims padded values", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    process.env.SERPAPI_API_KEY = "test-serp-key";
+    setSupabaseEnv({
+      SUPABASE_URL: "  https://project.supabase.co\n",
+      SUPABASE_ANON_KEY: "  sb_publishable_legacy-anon  ",
+    });
+    // Configuration is valid, so the handler must get past client creation and
+    // reach the authenticated user lookup; an invalid token then yields 401.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: "Invalid JWT" }), { status: 401, headers: { "content-type": "application/json" } }),
+    ));
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      headers: { authorization: "Bearer caller-token" },
+      body: { workspaceId: "11111111-1111-1111-1111-111111111111", filters: { category: "cafes" } },
+    });
+    await handler(req, res);
+    expect(getStatus()).toBe(401);
+    expect(getBody()).toMatchObject({ code: "auth_invalid" });
+  });
+
+  it("rejects a service-role key so RLS can never be bypassed", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    process.env.SERPAPI_API_KEY = "test-serp-key";
+    setSupabaseEnv({
+      SUPABASE_URL: "https://project.supabase.co",
+      SUPABASE_PUBLISHABLE_KEY: "sb_secret_service-role-key-must-be-rejected",
+    });
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      headers: { authorization: "Bearer token" },
+      body: { workspaceId: "11111111-1111-1111-1111-111111111111", filters: { category: "cafes" } },
+    });
+    await handler(req, res);
+    expect(getStatus()).toBe(500);
+    const body = getBody() as { error: string; code: string };
+    expect(body.code).toBe("supabase_config");
+    expect(body.error).toContain("bypass row-level security");
+    // The rejected key value must never be echoed back to the client.
+    expect(JSON.stringify(body)).not.toContain("sb_secret_service-role-key-must-be-rejected");
+  });
+
+  it("never echoes the SerpApi key in a configuration error response", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const savedKey = process.env.SERPAPI_API_KEY;
+    delete process.env.SERPAPI_API_KEY;
+    delete process.env.SERPAPI_KEY;
+    delete process.env.SERP_API_KEY;
+    try {
+      const { req, res, getStatus, getBody } = createMockReqRes({
+        method: "POST",
+        body: { workspaceId: "11111111-1111-1111-1111-111111111111", filters: { category: "cafes" } },
+      });
+      await handler(req, res);
+      expect(getStatus()).toBe(500);
+      const body = getBody() as { error: string; code: string };
+      expect(body.code).toBe("serpapi_config");
+      expect(body.error).toContain("Missing server environment variable: SERPAPI_API_KEY.");
+      expect(JSON.stringify(body)).not.toContain("test-serp-key");
+    } finally {
+      if (savedKey !== undefined) process.env.SERPAPI_API_KEY = savedKey;
+    }
   });
 });

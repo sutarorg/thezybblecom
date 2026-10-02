@@ -1,5 +1,12 @@
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import {
+  createUserSupabaseClient,
+  missingEnvMessage,
+  readServerEnv,
+  requireSupabaseServerConfig,
+  SupabaseServerConfigError,
+} from "./_lib/supabase-server.js";
 
 type VercelRequest = IncomingMessage & { body?: unknown };
 type VercelResponse = ServerResponse & { status(code: number): VercelResponse; json(body: unknown): void };
@@ -19,13 +26,6 @@ class ApiError extends Error {
   }
 }
 
-function env(...names: string[]) {
-  for (const name of names) {
-    const value = process.env[name]?.trim();
-    if (value) return value;
-  }
-  return "";
-}
 function bodyOf(req: VercelRequest): Json {
   if (req.body && typeof req.body === "object" && !Array.isArray(req.body)) return req.body as Json;
   if (typeof req.body === "string") {
@@ -43,17 +43,12 @@ function tokenOf(req: VercelRequest) {
   return token;
 }
 function client(token: string): SupabaseClient {
-  const url = env("SUPABASE_URL");
-  const key = env("SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY");
-  if (!url || !key) {
-    const missing = [!url && "SUPABASE_URL", !key && "SUPABASE_PUBLISHABLE_KEY (or SUPABASE_ANON_KEY)"].filter(Boolean).join(" and ");
-    console.error("api request", { route: "/api/team-invite", status: 500, code: "supabase_config", missing });
-    throw new ApiError(500, `The invite server isn't connected to Supabase. Missing env var(s): ${missing}.`, "supabase_config");
-  }
-  return createClient(url, key, {
-    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  });
+  // Server-side Supabase configuration (SUPABASE_URL + SUPABASE_PUBLISHABLE_KEY,
+  // legacy SUPABASE_ANON_KEY fallback). Browser VITE_* values never reach here;
+  // see api/_lib/supabase-server.ts. The caller's bearer token is forwarded so
+  // RLS keeps evaluating as the signed-in user.
+  const config = requireSupabaseServerConfig("invite");
+  return createUserSupabaseClient(config, token, { serverLabel: "invite" });
 }
 function escapeHtml(text: string) {
   return text.replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]!));
@@ -65,9 +60,15 @@ async function requireAdmin(sb: SupabaseClient, workspaceId: string, userId: str
   return data.role as string;
 }
 async function sendInviteEmail(opts: { to: string; subject: string; html: string }) {
-  const key = env("RESEND_API_KEY");
-  const from = env("RESEND_FROM_EMAIL") || "Zybble <hello@zybble.com>";
-  if (!key) throw new ApiError(500, "Resend isn't configured, so the invitation email couldn't be sent.", "email_config");
+  const key = readServerEnv("RESEND_API_KEY");
+  const from = readServerEnv("RESEND_FROM_EMAIL") || "Zybble <hello@zybble.com>";
+  if (!key) {
+    throw new ApiError(
+      500,
+      `Resend isn't configured on the server. ${missingEnvMessage(["RESEND_API_KEY"])} Add it in Vercel → Project → Settings → Environment Variables, then redeploy.`,
+      "email_config",
+    );
+  }
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
@@ -129,7 +130,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }, { onConflict: "workspace_id,email" });
     if (inviteError) throw new ApiError(500, "Couldn't create the invitation.", "invite_persist_failed");
 
-    const appUrl = env("APP_URL") || "https://zybble.com";
+    const appUrl = readServerEnv("APP_URL") || "https://zybble.com";
     const inviterName = profile?.name ?? "A teammate";
     const workspaceName = ws.name ?? "workspace";
     await sendInviteEmail({
@@ -146,7 +147,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     await sb.from("activity_logs").insert({ workspace_id: workspaceId, actor_id: auth.user.id, kind: "invite", text: `Invited ${email} as ${role}` }).then(() => undefined);
     return res.status(200).json({ ok: true, emailSent: true, invitationUpdated: Boolean(existingInvite) });
   } catch (error) {
-    const apiError = error instanceof ApiError ? error : new ApiError(500, "Invitation failed. Please try again.", "unknown");
+    const apiError = error instanceof ApiError
+      ? error
+      : error instanceof SupabaseServerConfigError
+        ? new ApiError(error.status, error.message, error.code)
+        : new ApiError(500, "Invitation failed. Please try again.", "unknown");
     if (!(error instanceof ApiError)) console.error("api request", { route: "/api/team-invite", status: 500, code: "unknown" });
     return res.status(apiError.status).json({ error: apiError.message, code: apiError.code });
   }

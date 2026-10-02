@@ -186,19 +186,33 @@ npm run dev
 1. Push the repo to GitHub.
 2. Vercel → **Add New Project → Import Git Repository**.
 3. Framework preset: **Vite** (auto-detected). Build command `npm run build`, output `dist`.
-4. **Environment Variables** (Production + Preview — scoped per current Vercel guidance):
-   - `VITE_SUPABASE_URL`
-   - `VITE_SUPABASE_PUBLISHABLE_KEY`
-   - `SUPABASE_URL` — server-side copy of the project URL used by Vercel Functions
-   - `SUPABASE_PUBLISHABLE_KEY` (or `SUPABASE_ANON_KEY`) — server-side publishable/anon key used by Vercel Functions
+4. **Environment Variables** — set for **Production, Preview, and Development**:
+   - `VITE_SUPABASE_URL` — browser build value (inlined by Vite)
+   - `VITE_SUPABASE_PUBLISHABLE_KEY` — browser build value (inlined by Vite)
+   - `SUPABASE_URL` — **server-side** copy of the project URL used by the Vercel Functions in `api/`
+   - `SUPABASE_PUBLISHABLE_KEY` — **server-side** publishable key used by the Vercel Functions (`SUPABASE_ANON_KEY` works as a legacy fallback). Never a service-role/secret key — the API routes reject those so RLS is never bypassed.
    - `SERPAPI_API_KEY` — server-only; used by `/api/search-run` and never included in the Vite bundle
    - `OPENAI_API_KEY` and optional `OPENAI_MODEL` — server-only; used by `/api/ai-interpret`. Also set these as Supabase Edge Function secrets when using the non-Vercel fallback.
-   - Razorpay, Resend, and Supabase secret/service-role keys remain Supabase Edge Function secrets and must not be added to the browser bundle.
+   - `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `APP_URL` — server-only; used by `/api/team-invite` (emails/links).
+   - Razorpay keys remain Supabase Edge Function secrets and must not be added to the browser bundle.
+
+   **A `VITE_` prefix never satisfies a server-side lookup.** `VITE_SUPABASE_URL` is inlined into the browser bundle at build time; the Node runtime of `/api/search-run` reads `process.env.SUPABASE_URL`. Both sets must be configured — they are separate variables by design so a missing server configuration fails with a clear, actionable error instead of silently degrading.
 5. **Redeploy after adding or changing an environment variable** — existing deployments do not receive new values retroactively — then test the preview URL end-to-end.
 6. Add your custom domain → then go back and:
    - Supabase **Auth → URL Configuration**: add the domain as Site URL + allowed redirect URLs.
    - Confirm the Razorpay webhook URL points to the production project.
 7. Every merge to `main` redeploys automatically.
+
+### Troubleshooting the search configuration
+
+| Error from `/api/search-run` | Meaning | Fix |
+| --- | --- | --- |
+| `Missing server environment variable(s): SUPABASE_URL and/or SUPABASE_PUBLISHABLE_KEY (or SUPABASE_ANON_KEY)` | The Vercel Function's Node runtime has no server-side Supabase config. `VITE_*` values do not count. | Add `SUPABASE_URL` + `SUPABASE_PUBLISHABLE_KEY` in Vercel for **all three environments**, then redeploy. |
+| `SUPABASE_URL isn't a valid URL` | The value was pasted without the scheme/host. | Update `SUPABASE_URL` to the full project URL, then redeploy. |
+| `… is a server secret key, which would bypass row-level security` | A service-role/secret key was placed where the publishable key belongs. | Replace it with the project's publishable key so user-scoped RLS stays enforced. |
+| `Missing server environment variable: SERPAPI_API_KEY` | The search provider key is absent on the server. | Add `SERPAPI_API_KEY` in Vercel (server-only), then redeploy. |
+
+All of these return HTTP 500 with a `code` of `supabase_config`/`serpapi_config`; the frontend surfaces the message directly and does **not** retry through the Supabase Edge Function, so the real backend problem is never masked.
 
 ### Writing imports inside `api/`
 
@@ -230,7 +244,7 @@ Never commit: `.env`, `.env.local`, any key material. `.gitignore` already exclu
 
 ## Architecture notes
 
-- **Secrets**: only `VITE_SUPABASE_URL` + `VITE_SUPABASE_PUBLISHABLE_KEY` reach the browser; the publishable key is safe because every table is RLS-guarded. `SERPAPI_API_KEY` and `OPENAI_API_KEY` are read only by server functions (Vercel and the Edge fallback). Razorpay, Resend, and Supabase secret keys remain Edge Function secrets.
+- **Secrets**: only `VITE_SUPABASE_URL` + `VITE_SUPABASE_PUBLISHABLE_KEY` reach the browser; the publishable key is safe because every table is RLS-guarded. `SUPABASE_URL` + `SUPABASE_PUBLISHABLE_KEY` (server-side runtime config), `SERPAPI_API_KEY`, `OPENAI_API_KEY`, `RESEND_API_KEY`, and `APP_URL` are read only by server functions (Vercel and the Edge fallback) via `api/_lib/supabase-server.ts` and never inlined into the Vite bundle. Razorpay keys and the Supabase service-role/secret keys remain Supabase Edge Function secrets — the Vercel routes deliberately reject secret keys so requests always run with the caller's JWT under RLS.
 - **Usage enforcement**: `reserve_leads()` is a security-definer RPC doing an atomic check-and-increment — concurrent searches can't overrun an allowance; unused reservations are refunded after each run.
 - **Limits**: one-list (Free), seat counts, and client-workspace gating are enforced by **database triggers**, not the UI.
 - **Idempotency**: `webhook_events` stores provider event IDs; duplicates return `200` without re-processing.

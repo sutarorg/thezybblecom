@@ -201,7 +201,13 @@ export async function serpApiMaps(params: {
   timeoutMs?: number;
 }) {
   const key = Deno.env.get("SERPAPI_API_KEY") ?? Deno.env.get("SERPAPI_KEY");
-  if (!key) throw new HttpError(500, "SerpApi isn't configured on the server.", "serpapi_config");
+  if (!key) {
+    throw new HttpError(
+      500,
+      "SerpApi isn't configured on the server. Missing server environment variable: SERPAPI_API_KEY. Set it as a Supabase Edge Function secret (supabase secrets set SERPAPI_API_KEY=…), then redeploy the function.",
+      "serpapi_config",
+    );
+  }
 
   const search = new URLSearchParams({
     engine: "google_maps",
@@ -313,7 +319,10 @@ export const OPENAI_MODEL = getOpenAIModel();
 export async function razorpay(path: string, init: RequestInit = {}) {
   const keyId = Deno.env.get("RAZORPAY_KEY_ID");
   const secret = Deno.env.get("RAZORPAY_KEY_SECRET");
-  if (!keyId || !secret) throw new HttpError(500, "Razorpay isn't configured on the server.");
+  if (!keyId || !secret) {
+    const missing = [!keyId && "RAZORPAY_KEY_ID", !secret && "RAZORPAY_KEY_SECRET"].filter(Boolean);
+    throw new HttpError(500, `Razorpay isn't configured on the server. Missing server environment variable${missing.length > 1 ? "s" : ""}: ${missing.join(" and ")}. Set them as Supabase Edge Function secrets, then redeploy the function.`);
+  }
   const res = await fetch(`https://api.razorpay.com/v1${path}`, {
     ...init,
     headers: {
@@ -378,7 +387,7 @@ function unsent(_subject: string) {
 /* ------------------------------------------------------------------ */
 export async function verifyRazorpaySignature(rawBody: string, signature: string | null) {
   const secret = Deno.env.get("RAZORPAY_WEBHOOK_SECRET");
-  if (!secret) throw new HttpError(500, "Webhook secret isn't configured.");
+  if (!secret) throw new HttpError(500, "Webhook secret isn't configured. Missing server environment variable: RAZORPAY_WEBHOOK_SECRET. Set it as a Supabase Edge Function secret, then redeploy the function.");
   if (!signature) throw new HttpError(400, "Missing webhook signature.");
 
   const encoder = new TextEncoder();
