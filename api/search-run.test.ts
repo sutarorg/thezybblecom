@@ -1,7 +1,36 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, pageResults, serpApiMaps } from "./search-run";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import handler, { ApiError, pageResults, serpApiMaps } from "./search-run";
 
 afterEach(() => vi.unstubAllGlobals());
+
+function createMockReqRes(options: { method?: string; headers?: Record<string, string>; body?: unknown }) {
+  const req = {
+    method: options.method ?? "POST",
+    headers: options.headers ?? {},
+    body: options.body,
+  } as unknown as IncomingMessage & { body?: unknown };
+
+  let statusCode = 200;
+  let responseBody: unknown = null;
+  const headers: Record<string, string> = {};
+
+  const res = {
+    setHeader(key: string, value: string) {
+      headers[key] = value;
+      return res;
+    },
+    status(code: number) {
+      statusCode = code;
+      return res;
+    },
+    json(body: unknown) {
+      responseBody = body;
+    },
+  } as unknown as ServerResponse & { status(code: number): any; json(body: unknown): void };
+
+  return { req, res, getStatus: () => statusCode, getBody: () => responseBody, getHeaders: () => headers };
+}
 
 describe("SerpApi response handling", () => {
   it("treats a valid provider no-results response as an empty page", async () => {
@@ -53,5 +82,54 @@ describe("SerpApi response handling", () => {
       code: "provider_timeout",
     } satisfies Partial<ApiError>);
     vi.restoreAllMocks();
+  });
+});
+
+describe("search-run handler", () => {
+  it("rejects non-POST requests with 405 Method Not Allowed", async () => {
+    const { req, res, getStatus, getBody } = createMockReqRes({ method: "GET" });
+    await handler(req, res);
+    expect(getStatus()).toBe(405);
+    expect(getBody()).toMatchObject({ code: "method_not_allowed" });
+  });
+
+  it("returns 500 serpapi_config when SERPAPI_API_KEY is not configured", async () => {
+    const oldKey = process.env.SERPAPI_API_KEY;
+    delete process.env.SERPAPI_API_KEY;
+    delete process.env.SERPAPI_KEY;
+    delete process.env.SERP_API_KEY;
+    try {
+      const { req, res, getStatus, getBody } = createMockReqRes({
+        method: "POST",
+        body: { workspaceId: "11111111-1111-1111-1111-111111111111", filters: { category: "cafes" } },
+      });
+      await handler(req, res);
+      expect(getStatus()).toBe(500);
+      expect(getBody()).toMatchObject({ code: "serpapi_config" });
+    } finally {
+      if (oldKey) process.env.SERPAPI_API_KEY = oldKey;
+    }
+  });
+
+  it("returns 400 workspace_invalid when workspaceId is missing or invalid", async () => {
+    process.env.SERPAPI_API_KEY = "test-serp-key";
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      body: { workspaceId: "invalid-id", filters: { category: "cafes" } },
+    });
+    await handler(req, res);
+    expect(getStatus()).toBe(400);
+    expect(getBody()).toMatchObject({ code: "workspace_invalid" });
+  });
+
+  it("returns 401 auth_missing when Authorization header is absent", async () => {
+    process.env.SERPAPI_API_KEY = "test-serp-key";
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      body: { workspaceId: "11111111-1111-1111-1111-111111111111", filters: { category: "cafes" } },
+    });
+    await handler(req, res);
+    expect(getStatus()).toBe(401);
+    expect(getBody()).toMatchObject({ code: "auth_missing" });
   });
 });

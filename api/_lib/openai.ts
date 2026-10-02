@@ -18,13 +18,14 @@ export type OpenAIErrorCode =
   | "provider_unavailable";
 
 export class OpenAIError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-    readonly code: OpenAIErrorCode,
-  ) {
+  readonly status: number;
+  readonly code: OpenAIErrorCode;
+
+  constructor(status: number, message: string, code: OpenAIErrorCode) {
     super(message);
     this.name = "OpenAIError";
+    this.status = status;
+    this.code = code;
   }
 }
 

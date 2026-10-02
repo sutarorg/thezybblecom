@@ -8,7 +8,15 @@ type Json = Record<string, unknown>;
 export const maxDuration = 60;
 
 class ApiError extends Error {
-  constructor(readonly status: number, message: string, readonly code = "export_error") { super(message); }
+  readonly status: number;
+  readonly code: string;
+
+  constructor(status: number, message: string, code = "export_error") {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+  }
 }
 
 const CSV_COLUMNS = [

@@ -13,8 +13,8 @@ import {
   stringValue,
   type BusinessSize,
   type BusinessSizeResult,
-} from "./_lib/search-core";
-import { enrichPublicWebsite } from "./_lib/public-enrichment";
+} from "./_lib/search-core.ts";
+import { enrichPublicWebsite } from "./_lib/public-enrichment.ts";
 
 type VercelRequest = IncomingMessage & { body?: unknown };
 type VercelResponse = ServerResponse & {
@@ -53,9 +53,14 @@ type ProviderResult = Record<string, unknown>;
 type LeadRow = Record<string, unknown> & { dedupe_key: string; email?: string | null; emails?: string[]; business_size?: BusinessSize };
 
 export class ApiError extends Error {
-  constructor(readonly status: number, message: string, readonly code = "api_error") {
+  readonly status: number;
+  readonly code: string;
+
+  constructor(status: number, message: string, code = "api_error") {
     super(message);
     this.name = "ApiError";
+    this.status = status;
+    this.code = code;
   }
 }
 
