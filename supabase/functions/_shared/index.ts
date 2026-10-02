@@ -252,10 +252,10 @@ export async function geminiJson(options: {
   if (!key) throw new HttpError(500, "Gemini isn't configured on the server.");
 
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${key}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: options.system }] },
         contents: [{ role: "user", parts: [{ text: options.prompt }] }],
@@ -264,6 +264,9 @@ export async function geminiJson(options: {
           responseSchema: options.schema,
           temperature: 0.15,
           maxOutputTokens: options.maxOutputTokens ?? 1024,
+          // Gemini 2.5 otherwise spends part of this small JSON budget on
+          // hidden reasoning and can return no content for a simple form fill.
+          thinkingConfig: { thinkingBudget: 0 },
         },
       }),
     }

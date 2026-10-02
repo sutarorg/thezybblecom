@@ -77,7 +77,7 @@ Create accounts/tools before configuring anything:
      `https://your-domain.com/overview`, `https://your-domain.com/reset?step=update`,
      `http://localhost:5173/overview`, `http://localhost:5173/reset?step=update`
 7. **SQL Editor → New query**: paste the entire contents of [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql) → **Run**.
-8. **Run the second migration the same way**: paste [`supabase/migrations/0002_free_ai_and_workspace_recovery.sql`](supabase/migrations/0002_free_ai_and_workspace_recovery.sql) → **Run**. It (a) enables Zybble AI on the Free plan in the `plans` table (the server-side source of truth for Edge Function entitlement checks), (b) makes signup workspace provisioning idempotent, and (c) adds `ensure_personal_workspace()` — a recovery RPC the app calls automatically when a signed-in user has no workspace, plus a one-time backfill for existing users. It is safe to run on an existing database.
+8. **Run the remaining migrations in order**: first [`supabase/migrations/0002_free_ai_and_workspace_recovery.sql`](supabase/migrations/0002_free_ai_and_workspace_recovery.sql), then [`supabase/migrations/0003_fix_profile_rls_recursion.sql`](supabase/migrations/0003_fix_profile_rls_recursion.sql). `0002` enables Zybble AI on Free and adds idempotent workspace recovery. `0003` replaces the recursive `profiles` admin policy (which otherwise breaks authenticated workspace reads with “infinite recursion detected”) and prevents profile-role escalation. Both are safe to run on an existing database.
 9. Verify: **Table Editor** should list `plans, profiles, workspaces, workspace_members, workspace_invitations, subscriptions, payments, invoices, lead_searches, lead_search_jobs, leads, lead_lists, lead_list_members, exports, usage_counters, activity_logs, ai_requests, ai_insights, webhook_events`. Every table shows **RLS Enabled**. In `plans`, the `free` row should show `has_ai = true`.
 10. (CLI alternative) `supabase login && supabase link --project-ref <ref> && supabase db push`.
 
@@ -181,7 +181,8 @@ npm run dev
    - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_PUBLISHABLE_KEY`
    - `SERPAPI_API_KEY` — server-only; used by `/api/search-run` and never included in the Vite bundle
-   - Gemini, Razorpay, Resend, and Supabase secret/service-role keys remain Supabase Edge Function secrets and must not be added to the browser bundle.
+   - `GEMINI_API_KEY` and optional `GEMINI_MODEL` — server-only; used by `/api/ai-interpret`. Also set these as Supabase Edge Function secrets when using the non-Vercel fallback.
+   - Razorpay, Resend, and Supabase secret/service-role keys remain Supabase Edge Function secrets and must not be added to the browser bundle.
 5. **Redeploy after adding or changing an environment variable** — existing deployments do not receive new values retroactively — then test the preview URL end-to-end.
 6. Add your custom domain → then go back and:
    - Supabase **Auth → URL Configuration**: add the domain as Site URL + allowed redirect URLs.
