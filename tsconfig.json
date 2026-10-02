@@ -9,7 +9,12 @@
 
     /* Bundler mode */
     "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
+    /* Vercel's Node runtime compiles `api/*.ts` to `.js` without rewriting
+       import specifiers, so a `./foo.ts` specifier survives into the deployed
+       function and crashes it at cold start (ERR_MODULE_NOT_FOUND →
+       FUNCTION_INVOCATION_FAILED). Keep `.ts` specifiers a type error; relative
+       imports under `api/` must be written with the emitted `.js` extension. */
+    "allowImportingTsExtensions": false,
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,

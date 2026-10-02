@@ -4,7 +4,7 @@ import {
   OpenAIError,
   getOpenAIModel,
   openAIJson,
-} from "./_lib/openai.ts";
+} from "./_lib/openai.js";
 
 type VercelRequest = IncomingMessage & { body?: unknown };
 type VercelResponse = ServerResponse & { status(code: number): VercelResponse; json(body: unknown): void };

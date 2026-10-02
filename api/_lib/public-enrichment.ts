@@ -1,6 +1,6 @@
 import dns from "node:dns/promises";
 import net from "node:net";
-import { businessSizeFromPublicText, domainOf, type BusinessSizeResult } from "./search-core.ts";
+import { businessSizeFromPublicText, domainOf, type BusinessSizeResult } from "./search-core.js";
 
 const MAX_BYTES = 750_000;
 const TIMEOUT_MS = 8_000;
