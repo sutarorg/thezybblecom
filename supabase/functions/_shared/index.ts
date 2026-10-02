@@ -24,33 +24,47 @@ export function errorJson(message: string, status = 400, code?: string) {
 
 /** Server client — uses the secret key; bypasses RLS. NEVER NEXT_PUBLIC. */
 export function serviceClient(requestTimeoutMs?: number): SupabaseClient {
-  const url = Deno.env.get("SUPABASE_URL")!;
-  let key = Deno.env.get("SUPABASE_SECRET_KEY");
+  const url = Deno.env.get("SUPABASE_URL")?.trim() ?? "";
+  if (!url) throw new HttpError(500, "The Edge Function is missing its Supabase URL configuration.", "supabase_config");
+
+  let key = Deno.env.get("SUPABASE_SECRET_KEY")?.trim() ?? "";
   if (!key) {
-    const set = Deno.env.get("SUPABASE_SECRET_KEYS");
-    if (set) key = JSON.parse(set)["default"];
+    const set = Deno.env.get("SUPABASE_SECRET_KEYS")?.trim();
+    if (set) {
+      try {
+        const parsed = JSON.parse(set) as Record<string, unknown>;
+        key = typeof parsed.default === "string" ? parsed.default.trim() : "";
+      } catch {
+        throw new HttpError(500, "The Edge Function has invalid Supabase secret configuration.", "supabase_config");
+      }
+    }
   }
-  key ??= Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  if (!key) throw new Error("Server Supabase secret is not configured");
+  key ||= Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")?.trim() ?? "";
+  if (!key) throw new HttpError(500, "The Edge Function is missing its Supabase server secret.", "supabase_config");
+
   const timedFetch = requestTimeoutMs
     ? (input: RequestInfo | URL, init: RequestInit = {}) => fetch(input, { ...init, signal: AbortSignal.timeout(requestTimeoutMs) })
     : undefined;
-  return createClient(url, key, {
-    auth: { persistSession: false },
-    ...(timedFetch ? { global: { fetch: timedFetch } } : {}),
-  });
+  try {
+    return createClient(url, key, {
+      auth: { persistSession: false },
+      ...(timedFetch ? { global: { fetch: timedFetch } } : {}),
+    });
+  } catch {
+    throw new HttpError(500, "The Edge Function has invalid Supabase configuration.", "supabase_config");
+  }
 }
 
 /** Resolve the calling user from the Authorization header. */
 export async function callerFromRequest(req: Request, sb: SupabaseClient) {
   const authHeader = req.headers.get("Authorization") ?? "";
-  const token = authHeader.replace("Bearer ", "");
-  if (!token) throw new HttpError(401, "Missing session token");
+  const token = authHeader.match(/^Bearer\s+(.+)$/i)?.[1]?.trim() ?? "";
+  if (!token) throw new HttpError(401, "Your session expired — sign in again.", "auth_missing");
   const {
     data: { user },
     error,
   } = await sb.auth.getUser(token);
-  if (error || !user) throw new HttpError(401, "Session expired — sign in again");
+  if (error || !user) throw new HttpError(401, "Your session expired — sign in again.", "auth_invalid");
   return user;
 }
 
@@ -65,12 +79,21 @@ export class HttpError extends Error {
   }
 }
 
-export function handleError(e: unknown) {
-  if (e instanceof HttpError || e instanceof OpenAIError) return errorJson(e.message, e.status, e.code);
-  console.error("edge error", {
-    name: e instanceof Error ? e.name : "Unknown",
-    message: e instanceof Error ? e.message : "Unknown error",
+export function handleError(
+  e: unknown,
+  meta?: { functionName: string; startedAt: number },
+) {
+  const apiError = e instanceof HttpError || e instanceof OpenAIError ? e : null;
+  const status = apiError?.status ?? 500;
+  const code = apiError?.code ?? "unknown";
+  console.error("edge request", {
+    functionName: meta?.functionName ?? "unknown",
+    status,
+    code,
+    providerCategory: code.startsWith("provider_") || code.startsWith("rate_") ? code : undefined,
+    durationMs: meta ? Date.now() - meta.startedAt : undefined,
   });
+  if (apiError) return errorJson(apiError.message, apiError.status, apiError.code);
   return errorJson("The service couldn't complete that action. Please try again.", 500, "unknown");
 }
 
@@ -308,7 +331,7 @@ export async function razorpay(path: string, init: RequestInit = {}) {
     /* non-JSON */
   }
   if (!res.ok) {
-    console.error("razorpay error", res.status, bodyText.slice(0, 300));
+    console.error("provider request", { provider: "razorpay", status: res.status, responseKind: bodyText ? "body" : "empty" });
     throw new HttpError(502, "Our payment provider couldn't complete that action.");
   }
   return body;
@@ -326,7 +349,7 @@ export async function sendEmail(opts: {
 }) {
   const key = Deno.env.get("RESEND_API_KEY");
   if (!key) {
-    console.warn("Resend not configured — skipping email:", opts.subject);
+    console.warn("provider request", { provider: "resend", status: 0, code: "email_config" });
     return unsent(opts.subject);
   }
   const res = await fetch("https://api.resend.com/emails", {
@@ -338,14 +361,15 @@ export async function sendEmail(opts: {
     body: JSON.stringify({ from: FROM, ...opts }),
   });
   if (!res.ok) {
-    console.error("resend error", res.status, (await res.text()).slice(0, 200));
+    const responseBody = await res.text();
+    console.error("provider request", { provider: "resend", status: res.status, responseKind: responseBody ? "body" : "empty" });
     return { sent: false as const };
   }
   return { sent: true as const };
 }
 
-function unsent(subject: string) {
-  console.info("email (dev noop):", subject);
+function unsent(_subject: string) {
+  console.info("provider request", { provider: "resend", status: 0, code: "email_not_configured" });
   return { sent: false as const, noop: true };
 }
 

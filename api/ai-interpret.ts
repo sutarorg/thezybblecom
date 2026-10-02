@@ -47,19 +47,23 @@ function bodyOf(req: VercelRequest): JsonObject {
 
 function tokenOf(req: VercelRequest) {
   const value = Array.isArray(req.headers.authorization) ? req.headers.authorization[0] : req.headers.authorization;
-  const token = value?.match(/^Bearer\s+(.+)$/i)?.[1];
+  const token = value?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
   if (!token) throw new ApiError(401, "Your session expired — sign in again.", "auth_missing");
   return token;
 }
 
 function userClient(token: string): SupabaseClient {
-  const url = env("SUPABASE_URL", "VITE_SUPABASE_URL");
-  const key = env("SUPABASE_PUBLISHABLE_KEY", "VITE_SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY");
+  const url = env("SUPABASE_URL");
+  const key = env("SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY");
   if (!url || !key) throw new ApiError(500, "The AI server isn't connected to Supabase.", "supabase_config");
-  return createClient(url, key, {
-    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  });
+  try {
+    return createClient(url, key, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+      global: { headers: { Authorization: `Bearer ${token}` } },
+    });
+  } catch {
+    throw new ApiError(500, "The AI server has invalid Supabase configuration.", "supabase_config");
+  }
 }
 
 export const INTERPRET_RESPONSE_SCHEMA: Record<string, unknown> = {
@@ -138,6 +142,7 @@ export function cleanInterpretResult(raw: JsonObject, request = "") {
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const startedAt = Date.now();
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   if (req.method !== "POST") {
@@ -196,9 +201,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       : error instanceof OpenAIError
         ? new ApiError(error.status, error.message, error.code)
         : new ApiError(500, "The AI service couldn't complete that action. Please try again.", "unknown");
-    if (!(error instanceof ApiError) && !(error instanceof OpenAIError)) {
-      console.error("ai-interpret error", { name: error instanceof Error ? error.name : "Unknown", message: error instanceof Error ? error.message : "Unknown error" });
-    }
+    console.error("api request", {
+      route: "/api/ai-interpret",
+      status: apiError.status,
+      code: apiError.code,
+      providerCategory: apiError.code.startsWith("provider_") || apiError.code.startsWith("rate_") ? apiError.code : undefined,
+      durationMs: Date.now() - startedAt,
+    });
     return res.status(apiError.status).json({ error: apiError.message, code: apiError.code });
   }
 }

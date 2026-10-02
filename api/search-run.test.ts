@@ -66,6 +66,15 @@ describe("SerpApi response handling", () => {
     vi.restoreAllMocks();
   });
 
+  it("returns real provider result payloads unchanged for normalization", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      local_results: [{ title: "A real business", place_id: "place-1" }],
+      serpapi_pagination: { next: "https://serpapi.com/next" },
+    }), { status: 200 })));
+    const page = await serpApiMaps("server-secret", { q: "dentists", start: 0 });
+    expect(pageResults(page)).toEqual([{ title: "A real business", place_id: "place-1" }]);
+  });
+
   it("normalizes rate limits and request timeouts", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const fetchMock = vi.fn()
@@ -131,5 +140,30 @@ describe("search-run handler", () => {
     await handler(req, res);
     expect(getStatus()).toBe(401);
     expect(getBody()).toMatchObject({ code: "auth_missing" });
+  });
+
+  it("rejects a missing category before any provider request", async () => {
+    process.env.SERPAPI_API_KEY = "test-serp-key";
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      body: { workspaceId: "11111111-1111-1111-1111-111111111111", filters: {} },
+    });
+    await handler(req, res);
+    expect(getStatus()).toBe(400);
+    expect(getBody()).toMatchObject({ code: "category_required" });
+  });
+
+  it("rejects invalid filter types instead of silently coercing them", async () => {
+    process.env.SERPAPI_API_KEY = "test-serp-key";
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      body: {
+        workspaceId: "11111111-1111-1111-1111-111111111111",
+        filters: { category: "cafes", requireEmail: "false" },
+      },
+    });
+    await handler(req, res);
+    expect(getStatus()).toBe(400);
+    expect(getBody()).toMatchObject({ code: "filter_invalid" });
   });
 });

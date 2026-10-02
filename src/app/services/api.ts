@@ -8,6 +8,7 @@ import { planFromId, planLabel } from "../data/plans";
 import { mergeTags, validateTag } from "../lib/tags";
 import { formatAppDate, setRuntimePreferences, type RuntimePreferences } from "../lib/datetime";
 import { parseApiResponse } from "./api-response";
+import { readFunctionError } from "./edge-error";
 import type {
   ActivityItem,
   ExportRecord,
@@ -605,9 +606,13 @@ export async function runSearch(
 
   const { data, error } = await sb.functions.invoke("search-run", {
     body: { workspaceId, filters },
+    // Do not rely on the SDK's implicit session lookup. Supplying the token
+    // explicitly makes the JWT boundary visible and works with publishable
+    // keys and verify_jwt=true Edge Functions in production.
+    headers: { Authorization: `Bearer ${session.access_token}` },
   });
   if (error) {
-    const fallbackError = await readFunctionError(error);
+    const fallbackError = await readFunctionError(error, "search-run", "search");
     return { error: fallbackError || sameOriginError || "The search couldn't complete." };
   }
   if (data?.error) return { error: String(data.error) };
@@ -676,7 +681,7 @@ export async function interpretRequest(
       body: JSON.stringify({ workspaceId, request }),
     });
     const parsed = await parseApiResponse<Interpretation>(response, "AI");
-    if (parsed.data) return { result: parsed.data };
+    if (parsed.data) return interpretationResponse(parsed.data);
     if (!parsed.shouldFallback) return { error: parsed.error ?? "Zybble AI couldn't interpret that request." };
   } catch {
     // Same-origin route unavailable; use the deployed Edge Function below.
@@ -684,10 +689,29 @@ export async function interpretRequest(
 
   const { data, error } = await sb.functions.invoke("ai-interpret", {
     body: { workspaceId, request },
+    headers: { Authorization: `Bearer ${session.access_token}` },
   });
-  if (error) return { error: await readFunctionError(error) };
-  if (data?.error) return { error: data.error };
-  return { result: data as Interpretation };
+  if (error) return { error: await readFunctionError(error, "ai-interpret", "AI") };
+  if (data?.error) return { error: String(data.error) };
+  return interpretationResponse(data);
+}
+
+function interpretationResponse(data: unknown): { result?: Interpretation; error?: string } {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return { error: "Zybble AI returned incomplete filter data. Please try again." };
+  }
+  const body = data as Record<string, unknown>;
+  const filters = body.filters;
+  if (!filters || typeof filters !== "object" || Array.isArray(filters) || typeof (filters as Record<string, unknown>).category !== "string") {
+    return { error: "Zybble AI couldn't identify a business category. Try rephrasing." };
+  }
+  return {
+    result: {
+      filters: filters as Partial<SearchFilters>,
+      summary: typeof body.summary === "string" ? body.summary : "Search filters prepared.",
+      notes: Array.isArray(body.notes) ? body.notes.map(String).slice(0, 2) : [],
+    },
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -968,8 +992,11 @@ export async function runExport(opts: {
     // Same-origin route unavailable; fall back to Edge Function below.
   }
 
-  const { data, error } = await sb.functions.invoke("export-run", { body: opts });
-  if (error) return { error: await readFunctionError(error) };
+  const { data, error } = await sb.functions.invoke("export-run", {
+    body: opts,
+    headers: { Authorization: `Bearer ${session.access_token}` },
+  });
+  if (error) return { error: await readFunctionError(error, "export-run", "export") };
   if (data?.error) return { error: data.error };
   return { export: data as { id: string; file_name: string; lead_count: number; status: string; csv?: string } };
 }
@@ -1078,8 +1105,9 @@ export async function inviteMember(workspaceId: string, email: string, role: "ad
 
   const { data, error } = await sb.functions.invoke("team-invite", {
     body: { workspaceId, email, role },
+    headers: { Authorization: `Bearer ${session.access_token}` },
   });
-  if (error) return { error: await readFunctionError(error) };
+  if (error) return { error: await readFunctionError(error, "team-invite", "invite") };
   if (data?.error) return { error: data.error };
   return { ok: true as const, emailSent: Boolean(data?.emailSent ?? data?.ok) };
 }
@@ -1162,11 +1190,20 @@ export async function getUsage(workspaceId: string, planId: string): Promise<Usa
 export async function analyzeLead(leadId: string, workspaceId: string) {
   const sb = getSupabase();
   if (!sb) return { error: CONFIG_ERROR };
+  const {
+    data: { session },
+  } = await sb.auth.getSession();
+  if (!session) return { error: "Your session expired — sign in again." };
+
   const { data, error } = await sb.functions.invoke("ai-analyze", {
     body: { leadId, workspaceId },
+    headers: { Authorization: `Bearer ${session.access_token}` },
   });
-  if (error) return { error: await readFunctionError(error) };
-  if (data?.error) return { error: data.error };
+  if (error) return { error: await readFunctionError(error, "ai-analyze", "AI") };
+  if (data?.error) return { error: String(data.error) };
+  if (!data || typeof data !== "object" || typeof data.summary !== "string" || !Array.isArray(data.points)) {
+    return { error: "Zybble AI returned incomplete analysis. Please try again." };
+  }
   return { result: data as { summary: string; points: string[]; outreach_angle?: string; model: string } };
 }
 
@@ -1345,10 +1382,15 @@ export async function getBilling(workspaceId: string): Promise<BillingState> {
 export async function startCheckout(planId: "growth" | "agency" | "scale") {
   const sb = getSupabase();
   if (!sb) return { error: CONFIG_ERROR };
+  const {
+    data: { session },
+  } = await sb.auth.getSession();
+  if (!session) return { error: "Your session expired — sign in again." };
   const { data, error } = await sb.functions.invoke("billing", {
     body: { action: "checkout", plan: planId },
+    headers: { Authorization: `Bearer ${session.access_token}` },
   });
-  if (error) return { error: await readFunctionError(error) };
+  if (error) return { error: await readFunctionError(error, "billing", "billing") };
   if (data?.error) return { error: data.error };
   return { url: data?.url as string };
 }
@@ -1356,8 +1398,15 @@ export async function startCheckout(planId: "growth" | "agency" | "scale") {
 export async function cancelSubscription() {
   const sb = getSupabase();
   if (!sb) return { error: CONFIG_ERROR };
-  const { data, error } = await sb.functions.invoke("billing", { body: { action: "cancel" } });
-  if (error) return { error: await readFunctionError(error) };
+  const {
+    data: { session },
+  } = await sb.auth.getSession();
+  if (!session) return { error: "Your session expired — sign in again." };
+  const { data, error } = await sb.functions.invoke("billing", {
+    body: { action: "cancel" },
+    headers: { Authorization: `Bearer ${session.access_token}` },
+  });
+  if (error) return { error: await readFunctionError(error, "billing", "billing") };
   if (data?.error) return { error: data.error };
   return { ok: true as const };
 }
@@ -1365,7 +1414,14 @@ export async function cancelSubscription() {
 export async function syncBilling() {
   const sb = getSupabase();
   if (!sb) return;
-  await sb.functions.invoke("billing", { body: { action: "sync" } }).catch(() => undefined);
+  const {
+    data: { session },
+  } = await sb.auth.getSession();
+  if (!session) return;
+  await sb.functions.invoke("billing", {
+    body: { action: "sync" },
+    headers: { Authorization: `Bearer ${session.access_token}` },
+  }).catch(() => undefined);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1384,21 +1440,4 @@ export function readableError(message: string): string {
     return "You don't have access to that resource.";
   if (m.includes("jwt") || m.includes("expired")) return "Your session expired — sign in again.";
   return message || "Something went wrong.";
-}
-
-/** Edge Functions return structured JSON errors; surface them verbatim. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function readFunctionError(error: any): Promise<string> {
-  try {
-    const ctx = error?.context;
-    if (ctx && typeof ctx.json === "function") {
-      const body = await ctx.json();
-      if (body?.error) return String(body.error);
-    }
-  } catch {
-    /* fall through */
-  }
-  const msg = String(error?.message ?? "");
-  if (msg.includes("Failed to fetch")) return "We couldn't reach the server. Check your connection.";
-  return msg || "The service couldn't complete that action.";
 }

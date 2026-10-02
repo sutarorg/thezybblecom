@@ -48,8 +48,8 @@ function tokenOf(req: VercelRequest) {
   return token;
 }
 function client(token: string): SupabaseClient {
-  const url = env("SUPABASE_URL", "VITE_SUPABASE_URL");
-  const key = env("SUPABASE_PUBLISHABLE_KEY", "VITE_SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY");
+  const url = env("SUPABASE_URL");
+  const key = env("SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY");
   if (!url || !key) throw new ApiError(500, "The export server isn't connected to Supabase.", "supabase_config");
   return createClient(url, key, {
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
@@ -139,7 +139,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(200).json({ ...exportRow, csv });
   } catch (error) {
     const apiError = error instanceof ApiError ? error : new ApiError(500, "Export failed. Please try again.", "unknown");
-    if (!(error instanceof ApiError)) console.error("export-run error", error);
+    if (!(error instanceof ApiError)) console.error("api request", { route: "/api/export-run", status: 500, code: "unknown" });
     return res.status(apiError.status).json({ error: apiError.message, code: apiError.code });
   }
 }

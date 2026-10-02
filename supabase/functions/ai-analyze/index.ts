@@ -34,7 +34,8 @@ const ANALYSIS_SCHEMA: Record<string, unknown> = {
 };
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  const startedAt = Date.now();
+  if (req.method === "OPTIONS") return new Response(JSON.stringify({ ok: true }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   if (req.method !== "POST") return errorJson("Method not allowed", 405, "method_not_allowed");
 
   try {
@@ -52,6 +53,19 @@ Deno.serve(async (req) => {
       throw new HttpError(403, "Zybble AI isn't available on your current plan.", "ai_not_entitled");
     }
 
+    // Authorize the lead's workspace before reading a cached insight. Looking
+    // up ai_insights by lead_id first would let a member of one workspace
+    // receive cached analysis for a lead in another workspace.
+    const { data: lead, error: leadErr } = await sb
+      .from("leads")
+      .select(
+        "name, category, categories, rating, reviews, website, website_domain, email, phone, address, city, state, open_state, hours_display, services, amenities, price_level"
+      )
+      .eq("id", leadId)
+      .eq("workspace_id", workspaceId)
+      .single();
+    if (leadErr || !lead) throw new HttpError(404, "This lead doesn't exist.", "lead_not_found");
+
     const { data: cached } = await sb
       .from("ai_insights")
       .select("summary, points, model, created_at")
@@ -65,16 +79,6 @@ Deno.serve(async (req) => {
         cached: true,
       });
     }
-
-    const { data: lead, error: leadErr } = await sb
-      .from("leads")
-      .select(
-        "name, category, categories, rating, reviews, website, website_domain, email, phone, address, city, state, open_state, hours_display, services, amenities, price_level"
-      )
-      .eq("id", leadId)
-      .eq("workspace_id", workspaceId)
-      .single();
-    if (leadErr || !lead) throw new HttpError(404, "This lead doesn't exist.", "lead_not_found");
 
     const out = await openAIJson({
       instructions: ANALYZE_SYSTEM,
@@ -139,6 +143,6 @@ Deno.serve(async (req) => {
 
     return json({ summary, points, outreach_angle: outreachAngle, model: OPENAI_MODEL, cached: false });
   } catch (e) {
-    return handleError(e);
+    return handleError(e, { functionName: "ai-analyze", startedAt });
   }
 });

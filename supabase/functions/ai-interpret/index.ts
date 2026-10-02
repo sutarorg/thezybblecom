@@ -58,7 +58,8 @@ Only set businessSize when the user actually asks for small, medium, or enterpri
 summary is one short sentence. notes contains at most two short caveats or suggestions.`;
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  const startedAt = Date.now();
+  if (req.method === "OPTIONS") return new Response(JSON.stringify({ ok: true }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   if (req.method !== "POST") return errorJson("Method not allowed", 405, "method_not_allowed");
 
   try {
@@ -125,6 +126,6 @@ Deno.serve(async (req) => {
       notes: Array.isArray(out.notes) ? out.notes.slice(0, 2).map((n) => String(n).slice(0, 160)) : [],
     });
   } catch (e) {
-    return handleError(e);
+    return handleError(e, { functionName: "ai-interpret", startedAt });
   }
 });

@@ -43,8 +43,8 @@ function tokenOf(req: VercelRequest) {
   return token;
 }
 function client(token: string): SupabaseClient {
-  const url = env("SUPABASE_URL", "VITE_SUPABASE_URL");
-  const key = env("SUPABASE_PUBLISHABLE_KEY", "VITE_SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY");
+  const url = env("SUPABASE_URL");
+  const key = env("SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY");
   if (!url || !key) throw new ApiError(500, "The invite server isn't connected to Supabase.", "supabase_config");
   return createClient(url, key, {
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
@@ -72,7 +72,7 @@ async function sendInviteEmail(opts: { to: string; subject: string; html: string
   });
   if (!response.ok) {
     const text = await response.text().catch(() => "");
-    console.warn("resend invite error", { status: response.status, body: text.slice(0, 200) });
+    console.warn("api provider", { provider: "resend", status: response.status, responseKind: text ? "body" : "empty" });
     throw new ApiError(502, "The invitation was saved, but Resend couldn't deliver the email. Try again shortly.", "email_delivery_failed");
   }
 }
@@ -143,7 +143,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(200).json({ ok: true, emailSent: true, invitationUpdated: Boolean(existingInvite) });
   } catch (error) {
     const apiError = error instanceof ApiError ? error : new ApiError(500, "Invitation failed. Please try again.", "unknown");
-    if (!(error instanceof ApiError)) console.error("team-invite error", error);
+    if (!(error instanceof ApiError)) console.error("api request", { route: "/api/team-invite", status: 500, code: "unknown" });
     return res.status(apiError.status).json({ error: apiError.message, code: apiError.code });
   }
 }
