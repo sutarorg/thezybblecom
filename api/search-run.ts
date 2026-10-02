@@ -160,7 +160,11 @@ function parseFilters(input: unknown): SearchFilters {
 function serverClient(token: string): SupabaseClient {
   const url = env("SUPABASE_URL");
   const key = env("SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY");
-  if (!url || !key) throw new ApiError(500, "The search server isn't connected to Supabase.", "supabase_config");
+  if (!url || !key) {
+    const missing = [!url && "SUPABASE_URL", !key && "SUPABASE_PUBLISHABLE_KEY (or SUPABASE_ANON_KEY)"].filter(Boolean).join(" and ");
+    console.error("api request", { route: "/api/search-run", status: 500, code: "supabase_config", missing });
+    throw new ApiError(500, `The search server isn't connected to Supabase. Missing env var(s): ${missing}.`, "supabase_config");
+  }
   const databaseFetch: typeof fetch = (input, init = {}) => fetch(input, {
     ...init,
     signal: AbortSignal.timeout(4_000),

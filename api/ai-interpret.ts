@@ -55,7 +55,11 @@ function tokenOf(req: VercelRequest) {
 function userClient(token: string): SupabaseClient {
   const url = env("SUPABASE_URL");
   const key = env("SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY");
-  if (!url || !key) throw new ApiError(500, "The AI server isn't connected to Supabase.", "supabase_config");
+  if (!url || !key) {
+    const missing = [!url && "SUPABASE_URL", !key && "SUPABASE_PUBLISHABLE_KEY (or SUPABASE_ANON_KEY)"].filter(Boolean).join(" and ");
+    console.error("api request", { route: "/api/ai-interpret", status: 500, code: "supabase_config", missing });
+    throw new ApiError(500, `The AI server isn't connected to Supabase. Missing env var(s): ${missing}.`, "supabase_config");
+  }
   try {
     return createClient(url, key, {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
