@@ -1,5 +1,10 @@
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import {
+  createUserSupabaseClient,
+  requireSupabaseServerConfig,
+  SupabaseServerConfigError,
+} from "./_lib/supabase-server.js";
 
 type VercelRequest = IncomingMessage & { body?: unknown };
 type VercelResponse = ServerResponse & { status(code: number): VercelResponse; json(body: unknown): void };
@@ -24,13 +29,6 @@ const CSV_COLUMNS = [
   "website", "address", "city", "state", "postal_code", "country", "latitude", "longitude", "status", "tags", "source",
 ] as const;
 
-function env(...names: string[]) {
-  for (const name of names) {
-    const value = process.env[name]?.trim();
-    if (value) return value;
-  }
-  return "";
-}
 function bodyOf(req: VercelRequest): Json {
   if (req.body && typeof req.body === "object" && !Array.isArray(req.body)) return req.body as Json;
   if (typeof req.body === "string") {
@@ -48,17 +46,12 @@ function tokenOf(req: VercelRequest) {
   return token;
 }
 function client(token: string): SupabaseClient {
-  const url = env("SUPABASE_URL");
-  const key = env("SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY");
-  if (!url || !key) {
-    const missing = [!url && "SUPABASE_URL", !key && "SUPABASE_PUBLISHABLE_KEY (or SUPABASE_ANON_KEY)"].filter(Boolean).join(" and ");
-    console.error("api request", { route: "/api/export-run", status: 500, code: "supabase_config", missing });
-    throw new ApiError(500, `The export server isn't connected to Supabase. Missing env var(s): ${missing}.`, "supabase_config");
-  }
-  return createClient(url, key, {
-    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  });
+  // Server-side Supabase configuration (SUPABASE_URL + SUPABASE_PUBLISHABLE_KEY,
+  // legacy SUPABASE_ANON_KEY fallback). Browser VITE_* values never reach here;
+  // see api/_lib/supabase-server.ts. The caller's bearer token is forwarded so
+  // RLS keeps evaluating as the signed-in user.
+  const config = requireSupabaseServerConfig("export");
+  return createUserSupabaseClient(config, token, { serverLabel: "export" });
 }
 async function requireMember(sb: SupabaseClient, workspaceId: string, userId: string) {
   const { data, error } = await sb.from("workspace_members").select("role").eq("workspace_id", workspaceId).eq("user_id", userId).maybeSingle();
@@ -142,7 +135,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     return res.status(200).json({ ...exportRow, csv });
   } catch (error) {
-    const apiError = error instanceof ApiError ? error : new ApiError(500, "Export failed. Please try again.", "unknown");
+    const apiError = error instanceof ApiError
+      ? error
+      : error instanceof SupabaseServerConfigError
+        ? new ApiError(error.status, error.message, error.code)
+        : new ApiError(500, "Export failed. Please try again.", "unknown");
     if (!(error instanceof ApiError)) console.error("api request", { route: "/api/export-run", status: 500, code: "unknown" });
     return res.status(apiError.status).json({ error: apiError.message, code: apiError.code });
   }

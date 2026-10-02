@@ -1,4 +1,4 @@
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   businessSizeFromProvider,
@@ -15,6 +15,13 @@ import {
   type BusinessSizeResult,
 } from "./_lib/search-core.js";
 import { enrichPublicWebsite } from "./_lib/public-enrichment.js";
+import {
+  createUserSupabaseClient,
+  missingEnvMessage,
+  readServerEnv,
+  requireSupabaseServerConfig,
+  SupabaseServerConfigError,
+} from "./_lib/supabase-server.js";
 
 type VercelRequest = IncomingMessage & { body?: unknown };
 type VercelResponse = ServerResponse & {
@@ -74,14 +81,6 @@ const LEAD_RESPONSE_SELECT = [
   "owner_name", "owner_link", "booking_links", "menu_links", "social_links", "search_query", "search_location",
   "collected_at", "updated_at", "status", "tags",
 ].join(",");
-
-function env(...names: string[]) {
-  for (const name of names) {
-    const value = process.env[name]?.trim();
-    if (value) return value;
-  }
-  return "";
-}
 
 function bearerToken(req: VercelRequest) {
   const value = Array.isArray(req.headers.authorization) ? req.headers.authorization[0] : req.headers.authorization;
@@ -158,25 +157,13 @@ function parseFilters(input: unknown): SearchFilters {
 }
 
 function serverClient(token: string): SupabaseClient {
-  const url = env("SUPABASE_URL");
-  const key = env("SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY");
-  if (!url || !key) {
-    const missing = [!url && "SUPABASE_URL", !key && "SUPABASE_PUBLISHABLE_KEY (or SUPABASE_ANON_KEY)"].filter(Boolean).join(" and ");
-    console.error("api request", { route: "/api/search-run", status: 500, code: "supabase_config", missing });
-    throw new ApiError(500, `The search server isn't connected to Supabase. Missing env var(s): ${missing}.`, "supabase_config");
-  }
-  const databaseFetch: typeof fetch = (input, init = {}) => fetch(input, {
-    ...init,
-    signal: AbortSignal.timeout(4_000),
-  });
-  try {
-    return createClient(url, key, {
-      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-      global: { headers: { Authorization: `Bearer ${token}` }, fetch: databaseFetch },
-    });
-  } catch {
-    throw new ApiError(500, "The search server has invalid Supabase configuration.", "supabase_config");
-  }
+  // Server-side configuration only: SUPABASE_URL + SUPABASE_PUBLISHABLE_KEY
+  // (with the legacy SUPABASE_ANON_KEY fallback). VITE_* build variables are
+  // browser-only and are deliberately never read here — see
+  // api/_lib/supabase-server.ts. The caller's bearer token is forwarded on
+  // every request so RLS and reserve_leads() keep evaluating as the user.
+  const config = requireSupabaseServerConfig("search");
+  return createUserSupabaseClient(config, token, { serverLabel: "search", requestTimeoutMs: 4_000 });
 }
 
 async function assertWorkspaceAccess(sb: SupabaseClient, workspaceId: string, userId: string) {
@@ -554,8 +541,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   let refundAttempted = false;
 
   try {
-    const apiKey = env("SERPAPI_API_KEY", "SERPAPI_KEY", "SERP_API_KEY");
-    if (!apiKey) throw new ApiError(500, "SerpApi isn't configured in Vercel. Add SERPAPI_API_KEY and redeploy.", "serpapi_config");
+    const apiKey = readServerEnv("SERPAPI_API_KEY", "SERPAPI_KEY", "SERP_API_KEY");
+    if (!apiKey) {
+      throw new ApiError(
+        500,
+        `SerpApi isn't configured on the server. ${missingEnvMessage(["SERPAPI_API_KEY"])} Add it in Vercel → Project → Settings → Environment Variables (Production, Preview, Development), then redeploy.`,
+        "serpapi_config",
+      );
+    }
 
     const body = requestBody(req);
     workspaceId = String(body.workspaceId ?? "");
@@ -774,7 +767,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       },
     });
   } catch (error) {
-    const apiError = error instanceof ApiError ? error : new ApiError(500, "The service couldn't complete that action. Please try again.", "unknown");
+    const apiError = error instanceof ApiError
+      ? error
+      : error instanceof SupabaseServerConfigError
+        ? new ApiError(error.status, error.message, error.code)
+        : new ApiError(500, "The service couldn't complete that action. Please try again.", "unknown");
     // Cleanup runs on a path that is already failing: anything thrown here would
     // escape the handler and surface as an opaque FUNCTION_INVOCATION_FAILED
     // instead of the actionable JSON error below.

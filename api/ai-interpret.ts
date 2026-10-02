@@ -1,10 +1,15 @@
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   OpenAIError,
   getOpenAIModel,
   openAIJson,
 } from "./_lib/openai.js";
+import {
+  createUserSupabaseClient,
+  requireSupabaseServerConfig,
+  SupabaseServerConfigError,
+} from "./_lib/supabase-server.js";
 
 type VercelRequest = IncomingMessage & { body?: unknown };
 type VercelResponse = ServerResponse & { status(code: number): VercelResponse; json(body: unknown): void };
@@ -22,14 +27,6 @@ class ApiError extends Error {
     this.status = status;
     this.code = code;
   }
-}
-
-function env(...names: string[]) {
-  for (const name of names) {
-    const value = process.env[name]?.trim();
-    if (value) return value;
-  }
-  return "";
 }
 
 function bodyOf(req: VercelRequest): JsonObject {
@@ -53,21 +50,12 @@ function tokenOf(req: VercelRequest) {
 }
 
 function userClient(token: string): SupabaseClient {
-  const url = env("SUPABASE_URL");
-  const key = env("SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY");
-  if (!url || !key) {
-    const missing = [!url && "SUPABASE_URL", !key && "SUPABASE_PUBLISHABLE_KEY (or SUPABASE_ANON_KEY)"].filter(Boolean).join(" and ");
-    console.error("api request", { route: "/api/ai-interpret", status: 500, code: "supabase_config", missing });
-    throw new ApiError(500, `The AI server isn't connected to Supabase. Missing env var(s): ${missing}.`, "supabase_config");
-  }
-  try {
-    return createClient(url, key, {
-      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-      global: { headers: { Authorization: `Bearer ${token}` } },
-    });
-  } catch {
-    throw new ApiError(500, "The AI server has invalid Supabase configuration.", "supabase_config");
-  }
+  // Server-side Supabase configuration (SUPABASE_URL + SUPABASE_PUBLISHABLE_KEY,
+  // legacy SUPABASE_ANON_KEY fallback). Browser VITE_* values never reach here;
+  // see api/_lib/supabase-server.ts. The caller's bearer token is forwarded so
+  // RLS keeps evaluating as the signed-in user.
+  const config = requireSupabaseServerConfig("AI");
+  return createUserSupabaseClient(config, token, { serverLabel: "AI" });
 }
 
 export const INTERPRET_RESPONSE_SCHEMA: Record<string, unknown> = {
@@ -202,9 +190,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   } catch (error) {
     const apiError = error instanceof ApiError
       ? error
-      : error instanceof OpenAIError
+      : error instanceof SupabaseServerConfigError
         ? new ApiError(error.status, error.message, error.code)
-        : new ApiError(500, "The AI service couldn't complete that action. Please try again.", "unknown");
+        : error instanceof OpenAIError
+          ? new ApiError(error.status, error.message, error.code)
+          : new ApiError(500, "The AI service couldn't complete that action. Please try again.", "unknown");
     console.error("api request", {
       route: "/api/ai-interpret",
       status: apiError.status,

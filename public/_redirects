@@ -1,1 +1,4 @@
-/*    /index.html   200
+# SPA fallback for client-side routes (/find, /leads, /lists, …).
+# API routes must pass through untouched — never serve index.html for /api/*.
+/api/*    /api/:splat    200
+/*        /index.html    200
