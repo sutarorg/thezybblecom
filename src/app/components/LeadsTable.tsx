@@ -35,12 +35,13 @@ import {
   useToast,
 } from "./ui";
 import { navigate } from "../hooks";
+import { copyText } from "../lib/clipboard";
 
 type SortKey = "name" | "rating" | "reviews" | "updated";
+export type LeadColumnId = "category" | "rating" | "phone" | "website" | "location" | "status" | "list";
 
-const STATUS_TONE: Record<Lead["status"], { tone: "neutral" | "green" | "amber"; label: string }> = {
+const STATUS_TONE: Record<Lead["status"], { tone: "neutral" | "amber"; label: string }> = {
   new: { tone: "neutral", label: "New" },
-  enriched: { tone: "green", label: "Enriched" },
   contacted: { tone: "amber", label: "Contacted" },
 };
 
@@ -66,25 +67,38 @@ export function LeadsTable({
   onRetry,
   pageSize = 10,
   onBulk,
+  mode = "default",
+  visibleColumns,
   noLists,
   listNames = {},
   emptyState,
+  onAddToList,
 }: {
   leads: Lead[];
   loading?: boolean;
   error?: string | null;
   onRetry?: () => void;
   pageSize?: number;
-  onBulk?: (action: "list" | "export" | "tag" | "delete", ids: string[]) => void;
+  onBulk?: (action: "list" | "export" | "tag" | "delete" | "status:new" | "status:contacted", ids: string[]) => void | Promise<void>;
+  mode?: "default" | "search-results";
+  visibleColumns?: LeadColumnId[];
   noLists?: boolean;
   listNames?: Record<string, string>;
   emptyState?: React.ReactNode;
+  onAddToList?: (ids: string[]) => void;
 }) {
   const toast = useToast();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [sortKey, setSortKey] = useState<SortKey>("updated");
   const [sortDir, setSortDir] = useState<1 | -1>(-1);
   const [page, setPage] = useState(1);
+  const searchMode = mode === "search-results";
+  const visible = (id: LeadColumnId) => {
+    if (searchMode) return id !== "status" && id !== "list";
+    return (visibleColumns ? visibleColumns.includes(id) : true) && !(id === "list" && noLists);
+  };
+  const showSelection = !searchMode;
+  const showActions = !searchMode;
 
   const sorted = useMemo(() => {
     const arr = [...leads];
@@ -180,7 +194,7 @@ export function LeadsTable({
   return (
     <Card className="overflow-hidden">
       {/* bulk toolbar */}
-      {selected.size > 0 ? (
+      {selected.size > 0 && !searchMode ? (
         <div className="flex flex-wrap items-center gap-2 border-b border-black/[0.06] bg-brand-50/60 px-3 py-2">
           <span className="inline-flex h-5 items-center gap-1 rounded bg-brand-600 px-1.5 text-[11px] font-semibold text-white">
             <Check className="size-3" aria-hidden="true" />
@@ -191,8 +205,7 @@ export function LeadsTable({
               variant="outline"
               size="sm"
               onClick={() => {
-                onBulk?.("list", [...selected]);
-                toast(`${selected.size} ${selected.size === 1 ? "lead" : "leads"} added to list`);
+                onAddToList ? onAddToList([...selected]) : onBulk?.("list", [...selected]);
               }}
             >
               <ListPlus className="size-3.5" aria-hidden="true" />
@@ -202,8 +215,7 @@ export function LeadsTable({
               variant="outline"
               size="sm"
               onClick={() => {
-                onBulk?.("export", [...selected]);
-                toast("Export started — find it in Exports", "info");
+                void onBulk?.("export", [...selected]);
               }}
             >
               <Download className="size-3.5" aria-hidden="true" />
@@ -213,20 +225,31 @@ export function LeadsTable({
               variant="outline"
               size="sm"
               onClick={() => {
-                onBulk?.("tag", [...selected]);
-                toast("Tags updated");
+                void onBulk?.("tag", [...selected]);
               }}
             >
               <Tag className="size-3.5" aria-hidden="true" />
               Tag
             </Btn>
+            <Popover
+              align="end"
+              width="w-40"
+              trigger={(_, toggle) => (
+                <Btn variant="outline" size="sm" onClick={toggle}>
+                  <Check className="size-3.5" aria-hidden="true" />
+                  Edit status
+                </Btn>
+              )}
+            >
+              <MenuItem onClick={() => void onBulk?.("status:new", [...selected])}>New</MenuItem>
+              <MenuItem onClick={() => void onBulk?.("status:contacted", [...selected])}>Contacted</MenuItem>
+            </Popover>
             <Btn
               variant="outline"
               size="sm"
-              onClick={() => {
-                onBulk?.("delete", [...selected]);
+              onClick={async () => {
+                await onBulk?.("delete", [...selected]);
                 setSelected(new Set());
-                toast("Leads removed");
               }}
             >
               <Trash2 className="size-3.5" aria-hidden="true" />
@@ -257,42 +280,60 @@ export function LeadsTable({
           <table className="w-full min-w-[860px] text-left" role="grid" aria-label="Leads">
             <thead>
               <tr className="border-b border-black/[0.06] bg-neutral-50/50">
-                <th scope="col" className="w-9 py-2 pl-3 pr-2">
-                  <input
-                    type="checkbox"
-                    aria-label="Select all leads on this page"
-                    checked={allOnPage}
-                    onChange={togglePage}
-                    className="size-3.5 cursor-pointer accent-brand-600"
-                  />
-                </th>
+                {showSelection ? (
+                  <th scope="col" className="w-9 py-2 pl-3 pr-2">
+                    <input
+                      type="checkbox"
+                      aria-label="Select all leads on this page"
+                      checked={allOnPage}
+                      onChange={togglePage}
+                      className="size-3.5 cursor-pointer accent-brand-600"
+                    />
+                  </th>
+                ) : null}
                 <th scope="col" className="py-2 pr-3" aria-sort={sortKey === "name" ? (sortDir === 1 ? "ascending" : "descending") : undefined}>
                   {sortBtn("name", "Business")}
                 </th>
-                <th scope="col" className="hidden py-2 pr-3 lg:table-cell">
-                  <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400">Category</span>
-                </th>
-                <th scope="col" className="py-2 pr-3" aria-sort={sortKey === "rating" ? (sortDir === 1 ? "ascending" : "descending") : undefined}>
-                  {sortBtn("rating", "Rating")}
-                </th>
-                <th scope="col" className="hidden py-2 pr-3 xl:table-cell">
-                  <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400">Phone</span>
-                </th>
-                <th scope="col" className="hidden py-2 pr-3 md:table-cell">
-                  <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400">Website</span>
-                </th>
-                <th scope="col" className="hidden py-2 pr-3 sm:table-cell">
-                  <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400">Location</span>
-                </th>
-                <th scope="col" className="py-2 pr-3">
-                  <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400">Status</span>
-                </th>
-                <th scope="col" className={cn("py-2 pr-3", noLists && "hidden")}>
-                  <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400">List</span>
-                </th>
-                <th scope="col" className="w-10 py-2 pr-3">
-                  <span className="sr-only">Actions</span>
-                </th>
+                {visible("category") ? (
+                  <th scope="col" className="hidden py-2 pr-3 lg:table-cell">
+                    <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400">Category</span>
+                  </th>
+                ) : null}
+                {visible("rating") ? (
+                  <th scope="col" className="py-2 pr-3" aria-sort={sortKey === "rating" ? (sortDir === 1 ? "ascending" : "descending") : undefined}>
+                    {sortBtn("rating", "Rating")}
+                  </th>
+                ) : null}
+                {visible("phone") ? (
+                  <th scope="col" className="hidden py-2 pr-3 xl:table-cell">
+                    <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400">Phone</span>
+                  </th>
+                ) : null}
+                {visible("website") ? (
+                  <th scope="col" className="hidden py-2 pr-3 md:table-cell">
+                    <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400">Website</span>
+                  </th>
+                ) : null}
+                {visible("location") ? (
+                  <th scope="col" className="hidden py-2 pr-3 sm:table-cell">
+                    <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400">Location</span>
+                  </th>
+                ) : null}
+                {visible("status") ? (
+                  <th scope="col" className="py-2 pr-3">
+                    <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400">Status</span>
+                  </th>
+                ) : null}
+                {visible("list") ? (
+                  <th scope="col" className="py-2 pr-3">
+                    <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400">List</span>
+                  </th>
+                ) : null}
+                {showActions ? (
+                  <th scope="col" className="w-10 py-2 pr-3">
+                    <span className="sr-only">Actions</span>
+                  </th>
+                ) : null}
               </tr>
             </thead>
             <tbody>
@@ -308,15 +349,17 @@ export function LeadsTable({
                     )}
                     aria-selected={isSelected}
                   >
-                    <td className="py-2 pl-3 pr-2" onClick={(e) => e.stopPropagation()}>
-                      <input
-                        type="checkbox"
-                        aria-label={`Select ${lead.name}`}
-                        checked={isSelected}
-                        onChange={() => toggleRow(lead.id)}
-                        className="size-3.5 cursor-pointer accent-brand-600"
-                      />
-                    </td>
+                    {showSelection ? (
+                      <td className="py-2 pl-3 pr-2" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${lead.name}`}
+                          checked={isSelected}
+                          onChange={() => toggleRow(lead.id)}
+                          className="size-3.5 cursor-pointer accent-brand-600"
+                        />
+                      </td>
+                    ) : null}
                     <td className="py-2 pr-3">
                       <span className="flex min-w-0 items-center gap-2.5">
                         <LeadAvatar lead={lead} />
@@ -330,43 +373,56 @@ export function LeadsTable({
                         </span>
                       </span>
                     </td>
-                    <td className="hidden py-2 pr-3 lg:table-cell">
-                      <span className="text-xs text-ink-soft">{lead.category}</span>
-                    </td>
-                    <td className="py-2 pr-3">
-                      <span className="inline-flex items-center gap-1">
-                        <Star className="size-3 fill-amber-400 text-amber-400" aria-hidden="true" />
-                        <span className="text-xs font-medium text-ink">{lead.rating.toFixed(1)}</span>
-                        <span className="hidden text-[11px] text-neutral-400 min-[480px]:inline">({lead.reviews})</span>
-                      </span>
-                    </td>
-                    <td className="hidden py-2 pr-3 xl:table-cell">
-                      <span className="whitespace-nowrap text-xs text-ink-soft">{lead.phone}</span>
-                    </td>
-                    <td className="hidden py-2 pr-3 md:table-cell">
-                      {lead.website_domain ? (
-                        <a
-                          href={`https://${lead.website_domain}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          onClick={(e) => e.stopPropagation()}
-                          className="inline-flex max-w-[150px] items-center gap-1 truncate text-xs text-ink-soft transition-colors hover:text-brand-700"
-                        >
-                          <Globe className="size-3 shrink-0 text-neutral-300" aria-hidden="true" />
-                          <span className="truncate">{lead.website_domain}</span>
-                        </a>
-                      ) : (
-                        <span className="text-[11px] text-neutral-300">—</span>
-                      )}
-                    </td>
-                    <td className="hidden py-2 pr-3 text-xs text-ink-soft sm:table-cell">
-                      {lead.city}, {lead.state}
-                    </td>
-                    <td className="py-2 pr-3">
-                      <Badge tone={STATUS_TONE[lead.status].tone}>{STATUS_TONE[lead.status].label}</Badge>
-                    </td>
-                    <td className={cn("py-2 pr-3", noLists && "hidden")}>{listBadge(lead, listNames)}</td>
-                    <td className="py-2 pr-2" onClick={(e) => e.stopPropagation()}>
+                    {visible("category") ? (
+                      <td className="hidden py-2 pr-3 lg:table-cell">
+                        <span className="text-xs text-ink-soft">{lead.category}</span>
+                      </td>
+                    ) : null}
+                    {visible("rating") ? (
+                      <td className="py-2 pr-3">
+                        <span className="inline-flex items-center gap-1">
+                          <Star className="size-3 fill-amber-400 text-amber-400" aria-hidden="true" />
+                          <span className="text-xs font-medium text-ink">{lead.rating.toFixed(1)}</span>
+                          <span className="hidden text-[11px] text-neutral-400 min-[480px]:inline">({lead.reviews})</span>
+                        </span>
+                      </td>
+                    ) : null}
+                    {visible("phone") ? (
+                      <td className="hidden py-2 pr-3 xl:table-cell">
+                        <span className="whitespace-nowrap text-xs text-ink-soft">{lead.phone || "—"}</span>
+                      </td>
+                    ) : null}
+                    {visible("website") ? (
+                      <td className="hidden py-2 pr-3 md:table-cell">
+                        {lead.website_domain ? (
+                          <a
+                            href={`https://${lead.website_domain}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="inline-flex max-w-[150px] items-center gap-1 truncate text-xs text-ink-soft transition-colors hover:text-brand-700"
+                          >
+                            <Globe className="size-3 shrink-0 text-neutral-300" aria-hidden="true" />
+                            <span className="truncate">{lead.website_domain}</span>
+                          </a>
+                        ) : (
+                          <span className="text-[11px] text-neutral-300">—</span>
+                        )}
+                      </td>
+                    ) : null}
+                    {visible("location") ? (
+                      <td className="hidden py-2 pr-3 text-xs text-ink-soft sm:table-cell">
+                        {[lead.city, lead.state].filter(Boolean).join(", ") || "—"}
+                      </td>
+                    ) : null}
+                    {visible("status") ? (
+                      <td className="py-2 pr-3">
+                        <Badge tone={STATUS_TONE[lead.status].tone}>{STATUS_TONE[lead.status].label}</Badge>
+                      </td>
+                    ) : null}
+                    {visible("list") ? <td className="py-2 pr-3">{listBadge(lead, listNames)}</td> : null}
+                    {showActions ? (
+                      <td className="py-2 pr-2" onClick={(e) => e.stopPropagation()}>
                       <Popover
                         align="end"
                         width="w-48"
@@ -381,25 +437,33 @@ export function LeadsTable({
                         </MenuItem>
                         <MenuItem
                           icon={<ListPlus className="size-3.5" aria-hidden="true" />}
-                          onClick={() => toast(`“${lead.name}” added to a list`)}
+                          onClick={() => onAddToList?.([lead.id])}
                         >
                           Add to list
                         </MenuItem>
-                        <MenuItem icon={<Sparkles className="size-3.5" aria-hidden="true" />} onClick={() => toast("Zybble AI analysis started", "info")}>
+                        <MenuItem icon={<Sparkles className="size-3.5" aria-hidden="true" />} onClick={() => navigate(`/leads/${lead.id}?analyze=1`)}>
                           Analyze with AI
                         </MenuItem>
                         <MenuItem
                           icon={<Copy className="size-3.5" aria-hidden="true" />}
-                          onClick={() => toast("Phone number copied")}
+                          onClick={async () => {
+                            try {
+                              await copyText(lead.phone);
+                              toast("Phone number copied");
+                            } catch (e) {
+                              toast((e as Error).message || "Couldn't copy phone number.", "error");
+                            }
+                          }}
                         >
                           Copy phone
                         </MenuItem>
                         <PopSep />
-                        <MenuItem danger onClick={() => toast("Lead removed")}>
+                        <MenuItem danger onClick={() => void onBulk?.("delete", [lead.id])}>
                           Delete
                         </MenuItem>
                       </Popover>
-                    </td>
+                      </td>
+                    ) : null}
                   </tr>
                 );
               })}

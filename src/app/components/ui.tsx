@@ -14,6 +14,7 @@ import {
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, X } from "lucide-react";
 import { cn } from "../../utils/cn";
+import { formatAppDate, relativeAppTime } from "../lib/datetime";
 
 /* ------------------------------------------------------------------ */
 /* Kbd                                                                 */
@@ -275,13 +276,38 @@ export function Popover({
   width?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, left: 0, transformOrigin: "top left" });
   const rootRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLButtonElement | null>(null);
+
+  const place = useCallback(() => {
+    const anchor = rootRef.current?.getBoundingClientRect();
+    const panel = panelRef.current?.getBoundingClientRect();
+    if (!anchor) return;
+    const widthPx = panel?.width ?? 208;
+    const heightPx = panel?.height ?? 220;
+    const gap = 6;
+    let left = align === "end" ? anchor.right - widthPx : anchor.left;
+    left = Math.max(8, Math.min(left, window.innerWidth - widthPx - 8));
+    let top = anchor.bottom + gap;
+    let origin = align === "end" ? "top right" : "top left";
+    if (top + heightPx > window.innerHeight - 8 && anchor.top - heightPx - gap > 8) {
+      top = anchor.top - heightPx - gap;
+      origin = align === "end" ? "bottom right" : "bottom left";
+    } else {
+      top = Math.min(top, window.innerHeight - heightPx - 8);
+    }
+    setPos({ top: Math.max(8, top), left, transformOrigin: origin });
+  }, [align]);
 
   useEffect(() => {
     if (!open) return;
+    place();
     const onDown = (e: PointerEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+      const target = e.target as Node;
+      if (rootRef.current?.contains(target) || panelRef.current?.contains(target)) return;
+      setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -289,31 +315,44 @@ export function Popover({
         btnRef.current?.focus();
       }
     };
+    const onMove = () => place();
     document.addEventListener("pointerdown", onDown);
     document.addEventListener("keydown", onKey);
+    window.addEventListener("resize", onMove);
+    window.addEventListener("scroll", onMove, true);
     return () => {
       document.removeEventListener("pointerdown", onDown);
       document.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", onMove);
+      window.removeEventListener("scroll", onMove, true);
     };
-  }, [open]);
+  }, [open, place]);
+
+  useEffect(() => {
+    if (open) requestAnimationFrame(place);
+  }, [open, children, place]);
 
   const toggle = () => setOpen((v) => !v);
 
   return (
-    <div ref={rootRef} className="relative inline-block">
+    <div ref={rootRef} className="inline-block">
       {trigger(open, toggle, btnRef)}
-      {open ? (
-        <div
-          role="menu"
-          className={cn(
-            "pop-in absolute z-40 mt-1.5 overflow-hidden rounded-md border border-black/[0.08] bg-white p-1 shadow-pop",
-            align === "end" ? "right-0" : "left-0",
-            width ?? "w-52"
-          )}
-        >
-          <PopCtx.Provider value={() => setOpen(false)}>{children}</PopCtx.Provider>
-        </div>
-      ) : null}
+      {open
+        ? createPortal(
+            <div
+              ref={panelRef}
+              role="menu"
+              className={cn(
+                "pop-in fixed z-[90] max-h-[min(420px,calc(100vh-16px))] overflow-y-auto rounded-md border border-black/[0.08] bg-white p-1 shadow-pop thin-scroll",
+                width ?? "w-52"
+              )}
+              style={{ top: pos.top, left: pos.left, transformOrigin: pos.transformOrigin }}
+            >
+              <PopCtx.Provider value={() => setOpen(false)}>{children}</PopCtx.Provider>
+            </div>,
+            document.body
+          )
+        : null}
     </div>
   );
 }
@@ -698,15 +737,8 @@ export function SectionTitle({ title, description, aside, className }: { title: 
 }
 
 export function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  return formatAppDate(iso);
 }
 export function relative(iso: string) {
-  const diff = Date.now() - new Date(iso).getTime();
-  const mins = Math.max(1, Math.floor(diff / 60000));
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  if (days < 30) return `${days}d ago`;
-  return formatDate(iso);
+  return relativeAppTime(iso);
 }

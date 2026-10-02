@@ -57,6 +57,7 @@ notes: up to 2 short caveats or suggestions (optional).`,
           quantity: { type: "integer", description: "1-240" },
           minRating: { type: "string", enum: ["", "3", "3.5", "4", "4.5"] },
           priceLevel: { type: "string", enum: ["", "1", "2", "3", "4"] },
+          businessSize: { type: "string", enum: ["", "small", "medium", "enterprise"] },
           requireWebsite: { type: "boolean" },
           requirePhone: { type: "boolean" },
           requireEmail: { type: "boolean" },
@@ -81,6 +82,9 @@ notes: up to 2 short caveats or suggestions (optional).`,
     }
     if (typeof out.priceLevel === "string" && ["1", "2", "3", "4"].includes(out.priceLevel)) {
       filters.priceLevel = out.priceLevel;
+    }
+    if (typeof out.businessSize === "string" && ["small", "medium", "enterprise"].includes(out.businessSize)) {
+      filters.businessSize = out.businessSize;
     }
     if (out.requireWebsite === true) filters.requireWebsite = true;
     if (out.requirePhone === true) filters.requirePhone = true;

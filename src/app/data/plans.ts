@@ -87,18 +87,17 @@ export const RATING_OPTIONS = [
 
 export const PRICE_OPTIONS = [
   { value: "", label: "Any price" },
-  { value: "1", label: "$" },
-  { value: "2", label: "$$" },
-  { value: "3", label: "$$$" },
-  { value: "4", label: "$$$$" },
+  { value: "1", label: "Budget" },
+  { value: "2", label: "Moderate" },
+  { value: "3", label: "Expensive" },
+  { value: "4", label: "Very expensive" },
 ];
 
-export const RADIUS_OPTIONS = [
-  { value: "", label: "Default area" },
-  { value: "5", label: "Within ~5 km" },
-  { value: "10", label: "Within ~10 km" },
-  { value: "25", label: "Within ~25 km" },
-  { value: "50", label: "Within ~50 km" },
+export const BUSINESS_SIZE_OPTIONS = [
+  { value: "", label: "Any size" },
+  { value: "small", label: "Small business" },
+  { value: "medium", label: "Medium business" },
+  { value: "enterprise", label: "Enterprise" },
 ];
 
 export const SORT_OPTIONS = [

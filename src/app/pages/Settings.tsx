@@ -32,7 +32,7 @@ import {
 import { SettingsSkeleton } from "../components/skeletons";
 import { planFromId } from "../data/plans";
 import { navigate, useAppSeo } from "../hooks";
-import { updateProfile, updatePassword } from "../services/api";
+import { getUserPreferences, listAppSessions, revokeAppSession, saveUserPreferences, signOut, updateProfile, updatePassword, type AppSessionRecord, type UserPreferences } from "../services/api";
 import { useWorkspaceContext } from "../services/hooks";
 
 const TABS = [
@@ -120,9 +120,16 @@ export function SettingsPage() {
   const [nDigest, setNDigest] = useState(false);
   const [nProduct, setNProduct] = useState(false);
   /* preferences */
-  const [appearance, setAppearance] = useState("System");
-  const [timezone, setTimezone] = useState("Central Time (US)");
-  const [language, setLanguage] = useState("English");
+  const [prefs, setPrefs] = useState<UserPreferences>({ appearance: "system", timezone: "UTC", language: "en", date_format: "MMM D, YYYY" });
+  const [savingPrefs, setSavingPrefs] = useState(false);
+  const [sessions, setSessions] = useState<AppSessionRecord[]>([]);
+  const [loadingSessions, setLoadingSessions] = useState(false);
+  useEffect(() => {
+    if (!user) return;
+    getUserPreferences().then(setPrefs).catch(() => undefined);
+    setLoadingSessions(true);
+    listAppSessions().then(setSessions).catch(() => undefined).finally(() => setLoadingSessions(false));
+  }, [user]);
   /* danger */
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -136,6 +143,18 @@ export function SettingsPage() {
         toast((e as Error).message, "error");
       } finally {
         setSavingProfile(false);
+      }
+      return;
+    }
+    if (section === "Preferences") {
+      setSavingPrefs(true);
+      try {
+        await saveUserPreferences(prefs);
+        toast("Preferences saved");
+      } catch (e) {
+        toast((e as Error).message, "error");
+      } finally {
+        setSavingPrefs(false);
       }
       return;
     }
@@ -262,7 +281,7 @@ export function SettingsPage() {
                   <p className="text-xs font-medium text-ink">Sign out of Zybble</p>
                   <p className="text-[11px] text-ink-mute">You'll return to the login screen.</p>
                 </div>
-                <Btn variant="outline" size="sm" href="/login">
+                <Btn variant="outline" size="sm" onClick={async () => { await signOut(); navigate("/login", { replace: true }); }}>
                   Log out
                 </Btn>
               </Card>
@@ -362,27 +381,43 @@ export function SettingsPage() {
                   <SectionTitle title="Active sessions" description="Where you're signed in right now." />
                 </div>
                 <ul className="px-4 py-3 sm:px-5">
-                  {[
-                    { device: "MacBook Pro · Chrome", place: "Austin, TX", current: true },
-                    { device: "iPhone 15 · Safari", place: "Austin, TX", current: false },
-                  ].map((s) => (
-                    <li key={s.device} className="flex items-center gap-3 border-b border-black/[0.04] py-2.5 last:border-0">
-                      <span className="grid size-7 place-items-center rounded-md bg-neutral-50 text-neutral-400">
-                        <Lock className="size-3.5" aria-hidden="true" />
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <p className="text-xs font-medium text-ink">{s.device}</p>
-                        <p className="text-[10.5px] text-neutral-400">{s.place} · signed in recently</p>
-                      </div>
-                      {s.current ? (
-                        <Badge tone="green">This device</Badge>
-                      ) : (
-                        <Btn variant="ghost" size="sm" onClick={() => toast("Session revoked")}>
-                          Revoke
-                        </Btn>
-                      )}
-                    </li>
-                  ))}
+                  {loadingSessions ? (
+                    <li className="py-3 text-xs text-ink-mute">Loading observed sessions…</li>
+                  ) : sessions.length ? sessions.map((s) => {
+                    const ua = s.user_agent || "Unknown browser";
+                    const browser = /Chrome/i.test(ua) ? "Chrome" : /Safari/i.test(ua) ? "Safari" : /Firefox/i.test(ua) ? "Firefox" : /Edg/i.test(ua) ? "Edge" : "Browser";
+                    const os = /Mac OS|Macintosh/i.test(ua) ? "macOS" : /Windows/i.test(ua) ? "Windows" : /Android/i.test(ua) ? "Android" : /iPhone|iPad/i.test(ua) ? "iOS" : /Linux/i.test(ua) ? "Linux" : "Unknown device";
+                    return (
+                      <li key={s.id} className="flex items-center gap-3 border-b border-black/[0.04] py-2.5 last:border-0">
+                        <span className="grid size-7 place-items-center rounded-md bg-neutral-50 text-neutral-400">
+                          <Lock className="size-3.5" aria-hidden="true" />
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-medium text-ink">{browser} · {os}</p>
+                          <p className="text-[10.5px] text-neutral-400">Last seen {new Date(s.last_seen_at).toLocaleString()} {s.revoked_at ? "· revoked" : ""}</p>
+                        </div>
+                        {s.current ? (
+                          <Badge tone="green">This device</Badge>
+                        ) : s.revoked_at ? (
+                          <Badge tone="neutral">Revoked</Badge>
+                        ) : (
+                          <Btn variant="ghost" size="sm" onClick={async () => {
+                            try {
+                              await revokeAppSession(s.id);
+                              setSessions((rows) => rows.map((row) => row.id === s.id ? { ...row, revoked_at: new Date().toISOString() } : row));
+                              toast("Session revoked");
+                            } catch (e) {
+                              toast((e as Error).message, "error");
+                            }
+                          }}>
+                            Revoke
+                          </Btn>
+                        )}
+                      </li>
+                    );
+                  }) : (
+                    <li className="py-3 text-xs leading-5 text-ink-mute">No observed app sessions yet. Zybble records sessions only after a browser signs in; it does not invent devices or locations.</li>
+                  )}
                 </ul>
               </Card>
             </div>
@@ -394,13 +429,16 @@ export function SettingsPage() {
                 <SectionTitle title="Preferences" description="How the product behaves for you." />
               </div>
               <div className="grid gap-3 px-4 py-5 sm:grid-cols-2 sm:px-5">
-                <SelectField label="Appearance" value={appearance} onChange={setAppearance} options={["System", "Light", "Dark"]} />
-                <SelectField label="Timezone" value={timezone} onChange={setTimezone} options={["Central Time (US)", "Eastern Time (US)", "Pacific Time (US)", "Greenwich Mean Time"]} />
-                <SelectField label="Language" value={language} onChange={setLanguage} options={["English", "Español", "Français", "Deutsch"]} />
-                <SelectField label="Date format" value="MMM D, YYYY" onChange={() => {}} options={["MMM D, YYYY", "D MMM YYYY", "YYYY-MM-DD"]} />
+                <SelectField label="Appearance" value={prefs.appearance} onChange={(v) => setPrefs((p) => ({ ...p, appearance: v as UserPreferences["appearance"] }))} options={["system", "light", "dark"]} />
+                <SelectField label="Timezone" value={prefs.timezone} onChange={(v) => setPrefs((p) => ({ ...p, timezone: v }))} options={["UTC", "America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London", "Europe/Paris", "Asia/Kolkata"]} />
+                <SelectField label="Language" value={prefs.language} onChange={(v) => setPrefs((p) => ({ ...p, language: v as UserPreferences["language"] }))} options={["en", "es", "fr", "de"]} />
+                <SelectField label="Date format" value={prefs.date_format} onChange={(v) => setPrefs((p) => ({ ...p, date_format: v as UserPreferences["date_format"] }))} options={["MMM D, YYYY", "D MMM YYYY", "YYYY-MM-DD"]} />
+                <p className="col-span-full rounded-md border border-black/[0.06] bg-neutral-50/70 px-3 py-2 text-[11px] leading-4.5 text-ink-mute sm:col-span-2">
+                  Language preferences are stored now and applied to date/number formatting immediately. Full interface translations use the same preference key as translated strings are added.
+                </p>
                 <div className="col-span-full flex justify-end border-t border-black/[0.05] pt-4 sm:col-span-2">
-                  <Btn variant="primary" size="sm" onClick={() => save("Preferences")}>
-                    Save preferences
+                  <Btn variant="primary" size="sm" onClick={() => save("Preferences")} disabled={savingPrefs}>
+                    {savingPrefs ? "Saving…" : "Save preferences"}
                   </Btn>
                 </div>
               </div>

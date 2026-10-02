@@ -40,14 +40,14 @@ Deno.serve(async (req) => {
       throw new HttpError(403, `Your ${entitlements.plan} plan includes ${entitlements.allowances.seats} ${entitlements.allowances.seats === 1 ? "seat" : "seats"}.`);
     }
 
-    // already a member?
-    const { data: existing } = await sb
-      .from("workspace_members")
-      .select("invitation:workspace_invitations!workspace_id(email, status)")
+    const { count: pendingInvites } = await sb
+      .from("workspace_invitations")
+      .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId)
-      .limit(1)
-      .then((r) => ({ data: null, error: r.error }));
-    void existing;
+      .eq("status", "pending");
+    if ((members?.length ?? 0) + (pendingInvites ?? 0) >= entitlements.allowances.seats) {
+      throw new HttpError(403, `Your ${entitlements.plan} plan includes ${entitlements.allowances.seats} ${entitlements.allowances.seats === 1 ? "seat" : "seats"}.`);
+    }
 
     const { data: ws } = await sb.from("workspaces").select("name").eq("id", workspaceId).single();
     const inviterName = (await sb.from("profiles").select("name").eq("id", caller.id).single()).data?.name ?? "A teammate";
@@ -65,7 +65,7 @@ Deno.serve(async (req) => {
     if (inviteErr) throw new HttpError(500, "Couldn't create the invitation.");
 
     const appUrl = Deno.env.get("APP_URL") ?? "https://zybble.com";
-    await sendEmail({
+    const delivery = await sendEmail({
       to: email,
       subject: `${inviterName} invited you to “${ws?.name ?? "a workspace"}” on Zybble`,
       html: `
@@ -84,6 +84,9 @@ Deno.serve(async (req) => {
           </p>
         </div>`,
     });
+    if (!delivery.sent) {
+      throw new HttpError(502, "The invitation was saved, but the email could not be delivered. Check Resend configuration and try again.");
+    }
 
     await logActivity(sb, {
       workspaceId,
@@ -92,7 +95,7 @@ Deno.serve(async (req) => {
       text: `Invited ${email} as ${role}`,
     });
 
-    return json({ ok: true });
+    return json({ ok: true, emailSent: true });
   } catch (e) {
     return handleError(e);
   }

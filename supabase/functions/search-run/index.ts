@@ -101,6 +101,11 @@ function normalize(t: LocalResult, meta: { query: string; location: string | nul
     reviews: t.reviews != null ? Number(t.reviews) : 0,
     price: t.price ?? null,
     price_level: typeof t.price_level === "number" ? t.price_level : null,
+    business_size: typeof t.employee_count === "number" ? (t.employee_count >= 250 ? "enterprise" : t.employee_count >= 50 ? "medium" : "small") : "unknown",
+    employee_count: typeof t.employee_count === "number" ? t.employee_count : null,
+    business_size_source: typeof t.employee_count === "number" ? "provider" : "unknown",
+    business_size_confidence: typeof t.employee_count === "number" ? 0.95 : 0,
+    popular_times: t.popular_times ?? {},
     phone: t.phone ?? null,
     phone_normalized: phoneNorm,
     email,
@@ -112,8 +117,8 @@ function normalize(t: LocalResult, meta: { query: string; location: string | nul
     city: splitAddress(t.address)[1] ?? (meta.location ?? "").split(",")[0] ?? null,
     state: splitAddress(t.address)[2] ?? null,
     postal_code: splitAddress(t.address)[3] ?? null,
-    country: "United States",
-    country_code: "US",
+    country: t.country ?? null,
+    country_code: t.country_code ?? null,
     latitude: gps.latitude ?? null,
     longitude: gps.longitude ?? null,
     plus_code: t.plus_code ?? null,
@@ -236,6 +241,7 @@ Deno.serve(async (req) => {
       (interpretation as Record<string, unknown>).require_email = Boolean(f.requireEmail);
       (interpretation as Record<string, unknown>).open_now = Boolean(f.openNow);
       (interpretation as Record<string, unknown>).price_level = f.priceLevel ? Number(f.priceLevel) : null;
+      (interpretation as Record<string, unknown>).business_size = ["small", "medium", "enterprise"].includes(String(f.businessSize)) ? String(f.businessSize) : null;
       query = interpretation.q;
     } else {
       query = String(body.query ?? "").trim();
@@ -366,6 +372,7 @@ Deno.serve(async (req) => {
           if (req.price_level != null && normalized.price_level != null && normalized.price_level !== req.price_level) {
             continue;
           }
+          if (req.business_size && normalized.business_size !== req.business_size) continue;
 
           const key = String(normalized.dedupe_key);
           if (seenKeys.has(key)) {
@@ -458,13 +465,14 @@ Deno.serve(async (req) => {
       stats: {
         requested: requestedCount,
         found: saved,
-        dedupeRemoved,
         savedCount: saved,
         remaining: Math.max(0, requestedCount - saved),
         interpretation,
         insights: [
           `Searched “${interpretation!.q}”.`,
-          `${saved} new lead${saved === 1 ? "" : "s"} saved${dedupeRemoved ? `; ${dedupeRemoved} duplicate${dedupeRemoved === 1 ? "" : "s"} skipped` : ""}.`,
+          saved >= requestedCount
+            ? `${saved} new lead${saved === 1 ? "" : "s"} collected.`
+            : `Search partially completed — ${saved} new lead${saved === 1 ? "" : "s"} collected.`,
         ],
       },
     });
