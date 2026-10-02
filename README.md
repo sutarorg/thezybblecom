@@ -11,6 +11,8 @@ Browser (Vite + React SPA, clean URLs via BrowserRouter)
    │     └── validated filters → SerpApi → normalize → dedupe → persist
    │         (user JWT + RLS + atomic quota reservation on every run)
    │
+   └── Vercel Function /api/health (liveness probe for uptime monitors)
+
    └── Supabase Edge Functions
          ├── search-run       → fallback for local/non-Vercel deployments
          ├── ai-interpret     → OpenAI o4-mini fills the search form (never runs a search)
@@ -28,6 +30,11 @@ Browser (Vite + React SPA, clean URLs via BrowserRouter)
 The app uses **real paths** — `/login`, `/find`, `/leads/:id` — with no hash fragments
 anywhere. Deep links and refreshes work because `vercel.json` rewrites every path to
 `index.html`. On any other host, add the same SPA fallback rewrite.
+
+Paths under `/api/*` are deliberately excluded from that rewrite so they reach the
+Vercel Functions in `api/*.ts` instead of the SPA. Requesting an `/api/*` path that has
+no matching function (e.g. `/api/foo`) therefore returns Vercel's `404 NOT_FOUND` rather
+than the app — `GET /api/health` is the supported liveness check for uptime monitors.
 
 ### No demo data
 
