@@ -629,6 +629,39 @@ export async function interpretRequest(
 ): Promise<{ result?: Interpretation; error?: string }> {
   const sb = getSupabase();
   if (!sb) return { error: CONFIG_ERROR };
+
+  const {
+    data: { session },
+  } = await sb.auth.getSession();
+  if (!session) return { error: "Your session expired — sign in again." };
+
+  /* Prefer the same-origin server function, where GEMINI_API_KEY can be kept
+     alongside the existing SerpApi server secret. Non-Vercel deployments may
+     omit that route, so a genuine 404/SPA response falls back to Supabase. */
+  try {
+    const response = await fetch("/api/ai-interpret", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ workspaceId, request }),
+    });
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      const data = await response.json();
+      if (!response.ok || data?.error) {
+        return { error: String(data?.error ?? "Zybble AI couldn't interpret that request.") };
+      }
+      return { result: data as Interpretation };
+    }
+    if (response.status !== 404 && !contentType.includes("text/html")) {
+      return { error: "The AI server returned an invalid response. Please try again." };
+    }
+  } catch {
+    // Same-origin route unavailable; use the deployed Edge Function below.
+  }
+
   const { data, error } = await sb.functions.invoke("ai-interpret", {
     body: { workspaceId, request },
   });

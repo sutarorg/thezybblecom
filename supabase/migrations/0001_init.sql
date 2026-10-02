@@ -34,7 +34,7 @@ create table if not exists plans (
 
 insert into plans (id, price_cents, lead_allowance, max_lists, max_users, has_ai, client_workspaces, priority_processing)
 values
-  ('free',   0,     50,     1,  1, false, false, false),
+  ('free',   0,     50,     1,  1, true,  false, false),
   ('growth', 4900,  5000,  -1,  1, true,  false, false),
   ('agency', 9900,  15000, -1,  3, true,  true,  false),
   ('scale',  19900, 50000, -1,  5, true,  true,  true)
@@ -684,13 +684,43 @@ alter table activity_logs enable row level security;
 alter table webhook_events enable row level security;
 alter table plans enable row level security;
 
+-- Non-recursive admin predicate. Never query profiles directly from a policy
+-- on profiles: PostgreSQL rejects that with "infinite recursion detected".
+create or replace function is_zybble_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (select 1 from profiles p where p.id = auth.uid() and p.role = 'admin');
+$$;
+revoke execute on function is_zybble_admin() from public, anon;
+grant execute on function is_zybble_admin() to authenticated;
+
+create or replace function protect_profile_role()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if new.role is distinct from old.role and not is_zybble_admin() then
+    raise exception 'Only an administrator can change profile roles';
+  end if;
+  return new;
+end;
+$$;
+create trigger profiles_protect_role before update on profiles
+for each row execute function protect_profile_role();
+
 -- plans: readable by everyone (needed for pricing), write blocked
 create policy "plans read" on plans for select using (true);
 
 -- profiles: users can read/update their own; admins read all
-create policy "profiles self read" on profiles for select using (auth.uid() = id or exists (select 1 from profiles p where p.id = auth.uid() and p.role = 'admin'));
+create policy "profiles self read" on profiles for select using (auth.uid() = id or is_zybble_admin());
 create policy "profiles self update" on profiles for update using (auth.uid() = id) with check (auth.uid() = id);
-create policy "profiles self insert" on profiles for insert with check (auth.uid() = id);
+create policy "profiles self insert" on profiles for insert with check (auth.uid() = id and role = 'user');
 
 -- workspaces: members can read; owner/admin can update; inserts allowed (DB trigger enforces plan limits)
 create policy "workspaces member read" on workspaces for select using (is_workspace_member(id));
@@ -745,21 +775,21 @@ create policy "ai insights member all" on ai_insights for all using (exists (sel
 create policy "usage member read" on usage_counters for select using (is_workspace_member(workspace_id));
 create policy "activity member read" on activity_logs for select using (is_workspace_member(workspace_id));
 
--- admins (profiles.role = 'admin') can read anything for support/ops
-create policy "admin read workspaces" on workspaces for select using (exists (select 1 from profiles p where p.id = auth.uid() and p.role = 'admin'));
-create policy "admin read members" on workspace_members for select using (exists (select 1 from profiles p where p.id = auth.uid() and p.role = 'admin'));
-create policy "admin read subscriptions" on subscriptions for select using (exists (select 1 from profiles p where p.id = auth.uid() and p.role = 'admin'));
-create policy "admin read leads" on leads for select using (exists (select 1 from profiles p where p.id = auth.uid() and p.role = 'admin'));
-create policy "admin read searches" on lead_searches for select using (exists (select 1 from profiles p where p.id = auth.uid() and p.role = 'admin'));
-create policy "admin read usage" on usage_counters for select using (exists (select 1 from profiles p where p.id = auth.uid() and p.role = 'admin'));
-create policy "admin read webhooks" on webhook_events for select using (exists (select 1 from profiles p where p.id = auth.uid() and p.role = 'admin'));
+-- admins can read anything for support/ops (non-recursive helper above)
+create policy "admin read workspaces" on workspaces for select using (is_zybble_admin());
+create policy "admin read members" on workspace_members for select using (is_zybble_admin());
+create policy "admin read subscriptions" on subscriptions for select using (is_zybble_admin());
+create policy "admin read leads" on leads for select using (is_zybble_admin());
+create policy "admin read searches" on lead_searches for select using (is_zybble_admin());
+create policy "admin read usage" on usage_counters for select using (is_zybble_admin());
+create policy "admin read webhooks" on webhook_events for select using (is_zybble_admin());
 
 -- ============================================================================
 -- Seed a sensible lookup row (idempotent)
 -- ============================================================================
 insert into plans (id, price_cents, lead_allowance, max_lists, max_users, has_ai, client_workspaces, priority_processing)
 values
-  ('free', 0, 50, 1, 1, false, false, false),
+  ('free', 0, 50, 1, 1, true, false, false),
   ('growth', 4900, 5000, -1, 1, true, false, false),
   ('agency', 9900, 15000, -1, 3, true, true, false),
   ('scale', 19900, 50000, -1, 5, true, true, true)
