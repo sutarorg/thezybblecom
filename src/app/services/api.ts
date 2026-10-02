@@ -5,6 +5,8 @@
 /* ------------------------------------------------------------------ */
 import { getSupabase, BACKEND_ENABLED } from "./supabase";
 import { planFromId, planLabel } from "../data/plans";
+import { mergeTags, validateTag } from "../lib/tags";
+import { formatAppDate, setRuntimePreferences, type RuntimePreferences } from "../lib/datetime";
 import type {
   ActivityItem,
   ExportRecord,
@@ -75,6 +77,11 @@ function mapLead(row: any): Lead {
     reviews: row.reviews ?? 0,
     price: row.price ?? null,
     price_level: row.price_level ?? null,
+    business_size: row.business_size ?? "unknown",
+    employee_count: row.employee_count ?? null,
+    business_size_source: row.business_size_source ?? "unknown",
+    business_size_confidence: Number(row.business_size_confidence ?? 0),
+    popular_times: row.popular_times ?? null,
     phone: row.phone ?? "",
     phone_normalized: row.phone_normalized ?? "",
     email: row.email ?? null,
@@ -241,6 +248,9 @@ export async function getCurrentUser(): Promise<AppUser | null> {
     } as any);
     const session = sessionResult?.data?.session ?? null;
     if (!session) return null;
+
+    void touchAppSession().catch(() => undefined);
+    void getUserPreferences().catch(() => undefined);
 
     const emailName = session.user.email?.split("@")[0] ?? "User";
 
@@ -516,7 +526,7 @@ export type SearchFilters = {
   quantity: number;
   minRating: string;
   priceLevel: string;
-  radius: string;
+  businessSize: string;
   sort: string;
   requireWebsite: boolean;
   requirePhone: boolean;
@@ -530,7 +540,7 @@ export const EMPTY_FILTERS: SearchFilters = {
   quantity: 50,
   minRating: "",
   priceLevel: "",
-  radius: "",
+  businessSize: "",
   sort: "relevance",
   requireWebsite: false,
   requirePhone: false,
@@ -544,7 +554,8 @@ export type SearchRunResult = {
   stats: {
     requested: number;
     savedCount: number;
-    dedupeRemoved: number;
+    status?: "completed" | "partial";
+    message?: string;
     insights: string[];
   };
 };
@@ -679,6 +690,7 @@ export type LeadFilters = {
   category?: string;
   minRating?: number;
   status?: LeadStatus | "";
+  tag?: string;
   withWebsite?: boolean;
   withEmail?: boolean;
   page?: number;
@@ -702,6 +714,7 @@ export async function listLeads(
     .range(from, from + pageSize - 1);
 
   if (f.status) q = q.eq("status", f.status);
+  if (f.tag) q = q.contains("tags", [f.tag]);
   if (f.city) q = q.eq("city", f.city);
   if (f.category) q = q.eq("category", f.category);
   if (f.minRating) q = q.gte("rating", f.minRating);
@@ -717,20 +730,22 @@ export async function listLeads(
 /** Distinct facet values so filter dropdowns reflect real data only. */
 export async function getLeadFacets(workspaceId: string) {
   const sb = getSupabase();
-  if (!sb) return { cities: [] as string[], categories: [] as string[] };
+  if (!sb) return { cities: [] as string[], categories: [] as string[], tags: [] as string[] };
   const { data } = await sb
     .from("leads")
-    .select("city, category")
+    .select("city, category, tags")
     .eq("workspace_id", workspaceId)
-    .limit(1000);
+    .limit(2000);
   const cities = new Set<string>();
   const categories = new Set<string>();
+  const tags = new Set<string>();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (data ?? []).forEach((r: any) => {
     if (r.city) cities.add(r.city);
     if (r.category) categories.add(r.category);
+    (r.tags ?? []).forEach((tag: string) => tags.add(tag));
   });
-  return { cities: [...cities].sort(), categories: [...categories].sort() };
+  return { cities: [...cities].sort(), categories: [...categories].sort(), tags: [...tags].sort() };
 }
 
 export async function getLead(id: string, workspaceId?: string): Promise<Lead | null> {
@@ -751,8 +766,28 @@ export async function updateLeadStatus(id: string, status: LeadStatus) {
 
 export async function updateLeadTags(id: string, tags: string[]) {
   const sb = requireClient();
-  const { error } = await sb.from("leads").update({ tags }).eq("id", id);
+  const normalized: string[] = [];
+  for (const raw of tags) {
+    const checked = validateTag(raw);
+    if (!checked.ok) throw new Error(checked.error);
+    if (!normalized.includes(checked.tag)) normalized.push(checked.tag);
+  }
+  const { error } = await sb.from("leads").update({ tags: normalized }).eq("id", id);
   if (error) throw new Error(readableError(error.message));
+}
+
+export async function applyTagToLeads(leadIds: string[], tag: string, mode: "add" | "remove" = "add") {
+  const sb = requireClient();
+  const checked = validateTag(tag);
+  if (!checked.ok) throw new Error(checked.error);
+  const { data, error } = await sb.from("leads").select("id, tags").in("id", leadIds);
+  if (error) throw new Error(readableError(error.message));
+  for (const row of data ?? []) {
+    const existing = Array.isArray(row.tags) ? row.tags : [];
+    const tags = mode === "add" ? mergeTags(existing, [checked.tag]) : existing.filter((t: string) => t !== checked.tag);
+    const { error: updateError } = await sb.from("leads").update({ tags }).eq("id", row.id);
+    if (updateError) throw new Error(readableError(updateError.message));
+  }
 }
 
 export async function addLeadNote(leadId: string, body: string): Promise<Note> {
@@ -906,10 +941,46 @@ export async function runExport(opts: {
 }) {
   const sb = getSupabase();
   if (!sb) return { error: CONFIG_ERROR };
+  const {
+    data: { session },
+  } = await sb.auth.getSession();
+  if (!session) return { error: "Your session expired — sign in again." };
+
+  try {
+    const response = await fetch("/api/export-run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+      body: JSON.stringify(opts),
+    });
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      const data = await response.json();
+      if (!response.ok || data?.error) return { error: String(data?.error ?? "Export failed.") };
+      return { export: data as { id: string; file_name: string; lead_count: number; status: string; csv?: string } };
+    }
+    if (response.status !== 404 && !contentType.includes("text/html")) {
+      return { error: "The export server returned an invalid response." };
+    }
+  } catch {
+    // Same-origin route unavailable; fall back to Edge Function below.
+  }
+
   const { data, error } = await sb.functions.invoke("export-run", { body: opts });
   if (error) return { error: await readFunctionError(error) };
   if (data?.error) return { error: data.error };
-  return { export: data as { id: string; file_name: string; lead_count: number; status: string } };
+  return { export: data as { id: string; file_name: string; lead_count: number; status: string; csv?: string } };
+}
+
+export function downloadCsv(csv: string, fileName: string) {
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName.endsWith(".csv") ? fileName : `${fileName}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 export async function downloadExport(
@@ -984,12 +1055,36 @@ export async function getTeam(workspaceId: string): Promise<TeamMember[]> {
 export async function inviteMember(workspaceId: string, email: string, role: "admin" | "member") {
   const sb = getSupabase();
   if (!sb) return { error: CONFIG_ERROR };
+  const {
+    data: { session },
+  } = await sb.auth.getSession();
+  if (!session) return { error: "Your session expired — sign in again." };
+
+  try {
+    const response = await fetch("/api/team-invite", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+      body: JSON.stringify({ workspaceId, email, role }),
+    });
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      const data = await response.json();
+      if (!response.ok || data?.error) return { error: String(data?.error ?? "Invitation failed.") };
+      return { ok: true as const, emailSent: Boolean(data.emailSent) };
+    }
+    if (response.status !== 404 && !contentType.includes("text/html")) {
+      return { error: "The invite server returned an invalid response." };
+    }
+  } catch {
+    // Same-origin route unavailable; fall back to Edge Function below.
+  }
+
   const { data, error } = await sb.functions.invoke("team-invite", {
     body: { workspaceId, email, role },
   });
   if (error) return { error: await readFunctionError(error) };
   if (data?.error) return { error: data.error };
-  return { ok: true as const };
+  return { ok: true as const, emailSent: Boolean(data?.emailSent ?? data?.ok) };
 }
 
 export async function removeMember(workspaceId: string, memberId: string, status: string) {
@@ -1025,29 +1120,40 @@ export type UsageData = {
 export async function getUsage(workspaceId: string, planId: string): Promise<UsageData> {
   const sb = requireClient();
   const allowance = planFromId(planId).leadAllowance;
+  const start = periodStart();
+  const next = new Date(`${start}T00:00:00Z`);
+  next.setUTCMonth(next.getUTCMonth() + 1);
+  const nextStart = next.toISOString().slice(0, 10);
 
-  const [{ data: current }, { data: history }, savedCount] = await Promise.all([
-    sb.from("usage_counters").select("*").eq("workspace_id", workspaceId).eq("period_start", periodStart()).maybeSingle(),
+  const [leadCount, searchCount, exportCount, aiCount, listsRes, history] = await Promise.all([
+    sb.from("leads").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).gte("collected_at", start).lt("collected_at", nextStart),
+    sb.from("lead_searches").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).gte("created_at", start).lt("created_at", nextStart),
+    sb.from("exports").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).gte("created_at", start).lt("created_at", nextStart),
+    sb.from("ai_requests").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).gte("created_at", start).lt("created_at", nextStart),
+    sb.from("lead_lists").select("id").eq("workspace_id", workspaceId),
     sb.from("usage_counters").select("*").eq("workspace_id", workspaceId).order("period_start", { ascending: true }).limit(12),
-    sb.from("lead_list_members").select("lead_id", { count: "exact", head: true }),
   ]);
 
-  const used = current?.leads_used ?? 0;
-  const reset = new Date();
-  reset.setMonth(reset.getMonth() + 1, 1);
+  const listIds = (listsRes.data ?? []).map((l) => l.id);
+  const savedCount = listIds.length
+    ? await sb.from("lead_list_members").select("lead_id", { count: "exact", head: true }).in("list_id", listIds)
+    : { count: 0 };
+
+  const used = leadCount.count ?? 0;
+  const reset = new Date(`${nextStart}T00:00:00Z`);
 
   return {
     used,
     allowance,
     remaining: Math.max(0, allowance - used),
-    searches: current?.searches ?? 0,
-    exports: current?.exports ?? 0,
-    aiRuns: current?.ai_runs ?? 0,
+    searches: searchCount.count ?? 0,
+    exports: exportCount.count ?? 0,
+    aiRuns: aiCount.count ?? 0,
     leadsSaved: savedCount.count ?? 0,
-    resetDate: reset.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
+    resetDate: formatAppDate(reset),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    monthly: (history ?? []).map((row: any) => ({
-      label: new Date(row.period_start).toLocaleDateString("en-US", { month: "short" }),
+    monthly: (history.data ?? []).map((row: any) => ({
+      label: new Date(row.period_start).toLocaleDateString(undefined, { month: "short" }),
       value: row.leads_used ?? 0,
     })),
   };
@@ -1078,6 +1184,115 @@ export async function getLeadInsight(
     .eq("lead_id", leadId)
     .maybeSingle();
   return data ?? null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Preferences + app sessions                                          */
+/* ------------------------------------------------------------------ */
+export type UserPreferences = RuntimePreferences;
+
+export async function getUserPreferences(): Promise<UserPreferences> {
+  const sb = requireClient();
+  const {
+    data: { session },
+  } = await sb.auth.getSession();
+  if (!session) throw new Error("Your session expired — sign in again.");
+  const { data, error } = await sb
+    .from("user_preferences")
+    .select("appearance, timezone, language, date_format")
+    .eq("user_id", session.user.id)
+    .maybeSingle();
+  if (error) throw new Error(readableError(error.message));
+  const prefs = {
+    appearance: data?.appearance ?? "system",
+    timezone: data?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC",
+    language: data?.language ?? "en",
+    date_format: data?.date_format ?? "MMM D, YYYY",
+  } as UserPreferences;
+  setRuntimePreferences(prefs);
+  return prefs;
+}
+
+export async function saveUserPreferences(prefs: UserPreferences) {
+  const sb = requireClient();
+  const {
+    data: { session },
+  } = await sb.auth.getSession();
+  if (!session) throw new Error("Your session expired — sign in again.");
+  const { error } = await sb.from("user_preferences").upsert(
+    { user_id: session.user.id, ...prefs },
+    { onConflict: "user_id" }
+  );
+  if (error) throw new Error(readableError(error.message));
+  setRuntimePreferences(prefs);
+}
+
+function sessionIdFromJwt(accessToken: string) {
+  try {
+    const [, payload] = accessToken.split(".");
+    const json = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
+    return String(json.session_id ?? json.sid ?? json.jti ?? accessToken.slice(-16));
+  } catch {
+    return accessToken.slice(-16);
+  }
+}
+
+export type AppSessionRecord = {
+  id: string;
+  session_id: string;
+  user_agent: string | null;
+  created_at: string;
+  last_seen_at: string;
+  revoked_at: string | null;
+  current: boolean;
+};
+
+export async function touchAppSession() {
+  const sb = getSupabase();
+  if (!sb) return;
+  const {
+    data: { session },
+  } = await sb.auth.getSession();
+  if (!session) return;
+  const session_id = sessionIdFromJwt(session.access_token);
+  await sb.from("app_sessions").upsert(
+    {
+      user_id: session.user.id,
+      session_id,
+      user_agent: navigator.userAgent,
+      last_seen_at: new Date().toISOString(),
+    },
+    { onConflict: "user_id,session_id" }
+  );
+  const { data } = await sb
+    .from("app_sessions")
+    .select("revoked_at")
+    .eq("user_id", session.user.id)
+    .eq("session_id", session_id)
+    .maybeSingle();
+  if (data?.revoked_at) await sb.auth.signOut();
+}
+
+export async function listAppSessions(): Promise<AppSessionRecord[]> {
+  const sb = requireClient();
+  const {
+    data: { session },
+  } = await sb.auth.getSession();
+  if (!session) return [];
+  await touchAppSession();
+  const current = sessionIdFromJwt(session.access_token);
+  const { data, error } = await sb
+    .from("app_sessions")
+    .select("id, session_id, user_agent, created_at, last_seen_at, revoked_at")
+    .order("last_seen_at", { ascending: false });
+  if (error) throw new Error(readableError(error.message));
+  return (data ?? []).map((row) => ({ ...row, current: row.session_id === current }));
+}
+
+export async function revokeAppSession(id: string) {
+  const sb = requireClient();
+  const { error } = await sb.from("app_sessions").update({ revoked_at: new Date().toISOString() }).eq("id", id);
+  if (error) throw new Error(readableError(error.message));
 }
 
 /* ------------------------------------------------------------------ */
@@ -1165,8 +1380,10 @@ export function readableError(message: string): string {
   if (m.includes("seat_limit")) return "You've reached your plan's team-seat limit.";
   if (m.includes("client_workspaces_not_available"))
     return "Client workspaces are available on Agency and Scale.";
+  if (m.includes("invalid_tag_one_word")) return "Tags must be one word — no spaces.";
+  if (m.includes("invalid_tag")) return "Use lowercase one-word tags with letters, numbers, hyphens, or underscores.";
   if (m.includes("duplicate key")) return "That already exists.";
-  if (m.includes("row-level security") || m.includes("permission"))
+  if (m.includes("row-level security") || m.includes("permission") || m.includes("not_authorized"))
     return "You don't have access to that resource.";
   if (m.includes("jwt") || m.includes("expired")) return "Your session expired — sign in again.";
   return message || "Something went wrong.";

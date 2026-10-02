@@ -1,7 +1,8 @@
 /* ------------------------------------------------------------------ */
 /* Zybble app — Lead detail                                            */
 /* ------------------------------------------------------------------ */
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useLocation } from "react-router-dom";
 import {
   ArrowLeft,
   ArrowUpRight,
@@ -48,6 +49,7 @@ import {
   addToList,
   analyzeLead,
   deleteLeadNote,
+  downloadCsv,
   getLead,
   getLeadInsight,
   getLists,
@@ -57,6 +59,8 @@ import {
 } from "../services/api";
 import { useWorkspaceContext } from "../services/hooks";
 import { Input } from "../components/ui";
+import { copyText } from "../lib/clipboard";
+import { validateTag } from "../lib/tags";
 
 function DetailRow({ label, value, mono }: { label: string; value: ReactNode; mono?: boolean }) {
   return (
@@ -80,9 +84,92 @@ const OPEN_META: Record<Lead["open_state"], { tone: "green" | "neutral"; label: 
   unknown: { tone: "neutral", label: "Hours unknown" },
 };
 
+function PopularTimes({ value }: { value: unknown }) {
+  const entries = Array.isArray(value)
+    ? value.slice(0, 7)
+    : value && typeof value === "object"
+      ? Object.entries(value as Record<string, unknown>).slice(0, 7).map(([day, data]) => ({ day, data }))
+      : [];
+  if (!entries.length) return <span className="text-neutral-300">Not available</span>;
+  return (
+    <div className="w-full min-w-[220px] space-y-1.5 text-left">
+      {entries.map((entry, i) => {
+        const day = typeof entry === "object" && "day" in entry ? String(entry.day) : String((entry as Record<string, unknown>).day ?? `Day ${i + 1}`);
+        const raw = typeof entry === "object" && "data" in entry ? (entry as { data: unknown }).data : (entry as Record<string, unknown>).hours;
+        const values = Array.isArray(raw) ? raw.map(Number).filter(Number.isFinite).slice(0, 24) : [];
+        const max = Math.max(1, ...values);
+        return (
+          <div key={day} className="grid grid-cols-[44px_1fr] items-center gap-2">
+            <span className="text-[10px] text-neutral-400">{day.slice(0, 3)}</span>
+            <span className="flex h-5 items-end gap-0.5">
+              {values.length ? values.map((v, idx) => (
+                <span key={idx} className="w-1 flex-1 rounded-t bg-brand-600/70" style={{ height: `${Math.max(15, (v / max) * 100)}%` }} />
+              )) : <span className="text-[10px] text-neutral-300">Not available</span>}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function LeadDetailSkeleton() {
+  const CardBlock = ({ title, rows = 4 }: { title: string; rows?: number }) => (
+    <Card className="p-4">
+      <Skel className="h-3.5 w-32 rounded" />
+      <span className="sr-only">{title}</span>
+      <div className="mt-4 space-y-3">
+        {Array.from({ length: rows }).map((_, i) => (
+          <div key={i} className="flex items-center justify-between gap-6 border-b border-black/[0.04] pb-2 last:border-0">
+            <Skel className="h-2.5 w-20 rounded" />
+            <Skel className={cn("h-2.5 rounded", i % 2 ? "w-32" : "w-48")} />
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+  return (
+    <AppLayout title="Lead detail" wide>
+      <div className="mb-4 flex items-center justify-between gap-3" aria-hidden="true">
+        <Skel className="h-4 w-20 rounded" />
+        <div className="flex gap-1.5"><Skel className="h-7 w-20 rounded" /><Skel className="h-7 w-24 rounded" /><Skel className="h-7 w-28 rounded" /></div>
+      </div>
+      <Card className="mb-3 p-4 sm:p-5" aria-hidden="true">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-3">
+            <Skel className="size-10 rounded-lg" />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2"><Skel className="h-4 w-56 rounded" /><Skel className="h-5 w-16 rounded" /><Skel className="h-5 w-20 rounded" /></div>
+              <Skel className="mt-2 h-2.5 w-[min(520px,80vw)] rounded" />
+            </div>
+          </div>
+          <Skel className="h-7 w-36 rounded" />
+        </div>
+      </Card>
+      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_320px]" aria-hidden="true">
+        <div className="space-y-3">
+          <CardBlock title="Business information" rows={6} />
+          <CardBlock title="Contact" rows={4} />
+          <CardBlock title="Location" rows={6} />
+          <CardBlock title="Hours and amenities" rows={5} />
+          <CardBlock title="Source" rows={5} />
+        </div>
+        <div className="space-y-3 lg:sticky lg:top-[60px] lg:self-start">
+          <CardBlock title="Saved in" rows={2} />
+          <CardBlock title="Zybble AI" rows={4} />
+          <CardBlock title="Tags" rows={3} />
+          <CardBlock title="Notes" rows={4} />
+        </div>
+      </div>
+    </AppLayout>
+  );
+}
+
 export function LeadDetailPage({ id }: { id: string }) {
   const toast = useToast();
+  const location = useLocation();
   const { workspace, loading: ctxLoading } = useWorkspaceContext();
+  const autoAnalyzeStarted = useRef(false);
 
   const [lead, setLead] = useState<Lead | null>(null);
   const [loading, setLoading] = useState(true);
@@ -122,45 +209,31 @@ export function LeadDetailPage({ id }: { id: string }) {
     () => (lead ? lists.filter((l) => lead.list_ids.includes(l.id)) : []),
     [lists, lead]
   );
+  const suggestedLists = useMemo(
+    () => (lead ? lists.filter((l) => !lead.list_ids.includes(l.id)).slice(0, 3) : []),
+    [lists, lead]
+  );
+
+  useEffect(() => {
+    if (!lead || !workspace || autoAnalyzeStarted.current) return;
+    if (!new URLSearchParams(location.search).has("analyze")) return;
+    autoAnalyzeStarted.current = true;
+    setAiBusy(true);
+    analyzeLead(lead.id, workspace.id).then(({ result, error }) => {
+      setAiBusy(false);
+      if (error || !result) {
+        toast(error ?? "AI analysis couldn't run right now.", "error");
+        return;
+      }
+      setAiLines([result.summary, ...result.points]);
+      toast("AI analysis ready");
+    });
+  }, [lead, workspace, location.search, toast]);
 
   const busy = loading || ctxLoading;
 
   /* ---------------- loading ---------------- */
-  if (busy) {
-    return (
-      <AppLayout title="Lead detail" wide>
-        <div className="mb-4 h-6" />
-        <Card className="mb-3 p-4 sm:p-5">
-          <div className="flex items-start gap-3">
-            <Skel className="size-10 rounded-lg" />
-            <div className="flex-1 space-y-2">
-              <Skel className="h-4 w-56 rounded" />
-              <Skel className="h-2.5 w-80 rounded" />
-            </div>
-          </div>
-        </Card>
-        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_320px]" aria-hidden="true">
-          <div className="space-y-3">
-            {[0, 1, 2, 3].map((i) => (
-              <Card key={i} className="p-4">
-                <Skel className="h-3 w-28 rounded" />
-                <div className="mt-4 space-y-2.5">
-                  <Skel className="block h-2.5 w-full rounded" />
-                  <Skel className="block h-2.5 w-2/3 rounded" />
-                  <Skel className="block h-2.5 w-1/2 rounded" />
-                </div>
-              </Card>
-            ))}
-          </div>
-          <Card className="h-fit p-4">
-            <Skel className="h-3 w-24 rounded" />
-            <Skel className="mt-4 block h-24 w-full rounded" />
-            <Skel className="mt-3 block h-20 w-full rounded" />
-          </Card>
-        </div>
-      </AppLayout>
-    );
-  }
+  if (busy) return <LeadDetailSkeleton />;
 
   /* ---------------- not found ---------------- */
   if (!lead) {
@@ -216,8 +289,13 @@ export function LeadDetailPage({ id }: { id: string }) {
   };
 
   const addTag = async () => {
-    const t = tagInput.trim();
-    if (!t || lead.tags.includes(t)) return;
+    const checked = validateTag(tagInput);
+    if (!checked.ok) {
+      toast(checked.error, "error");
+      return;
+    }
+    const t = checked.tag;
+    if (lead.tags.includes(t)) return;
     const tags = [...lead.tags, t];
     setLead((l) => (l ? { ...l, tags } : l));
     setTagInput("");
@@ -264,7 +342,8 @@ export function LeadDetailPage({ id }: { id: string }) {
                 toast(res.error, "error");
                 return;
               }
-              toast("Export ready — find it in Exports");
+              if (res.export?.csv) downloadCsv(res.export.csv, res.export.file_name);
+              toast("CSV export downloaded");
             }}
           >
             <Download className="size-3.5" aria-hidden="true" />
@@ -385,6 +464,8 @@ export function LeadDetailPage({ id }: { id: string }) {
                   ) : null
                 }
               />
+              <DetailRow label="Business size" value={lead.business_size === "unknown" ? "Unknown" : `${lead.business_size}${lead.employee_count ? ` · ${lead.employee_count} employees` : ""}`} />
+              <DetailRow label="Popular times" value={<PopularTimes value={lead.popular_times} />} />
             </dl>
           </Card>
 
@@ -437,9 +518,13 @@ export function LeadDetailPage({ id }: { id: string }) {
                     <button
                       type="button"
                       aria-label={`Copy ${row.label}`}
-                      onClick={() => {
-                        navigator.clipboard?.writeText(row.copy!);
-                        toast(`${row.label} copied`);
+                      onClick={async () => {
+                        try {
+                          await copyText(row.copy!);
+                          toast(`${row.label} copied`);
+                        } catch (e) {
+                          toast((e as Error).message || `Couldn't copy ${row.label.toLowerCase()}.`, "error");
+                        }
                       }}
                       className="grid size-6 shrink-0 place-items-center rounded text-neutral-300 transition-colors hover:bg-black/[0.05] hover:text-ink"
                     >
@@ -565,13 +650,32 @@ export function LeadDetailPage({ id }: { id: string }) {
                 ))}
               </div>
             ) : (
-              <p className="mt-2 text-[11px] leading-4.5 text-ink-mute">
-                Not in a list yet.{" "}
-                <a href="/lists" className="font-medium text-brand-700 hover:text-brand-600">
-                  Create one
-                </a>
-                .
-              </p>
+              <div className="mt-2 space-y-2">
+                <p className="text-[11px] leading-4.5 text-ink-mute">Not in a list yet.</p>
+                {suggestedLists.length ? suggestedLists.map((list) => (
+                  <div key={list.id} className="flex items-center justify-between gap-2 rounded border border-black/[0.05] px-2 py-1.5">
+                    <span className="truncate text-[11.5px] font-medium text-ink-soft">{list.name}</span>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          await addToList(list.id, [lead.id]);
+                          setLead((l) => (l ? { ...l, list_ids: [...new Set([...l.list_ids, list.id])] } : l));
+                          toast(`Added to “${list.name}”`);
+                        } catch (e) {
+                          toast((e as Error).message, "error");
+                        }
+                      }}
+                      className="text-[11px] font-semibold text-brand-700 hover:text-brand-600"
+                    >
+                      Add
+                    </button>
+                  </div>
+                )) : (
+                  <a href="/lists" className="text-[11px] font-medium text-brand-700 hover:text-brand-600">Create a list</a>
+                )}
+                {lists.length > 3 ? <a href="/lists" className="block text-[11px] text-ink-mute hover:text-ink">View all lists</a> : null}
+              </div>
             )}
           </Card>
 

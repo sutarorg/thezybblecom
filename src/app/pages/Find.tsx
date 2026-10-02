@@ -41,9 +41,9 @@ import {
 } from "../components/ui";
 import {
   MAX_LEADS_PER_SEARCH,
+  BUSINESS_SIZE_OPTIONS,
   PRICE_OPTIONS,
   QUANTITY_PRESETS,
-  RADIUS_OPTIONS,
   RATING_OPTIONS,
   SORT_OPTIONS,
 } from "../data/plans";
@@ -51,6 +51,7 @@ import type { Lead } from "../data/types";
 import { useAppSeo } from "../hooks";
 import {
   EMPTY_FILTERS,
+  downloadCsv,
   interpretRequest,
   runExport,
   runSearch,
@@ -68,11 +69,13 @@ const AI_STAGES = [
 
 /* Search execution stages */
 const RUN_STAGES = [
-  "Understanding your search",
-  "Finding relevant businesses",
-  "Collecting business information",
-  "Removing duplicates",
-  "Preparing your leads",
+  "Interpreting criteria",
+  "Resolving location",
+  "Scanning businesses",
+  "Collecting public data",
+  "Enriching contact information",
+  "Validating unique leads",
+  "Preparing results",
 ] as const;
 
 function selectCls() {
@@ -106,6 +109,67 @@ function ToggleRow({
   );
 }
 
+function SearchRunAnimation({ category, location, stage }: { category: string; location: string; stage: number }) {
+  return (
+    <Card className="overflow-hidden p-0">
+      <div className="relative overflow-hidden border-b border-black/[0.05] bg-[radial-gradient(circle_at_50%_0%,rgba(14,122,82,0.13),transparent_45%),linear-gradient(180deg,#fff,#fbfbf8)] px-5 py-6 sm:px-7">
+        <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-brand-600/40 to-transparent" aria-hidden="true" />
+        <div className="mx-auto max-w-xl text-center">
+          <span className="mx-auto grid size-11 place-items-center rounded-2xl border border-brand-600/15 bg-white text-brand-700 shadow-[0_8px_28px_rgba(11,99,67,0.10)]">
+            <Search className="size-5 motion-safe:animate-pulse" aria-hidden="true" />
+          </span>
+          <p className="mt-3 text-sm font-semibold text-ink">
+            Discovering {category}{location ? ` around ${location}` : ""}
+          </p>
+          <p className="mt-1 text-xs leading-5 text-ink-mute">
+            Zybble is collecting real provider results and validating new workspace leads.
+          </p>
+        </div>
+        <div className="mx-auto mt-5 grid max-w-xl grid-cols-7 gap-1.5" aria-hidden="true">
+          {Array.from({ length: 21 }).map((_, i) => (
+            <span
+              key={i}
+              className={cn(
+                "h-8 rounded border border-black/[0.04] bg-white/70 shadow-sm",
+                i % 5 === stage % 5 && "bg-brand-50 ring-1 ring-brand-600/10",
+                "motion-safe:animate-[pulse_1.6s_ease-in-out_infinite]"
+              )}
+              style={{ animationDelay: `${(i % 7) * 90}ms` }}
+            />
+          ))}
+        </div>
+      </div>
+      <div className="grid gap-2 p-4 sm:grid-cols-2 lg:grid-cols-4">
+        {RUN_STAGES.map((label, i) => {
+          const done = i < stage;
+          const active = i === stage;
+          return (
+            <div
+              key={label}
+              className={cn(
+                "rounded-md border px-3 py-2 transition-colors",
+                active ? "border-brand-600/20 bg-brand-50/70" : done ? "border-black/[0.05] bg-neutral-50/70" : "border-black/[0.05] bg-white"
+              )}
+              aria-current={active ? "step" : undefined}
+            >
+              <span className="flex items-center gap-2">
+                {done ? (
+                  <Check className="size-3.5 text-brand-600" strokeWidth={3} aria-hidden="true" />
+                ) : active ? (
+                  <Loader2 className="size-3.5 animate-spin text-brand-600" aria-hidden="true" />
+                ) : (
+                  <span className="size-1.5 rounded-full bg-black/[0.14]" aria-hidden="true" />
+                )}
+                <span className={cn("text-[11.5px]", active ? "font-medium text-ink" : done ? "text-ink-soft" : "text-neutral-400")}>{label}</span>
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
 export function FindPage() {
   useAppSeo("Find Leads — Zybble", "Describe the businesses you need and collect them as leads.", "/find");
   const toast = useToast();
@@ -122,7 +186,7 @@ export function FindPage() {
   const [phase, setPhase] = useState<"idle" | "running" | "done">("idle");
   const [runStage, setRunStage] = useState(0);
   const [results, setResults] = useState<Lead[]>([]);
-  const [stats, setStats] = useState<{ savedCount: number; dedupeRemoved: number; insights: string[] } | null>(null);
+  const [stats, setStats] = useState<{ savedCount: number; message?: string; insights: string[] } | null>(null);
   const [searchId, setSearchId] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const timers = useRef<number[]>([]);
@@ -253,7 +317,7 @@ export function FindPage() {
     if (filters.location.trim()) n++;
     if (filters.minRating) n++;
     if (filters.priceLevel) n++;
-    if (filters.radius) n++;
+    if (filters.businessSize) n++;
     if (filters.requireWebsite) n++;
     if (filters.requirePhone) n++;
     if (filters.requireEmail) n++;
@@ -412,14 +476,14 @@ export function FindPage() {
                     </select>
                   </div>
                   <div>
-                    <FieldLabel htmlFor="f-radius">Search area</FieldLabel>
+                    <FieldLabel htmlFor="f-business-size">Business size{aiFlag("businessSize")}</FieldLabel>
                     <select
-                      id="f-radius"
-                      value={filters.radius}
-                      onChange={(e) => set("radius", e.target.value)}
+                      id="f-business-size"
+                      value={filters.businessSize}
+                      onChange={(e) => set("businessSize", e.target.value)}
                       className={selectCls()}
                     >
-                      {RADIUS_OPTIONS.map((o) => (
+                      {BUSINESS_SIZE_OPTIONS.map((o) => (
                         <option key={o.value} value={o.value}>
                           {o.label}
                         </option>
@@ -529,54 +593,7 @@ export function FindPage() {
 
           {/* running */}
           {phase === "running" ? (
-            <Card className="p-5 sm:p-6">
-              <div className="mx-auto max-w-sm">
-                <p className="text-center text-sm font-medium text-ink">
-                  Searching for {filters.category}
-                  {filters.location ? ` in ${filters.location}` : ""}
-                </p>
-                <p className="mt-0.5 text-center text-xs text-ink-mute">Zybble is preparing your leads.</p>
-                <ul className="mt-5 space-y-2.5">
-                  {RUN_STAGES.map((stage, i) => {
-                    const done = i < runStage;
-                    const active = i === runStage;
-                    return (
-                      <li key={stage} className="flex items-center gap-2.5" aria-current={active ? "step" : undefined}>
-                        {done ? (
-                          <span className="grid size-4.5 place-items-center rounded-full bg-brand-50">
-                            <Check className="size-2.5 text-brand-600" strokeWidth={3} aria-hidden="true" />
-                          </span>
-                        ) : active ? (
-                          <Loader2 className="size-4.5 animate-spin text-brand-600" aria-hidden="true" />
-                        ) : (
-                          <span className="mx-1.5 size-1.5 rounded-full bg-black/[0.12]" aria-hidden="true" />
-                        )}
-                        <p
-                          className={cn(
-                            "text-[13px]",
-                            done ? "text-ink-soft" : active ? "font-medium text-ink" : "text-neutral-400"
-                          )}
-                        >
-                          {stage}
-                        </p>
-                      </li>
-                    );
-                  })}
-                </ul>
-                <div
-                  className="mt-5 h-1 overflow-hidden rounded-full bg-black/[0.06]"
-                  role="progressbar"
-                  aria-valuemin={0}
-                  aria-valuemax={RUN_STAGES.length}
-                  aria-valuenow={runStage + 1}
-                >
-                  <div
-                    className="h-full rounded-full bg-brand-600 transition-all duration-700 ease-out"
-                    style={{ width: `${((runStage + 1) / RUN_STAGES.length) * 100}%` }}
-                  />
-                </div>
-              </div>
-            </Card>
+            <SearchRunAnimation category={filters.category} location={filters.location} stage={runStage} />
           ) : null}
 
           {/* idle — while the workspace context resolves, mirror the empty-state
@@ -610,9 +627,7 @@ export function FindPage() {
                 <span className="text-xs font-medium text-ink">
                   {results.length.toLocaleString()} {results.length === 1 ? "lead" : "leads"} collected
                 </span>
-                {stats?.dedupeRemoved ? (
-                  <Badge tone="neutral">{stats.dedupeRemoved} duplicates removed</Badge>
-                ) : null}
+                {stats?.message ? <Badge tone="green">{stats.message}</Badge> : null}
                 <div className="ml-auto flex items-center gap-1.5">
                   <Btn variant="outline" size="sm" href="/leads">
                     <ListPlus className="size-3.5" aria-hidden="true" />
@@ -633,7 +648,8 @@ export function FindPage() {
                         toast(res.error, "error");
                         return;
                       }
-                      toast("Export ready — find it in Exports");
+                      if (res.export?.csv) downloadCsv(res.export.csv, res.export.file_name);
+                      toast("CSV export downloaded");
                     }}
                   >
                     <Download className="size-3.5" aria-hidden="true" />
@@ -645,11 +661,12 @@ export function FindPage() {
               <LeadsTable
                 leads={results}
                 pageSize={12}
+                mode="search-results"
                 emptyState={
                   <EmptyState
                     icon={<Search className="size-4" aria-hidden="true" />}
                     title="No new businesses found"
-                    description="Every match was already in your workspace, or the criteria were too narrow. Try widening the location or removing a requirement."
+                    description="The provider had no additional matching businesses for this search, or the criteria were too narrow. Try broadening the location or removing a requirement."
                   />
                 }
               />

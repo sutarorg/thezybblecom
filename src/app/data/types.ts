@@ -18,6 +18,11 @@ export interface Lead {
   reviews: number;
   price: string | null;
   price_level: number | null;
+  business_size: "unknown" | "small" | "medium" | "enterprise";
+  employee_count: number | null;
+  business_size_source: "unknown" | "provider" | "website";
+  business_size_confidence: number;
+  popular_times: unknown;
   phone: string;
   phone_normalized: string;
   email: string | null;
@@ -67,7 +72,7 @@ export interface Lead {
   list_ids: string[];
 }
 
-export type LeadStatus = "new" | "enriched" | "contacted";
+export type LeadStatus = "new" | "contacted";
 
 export interface Note {
   id: string;

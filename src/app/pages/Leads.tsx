@@ -15,11 +15,14 @@ import {
 } from "lucide-react";
 import { cn } from "../../utils/cn";
 import { AppLayout } from "../components/AppLayout";
-import { LeadsTable } from "../components/LeadsTable";
+import { LeadsTable, type LeadColumnId } from "../components/LeadsTable";
 import {
   Badge,
   Btn,
+  Dialog,
+  DialogHeader,
   EmptyState,
+  FieldLabel,
   Input,
   PopItem,
   PopLabel,
@@ -29,10 +32,10 @@ import {
 } from "../components/ui";
 import type { Lead, LeadStatus } from "../data/types";
 import { useAppSeo } from "../hooks";
-import { deleteLeads, getLeadFacets, getLists, listLeads, runExport } from "../services/api";
+import { addToList, applyTagToLeads, createList, deleteLeads, downloadCsv, getLeadFacets, getLists, listLeads, runExport, updateLeadStatus } from "../services/api";
 import { useWorkspaceContext } from "../services/hooks";
 
-const COLUMNS = [
+const COLUMNS: { id: LeadColumnId; label: string }[] = [
   { id: "category", label: "Category" },
   { id: "rating", label: "Rating & reviews" },
   { id: "phone", label: "Phone" },
@@ -60,15 +63,40 @@ export function LeadsPage() {
   const [category, setCategory] = useState("");
   const [rating, setRating] = useState("");
   const [status, setStatus] = useState("");
+  const [tag, setTag] = useState("");
   const [withWebsite, setWithWebsite] = useState(false);
   const [withEmail, setWithEmail] = useState(false);
-  const [visibleCols, setVisibleCols] = useState<string[]>(COLUMNS.map((c) => c.id));
+  const [visibleCols, setVisibleCols] = useState<LeadColumnId[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("zybble.leads.columns") ?? "null") as LeadColumnId[] | null;
+      return saved?.length ? saved : COLUMNS.map((c) => c.id);
+    } catch {
+      return COLUMNS.map((c) => c.id);
+    }
+  });
+  const [listDialogIds, setListDialogIds] = useState<string[]>([]);
+  const [tagDialogIds, setTagDialogIds] = useState<string[]>([]);
+  const [newListName, setNewListName] = useState("");
+  const [newListDescription, setNewListDescription] = useState("");
+  const [bulkTag, setBulkTag] = useState("");
+  const [tagMode, setTagMode] = useState<"add" | "remove">("add");
+  const [savingDialog, setSavingDialog] = useState(false);
 
-  const [facets, setFacets] = useState<{ cities: string[]; categories: string[] }>({
+  const [facets, setFacets] = useState<{ cities: string[]; categories: string[]; tags: string[] }>({
     cities: [],
     categories: [],
+    tags: [],
   });
+  const [lists, setLists] = useState<{ id: string; name: string; description: string; lead_count: number }[]>([]);
   const [listNames, setListNames] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("zybble.leads.columns", JSON.stringify(visibleCols));
+    } catch {
+      /* storage unavailable */
+    }
+  }, [visibleCols]);
 
   /* debounce the text search so we don't hammer PostgREST */
   useEffect(() => {
@@ -86,6 +114,7 @@ export function LeadsPage() {
       category: category || undefined,
       minRating: rating ? Number(rating) : undefined,
       status: (status as LeadStatus) || undefined,
+      tag: tag || undefined,
       withWebsite,
       withEmail,
       pageSize: 500,
@@ -96,7 +125,7 @@ export function LeadsPage() {
       })
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
-  }, [workspace, debounced, city, category, rating, status, withWebsite, withEmail]);
+  }, [workspace, debounced, city, category, rating, status, tag, withWebsite, withEmail]);
 
   useEffect(() => {
     if (!ctxLoading && !workspace) setLoading(false);
@@ -107,24 +136,83 @@ export function LeadsPage() {
     if (!workspace) return;
     getLeadFacets(workspace.id).then(setFacets).catch(() => undefined);
     getLists(workspace.id)
-      .then((ls) => setListNames(Object.fromEntries(ls.map((l) => [l.id, l.name]))))
+      .then((ls) => {
+        setLists(ls);
+        setListNames(Object.fromEntries(ls.map((l) => [l.id, l.name])));
+      })
       .catch(() => undefined);
   }, [workspace]);
 
   const activeCount =
-    [city, category, rating, status].filter(Boolean).length + (withWebsite ? 1 : 0) + (withEmail ? 1 : 0);
+    [city, category, rating, status, tag].filter(Boolean).length + (withWebsite ? 1 : 0) + (withEmail ? 1 : 0);
 
   const clearFilters = () => {
     setCity("");
     setCategory("");
     setRating("");
     setStatus("");
+    setTag("");
     setWithWebsite(false);
     setWithEmail(false);
   };
 
   const hasAnyFilter = activeCount > 0 || debounced.length > 0;
   const isEmptyAccount = !loading && !hasAnyFilter && rows.length === 0;
+
+  const addSelectedToExistingList = async (listId: string) => {
+    setSavingDialog(true);
+    try {
+      await addToList(listId, listDialogIds);
+      setRows((r) => r.map((lead) => (listDialogIds.includes(lead.id) ? { ...lead, list_ids: [...new Set([...lead.list_ids, listId])] } : lead)));
+      toast(`${listDialogIds.length} ${listDialogIds.length === 1 ? "lead" : "leads"} added to list`);
+      setListDialogIds([]);
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setSavingDialog(false);
+    }
+  };
+
+  const createListAndAdd = async () => {
+    if (!workspace || !newListName.trim()) return;
+    setSavingDialog(true);
+    try {
+      const list = await createList(workspace.id, newListName.trim(), newListDescription.trim());
+      await addToList(list.id, listDialogIds);
+      setLists((ls) => [{ ...list, lead_count: listDialogIds.length }, ...ls]);
+      setListNames((m) => ({ ...m, [list.id]: list.name }));
+      setRows((r) => r.map((lead) => (listDialogIds.includes(lead.id) ? { ...lead, list_ids: [...new Set([...lead.list_ids, list.id])] } : lead)));
+      setNewListName("");
+      setNewListDescription("");
+      setListDialogIds([]);
+      toast(`Created “${list.name}” and added ${listDialogIds.length} ${listDialogIds.length === 1 ? "lead" : "leads"}`);
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setSavingDialog(false);
+    }
+  };
+
+  const applyBulkTag = async () => {
+    if (!bulkTag.trim()) return;
+    setSavingDialog(true);
+    try {
+      await applyTagToLeads(tagDialogIds, bulkTag, tagMode);
+      setRows((r) => r.map((lead) => {
+        if (!tagDialogIds.includes(lead.id)) return lead;
+        const normalized = bulkTag.trim().toLowerCase();
+        return { ...lead, tags: tagMode === "add" ? [...new Set([...lead.tags, normalized])] : lead.tags.filter((t) => t !== normalized) };
+      }));
+      if (tagMode === "add") setFacets((f) => ({ ...f, tags: [...new Set([...f.tags, bulkTag.trim().toLowerCase()])].sort() }));
+      setBulkTag("");
+      setTagDialogIds([]);
+      toast(tagMode === "add" ? "Tag applied" : "Tag removed");
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setSavingDialog(false);
+    }
+  };
 
   const emptyState = useMemo(
     () =>
@@ -170,7 +258,8 @@ export function LeadsPage() {
                 toast(res.error, "error");
                 return;
               }
-              toast("Export ready — find it in Exports");
+              if (res.export?.csv) downloadCsv(res.export.csv, res.export.file_name);
+              toast("CSV export downloaded");
             }}
           >
             <Download className="size-3.5" aria-hidden="true" />
@@ -266,8 +355,21 @@ export function LeadsPage() {
               >
                 <option value="">Any</option>
                 <option value="new">New</option>
-                <option value="enriched">Enriched</option>
                 <option value="contacted">Contacted</option>
+              </select>
+            </div>
+            <div className="col-span-2">
+              <p className="mb-1 text-[10px] font-medium text-neutral-400">Tags</p>
+              <select
+                value={tag}
+                onChange={(e) => setTag(e.target.value)}
+                className="h-7 w-full rounded border border-black/[0.09] bg-white px-1.5 text-xs text-ink outline-none focus:border-brand-600/50"
+                aria-label="Filter by tag"
+              >
+                <option value="">All tags</option>
+                {facets.tags.map((t) => (
+                  <option key={t} value={t}>{t}</option>
+                ))}
               </select>
             </div>
           </div>
@@ -359,24 +461,115 @@ export function LeadsPage() {
         onRetry={load}
         pageSize={PAGE_SIZE}
         listNames={listNames}
-        noLists={!visibleCols.includes("list")}
+        visibleColumns={visibleCols}
         emptyState={emptyState}
+        onAddToList={(ids) => setListDialogIds(ids)}
         onBulk={async (action, ids) => {
           if (!workspace) return;
+          if (action === "list") setListDialogIds(ids);
+          if (action === "tag") setTagDialogIds(ids);
+          if (action === "status:new" || action === "status:contacted") {
+            const next = action === "status:new" ? "new" : "contacted";
+            try {
+              await Promise.all(ids.map((id) => updateLeadStatus(id, next)));
+              setRows((r) => r.map((lead) => (ids.includes(lead.id) ? { ...lead, status: next } : lead)));
+              toast(`Status updated to ${next === "new" ? "New" : "Contacted"}`);
+            } catch (e) {
+              toast((e as Error).message, "error");
+            }
+          }
           if (action === "delete") {
             try {
               await deleteLeads(ids);
               setRows((r) => r.filter((x) => !ids.includes(x.id)));
+              toast("Leads removed");
             } catch (e) {
               toast((e as Error).message, "error");
             }
           }
           if (action === "export") {
             const res = await runExport({ workspaceId: workspace.id, leadIds: ids, source: "Selection" });
-            if (res.error) toast(res.error, "error");
+            if (res.error) {
+              toast(res.error, "error");
+            } else {
+              if (res.export?.csv) downloadCsv(res.export.csv, res.export.file_name);
+              toast("CSV export downloaded");
+            }
           }
         }}
       />
+
+      <Dialog open={listDialogIds.length > 0} onClose={() => setListDialogIds([])} label="Add selected leads to a list" maxWidth="max-w-lg">
+        <DialogHeader title="Add to list" description={`${listDialogIds.length} selected ${listDialogIds.length === 1 ? "lead" : "leads"}`} onClose={() => setListDialogIds([])} />
+        <div className="grid gap-4 px-4 py-4 sm:grid-cols-2">
+          <div>
+            <p className="text-xs font-semibold text-ink">Existing lists</p>
+            <div className="mt-2 max-h-56 space-y-1 overflow-y-auto thin-scroll pr-1">
+              {lists.length ? lists.map((list) => (
+                <button
+                  key={list.id}
+                  type="button"
+                  disabled={savingDialog}
+                  onClick={() => addSelectedToExistingList(list.id)}
+                  className="flex w-full items-center justify-between gap-2 rounded border border-black/[0.06] px-2.5 py-2 text-left text-xs hover:bg-neutral-50 disabled:opacity-50"
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate font-medium text-ink">{list.name}</span>
+                    <span className="text-[10.5px] text-neutral-400">{list.lead_count} leads</span>
+                  </span>
+                  <span className="font-medium text-brand-700">Add</span>
+                </button>
+              )) : <p className="rounded border border-dashed border-black/[0.08] p-3 text-[11px] text-ink-mute">No lists yet — create one here.</p>}
+            </div>
+          </div>
+          <div>
+            <p className="text-xs font-semibold text-ink">Create list</p>
+            <div className="mt-2 space-y-2">
+              <div>
+                <FieldLabel htmlFor="bulk-list-name">List name</FieldLabel>
+                <Input id="bulk-list-name" value={newListName} onChange={(e) => setNewListName(e.target.value)} placeholder="e.g. Florida dentists" />
+              </div>
+              <div>
+                <FieldLabel htmlFor="bulk-list-description">Description optional</FieldLabel>
+                <Input id="bulk-list-description" value={newListDescription} onChange={(e) => setNewListDescription(e.target.value)} placeholder="Why this list exists" />
+              </div>
+              <Btn variant="primary" size="sm" className="w-full" disabled={!newListName.trim() || savingDialog} onClick={createListAndAdd}>
+                Create and add leads
+              </Btn>
+            </div>
+          </div>
+        </div>
+      </Dialog>
+
+      <Dialog open={tagDialogIds.length > 0} onClose={() => setTagDialogIds([])} label="Tag selected leads" maxWidth="max-w-md">
+        <DialogHeader title="Bulk tag leads" description="Tags must be a single lowercase word." onClose={() => setTagDialogIds([])} />
+        <div className="space-y-3 px-4 py-4">
+          {facets.tags.length ? (
+            <div>
+              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-neutral-400">Existing tags</p>
+              <div className="flex flex-wrap gap-1">
+                {facets.tags.map((t) => <button key={t} type="button" onClick={() => setBulkTag(t)} className="rounded bg-neutral-100 px-1.5 py-1 text-[11px] text-ink-soft hover:bg-brand-50 hover:text-brand-700">{t}</button>)}
+              </div>
+            </div>
+          ) : null}
+          <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+            <div>
+              <FieldLabel htmlFor="bulk-tag">Tag</FieldLabel>
+              <Input id="bulk-tag" value={bulkTag} onChange={(e) => setBulkTag(e.target.value)} placeholder="priority" />
+            </div>
+            <div>
+              <FieldLabel>Action</FieldLabel>
+              <select value={tagMode} onChange={(e) => setTagMode(e.target.value as "add" | "remove")} className="h-8 rounded border border-black/[0.09] bg-white px-2 text-xs text-ink">
+                <option value="add">Add</option>
+                <option value="remove">Remove</option>
+              </select>
+            </div>
+          </div>
+          <Btn variant="primary" size="sm" className="w-full" disabled={!bulkTag.trim() || savingDialog} onClick={applyBulkTag}>
+            Apply to {tagDialogIds.length} {tagDialogIds.length === 1 ? "lead" : "leads"}
+          </Btn>
+        </div>
+      </Dialog>
     </AppLayout>
   );
 }

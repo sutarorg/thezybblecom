@@ -157,7 +157,7 @@ Deno.serve(async (req) => {
       meta: { exportId: exportRow.id },
     });
 
-    return json({ id: exportRow.id, file_name: exportRow.file_name, lead_count: leads.length, status: "completed" });
+    return json({ id: exportRow.id, file_name: exportRow.file_name, lead_count: leads.length, status: "completed", csv });
   } catch (e) {
     return handleError(e);
   }

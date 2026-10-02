@@ -402,7 +402,8 @@ Rules:
 - q is the Google Maps search phrase (e.g. "dentists" or "marketing agencies").
 - location is the place text the user gave (city/region/country), or null.
 - requested_count is an integer between 1 and 500; default 50 when not stated.
-- filters: require_website and min_rating when the user asks for them, else null.`;
+- filters: require_website, min_rating, price_level, and business_size only when the user asks for them, else null.
+- business_size can be small, medium, or enterprise; unknown is never a requested filter.`;
 
 export const ANALYZE_SYSTEM = `You are Zybble's lead analyst. You interpret ONLY the structured public business data you're given and write plain, useful, honest observations for a salesperson.
 Rules:

@@ -91,7 +91,7 @@ const CORE_INTENTS: Record<string, Intent> = {
         items: [
           "You type the request — type, place, quantity",
           "Zybble interprets it into a structured search",
-          "Results are processed and duplicates removed",
+          "Results are normalized and checked for new unique businesses",
           "Leads arrive as structured rows, ready to work",
         ],
       },
