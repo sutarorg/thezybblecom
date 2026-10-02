@@ -200,6 +200,26 @@ npm run dev
    - Confirm the Razorpay webhook URL points to the production project.
 7. Every merge to `main` redeploys automatically.
 
+### Writing imports inside `api/`
+
+Vercel compiles each traced `api/**/*.ts` file to `.js` **without rewriting import
+specifiers**, and this repo is ESM (`"type": "module"`), so Node resolves whatever
+specifier is in the source literally at cold start:
+
+| Source specifier | Deployed result |
+| --- | --- |
+| `"./_lib/search-core.ts"` | ❌ `ERR_MODULE_NOT_FOUND` — the deployed file is `search-core.js` |
+| `"./_lib/search-core"` | ❌ `ERR_MODULE_NOT_FOUND` — ESM requires an explicit extension |
+| `"./_lib/search-core.js"` | ✅ resolves (TypeScript maps `.js` back to the `.ts` source) |
+
+A bad specifier throws while the function module is loading — before any handler
+code runs — so Vercel returns an opaque `500 FUNCTION_INVOCATION_FAILED` with no
+JSON body and nothing but the import error in `vercel logs`. Always write relative
+imports under `api/` with the emitted `.js` extension; `api/module-resolution.test.ts`
+enforces it, and `allowImportingTsExtensions` is deliberately `false` in `tsconfig.json`.
+(Supabase Edge Functions in `supabase/functions/` are Deno and keep their `.ts`
+specifiers — that directory is outside the Vercel build.)
+
 ## Git workflow
 
 ```text

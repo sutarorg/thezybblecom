@@ -13,8 +13,8 @@ import {
   stringValue,
   type BusinessSize,
   type BusinessSizeResult,
-} from "./_lib/search-core.ts";
-import { enrichPublicWebsite } from "./_lib/public-enrichment.ts";
+} from "./_lib/search-core.js";
+import { enrichPublicWebsite } from "./_lib/public-enrichment.js";
 
 type VercelRequest = IncomingMessage & { body?: unknown };
 type VercelResponse = ServerResponse & {
@@ -771,13 +771,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
   } catch (error) {
     const apiError = error instanceof ApiError ? error : new ApiError(500, "The service couldn't complete that action. Please try again.", "unknown");
-    if (sb && workspaceId && reserved > saved && !refundAttempted) await refundLeads(sb, workspaceId, reserved - saved);
-    if (sb && searchId) {
-      await updateSearch(sb, searchId, {
-        status: "failed",
-        result_count: saved,
-        completed_at: new Date().toISOString(),
-        error: apiError.message,
+    // Cleanup runs on a path that is already failing: anything thrown here would
+    // escape the handler and surface as an opaque FUNCTION_INVOCATION_FAILED
+    // instead of the actionable JSON error below.
+    try {
+      if (sb && workspaceId && reserved > saved && !refundAttempted) await refundLeads(sb, workspaceId, reserved - saved);
+      if (sb && searchId) {
+        await updateSearch(sb, searchId, {
+          status: "failed",
+          result_count: saved,
+          completed_at: new Date().toISOString(),
+          error: apiError.message,
+        });
+      }
+    } catch {
+      console.error("api request", {
+        route: "/api/search-run",
+        status: 500,
+        code: "search_cleanup_failed",
+        providerCategory: undefined,
+        durationMs: Date.now() - startedAt,
       });
     }
     const diagnostics = {

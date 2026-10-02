@@ -1,4 +1,4 @@
-import { normalizeLocation, type NormalizedLocation } from "./location.ts";
+import { normalizeLocation, type NormalizedLocation } from "./location.js";
 
 export type BusinessSize = "unknown" | "small" | "medium" | "enterprise";
 export type BusinessSizeSource = "provider" | "website" | "unknown";
