@@ -265,7 +265,8 @@ async function enrichWebsiteRow(row: Record<string, unknown>, deadlineAt: number
 /* Main handler                                                        */
 /* ------------------------------------------------------------------ */
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  const startedAt = Date.now();
+  if (req.method === "OPTIONS") return new Response(JSON.stringify({ ok: true }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   if (req.method !== "POST") return errorJson("Method not allowed", 405, "method_not_allowed");
 
   const deadlineAt = Date.now() + SEARCH_BUDGET_MS;
@@ -602,10 +603,12 @@ Deno.serve(async (req) => {
         await reserveLeads(accounting.sb, accounting.workspaceId, -(reserved - saved));
         reserved = saved;
       } catch (refundError) {
-        console.error("lead quota refund failed", {
-          workspaceId: accounting.workspaceId,
-          searchId: accounting.searchId,
-          message: refundError instanceof Error ? refundError.message : "Unknown error",
+        console.error("edge request", {
+          functionName: "search-run",
+          status: 500,
+          code: "usage_refund_failed",
+          providerCategory: undefined,
+          durationMs: Date.now() - startedAt,
         });
       }
     }
@@ -615,6 +618,6 @@ Deno.serve(async (req) => {
         .update({ status: "failed", result_count: saved, completed_at: new Date().toISOString(), error: e instanceof Error ? e.message : "Search failed" })
         .eq("id", accounting.searchId);
     }
-    return handleError(e);
+    return handleError(e, { functionName: "search-run", startedAt });
   }
 });

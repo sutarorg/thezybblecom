@@ -85,8 +85,9 @@ Create accounts/tools before configuring anything:
      `http://localhost:5173/overview`, `http://localhost:5173/reset?step=update`
 7. **SQL Editor → New query**: paste the entire contents of [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql) → **Run**.
 8. **Run the remaining migrations in order**: first [`supabase/migrations/0002_free_ai_and_workspace_recovery.sql`](supabase/migrations/0002_free_ai_and_workspace_recovery.sql), then [`supabase/migrations/0003_fix_profile_rls_recursion.sql`](supabase/migrations/0003_fix_profile_rls_recursion.sql). `0002` enables Zybble AI on Free and adds idempotent workspace recovery. `0003` replaces the recursive `profiles` admin policy (which otherwise breaks authenticated workspace reads with “infinite recursion detected”) and prevents profile-role escalation. Both are safe to run on an existing database.
-9. Verify: **Table Editor** should list `plans, profiles, workspaces, workspace_members, workspace_invitations, subscriptions, payments, invoices, lead_searches, lead_search_jobs, leads, lead_lists, lead_list_members, exports, usage_counters, activity_logs, ai_requests, ai_insights, webhook_events`. Every table shows **RLS Enabled**. In `plans`, the `free` row should show `has_ai = true`.
-10. (CLI alternative) `supabase login && supabase link --project-ref <ref> && supabase db push`.
+9. Apply the production repair migration [`supabase/migrations/0004_production_repair.sql`](supabase/migrations/0004_production_repair.sql) after `0003`. It adds the columns, usage RPC behavior, tag validation, and session/preference tables used by the production request paths.
+10. Verify: **Table Editor** should list `plans, profiles, workspaces, workspace_members, workspace_invitations, subscriptions, payments, invoices, lead_searches, lead_search_jobs, leads, lead_lists, lead_list_members, exports, usage_counters, activity_logs, ai_requests, ai_insights, webhook_events, user_preferences, app_sessions`. Every table shows **RLS Enabled**. In `plans`, the `free` row should show `has_ai = true`.
+11. (CLI alternative) `supabase login && supabase link --project-ref <ref> && supabase db push`.
 
 ### Deploy the Edge Functions
 
@@ -172,7 +173,7 @@ supabase functions deploy search-run ai-interpret ai-analyze export-run team-inv
 ```bash
 git clone <your-repo-url> && cd zybble
 npm install
-cp .env.example .env.local   # fill VITE_SUPABASE_URL + VITE_SUPABASE_PUBLISHABLE_KEY
+cp .env.example .env.local   # fill both browser VITE_ values and server SUPABASE_ values
 npm run dev
 ```
 
@@ -188,6 +189,8 @@ npm run dev
 4. **Environment Variables** (Production + Preview — scoped per current Vercel guidance):
    - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_PUBLISHABLE_KEY`
+   - `SUPABASE_URL` — server-side copy of the project URL used by Vercel Functions
+   - `SUPABASE_PUBLISHABLE_KEY` (or `SUPABASE_ANON_KEY`) — server-side publishable/anon key used by Vercel Functions
    - `SERPAPI_API_KEY` — server-only; used by `/api/search-run` and never included in the Vite bundle
    - `OPENAI_API_KEY` and optional `OPENAI_MODEL` — server-only; used by `/api/ai-interpret`. Also set these as Supabase Edge Function secrets when using the non-Vercel fallback.
    - Razorpay, Resend, and Supabase secret/service-role keys remain Supabase Edge Function secrets and must not be added to the browser bundle.

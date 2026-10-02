@@ -1,7 +1,8 @@
 # Zybble — Supabase configuration
 # Link with: supabase link --project-ref <your-project-ref>
 
-project_id = "zybble"
+# Production project used by VITE_SUPABASE_URL.
+project_id = "mgsxoifbfxkvsdbiwucr"
 
 [functions.search-run]
 verify_jwt = true

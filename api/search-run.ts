@@ -85,7 +85,7 @@ function env(...names: string[]) {
 
 function bearerToken(req: VercelRequest) {
   const value = Array.isArray(req.headers.authorization) ? req.headers.authorization[0] : req.headers.authorization;
-  const token = value?.match(/^Bearer\s+(.+)$/i)?.[1];
+  const token = value?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
   if (!token) throw new ApiError(401, "Your session expired — sign in again.", "auth_missing");
   return token;
 }
@@ -104,43 +104,75 @@ function requestBody(req: VercelRequest): Record<string, unknown> {
 }
 
 function parseFilters(input: unknown): SearchFilters {
-  const raw = input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
-  const category = String(raw.category ?? "").trim();
-  const location = String(raw.location ?? "").trim();
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new ApiError(400, "Search filters are required.", "filters_required");
+  }
+  const raw = input as Record<string, unknown>;
+  const category = typeof raw.category === "string" ? raw.category.trim() : "";
+  const location = typeof raw.location === "string" ? raw.location.trim() : "";
   if (category.length < 2) throw new ApiError(400, "Add a business category to search for.", "category_required");
   if (category.length > 120) throw new ApiError(400, "That category is too long.", "category_too_long");
   if (location.length > 140) throw new ApiError(400, "That location is too long.", "location_too_long");
-  const quantity = Math.min(Math.max(1, Number(raw.quantity) || 50), MAX_PER_RUN);
-  const minRating = String(raw.minRating ?? "");
-  const priceLevel = String(raw.priceLevel ?? "");
-  const businessSize = String(raw.businessSize ?? "");
+
+  const quantity = raw.quantity === undefined ? 50 : raw.quantity;
+  if (typeof quantity !== "number" || !Number.isInteger(quantity) || quantity < 1 || quantity > MAX_PER_RUN) {
+    throw new ApiError(400, `Choose between 1 and ${MAX_PER_RUN} leads.`, "quantity_invalid");
+  }
+  const minRating = raw.minRating === undefined ? "" : raw.minRating;
+  if (typeof minRating !== "string" || !["", "3", "3.5", "4", "4.5"].includes(minRating)) {
+    throw new ApiError(400, "That minimum rating filter is invalid.", "rating_invalid");
+  }
+  const priceLevel = raw.priceLevel === undefined ? "" : raw.priceLevel;
+  if (typeof priceLevel !== "string" || !["", "1", "2", "3", "4"].includes(priceLevel)) {
+    throw new ApiError(400, "That price filter is invalid.", "price_invalid");
+  }
+  const businessSize = raw.businessSize === undefined ? "" : raw.businessSize;
+  if (typeof businessSize !== "string" || !["", "small", "medium", "enterprise"].includes(businessSize)) {
+    throw new ApiError(400, "That business-size filter is invalid.", "business_size_invalid");
+  }
+  const sort = raw.sort === undefined ? "relevance" : raw.sort;
+  if (typeof sort !== "string" || !["relevance", "rating", "reviews"].includes(sort)) {
+    throw new ApiError(400, "That sort option is invalid.", "sort_invalid");
+  }
+  const booleanFilter = (key: string) => {
+    const value = raw[key];
+    if (value !== undefined && typeof value !== "boolean") {
+      throw new ApiError(400, `The ${key} filter is invalid.`, "filter_invalid");
+    }
+    return value === true;
+  };
+
   return {
     category,
     location,
     quantity,
-    minRating: Number.isFinite(Number(minRating)) ? minRating : "",
-    priceLevel: ["1", "2", "3", "4"].includes(priceLevel) ? priceLevel : "",
-    businessSize: ["small", "medium", "enterprise"].includes(businessSize) ? (businessSize as SearchFilters["businessSize"]) : "",
-    sort: ["rating", "reviews"].includes(String(raw.sort)) ? String(raw.sort) : "relevance",
-    requireWebsite: Boolean(raw.requireWebsite),
-    requirePhone: Boolean(raw.requirePhone),
-    requireEmail: Boolean(raw.requireEmail),
-    openNow: Boolean(raw.openNow),
+    minRating,
+    priceLevel,
+    businessSize: businessSize as SearchFilters["businessSize"],
+    sort,
+    requireWebsite: booleanFilter("requireWebsite"),
+    requirePhone: booleanFilter("requirePhone"),
+    requireEmail: booleanFilter("requireEmail"),
+    openNow: booleanFilter("openNow"),
   };
 }
 
 function serverClient(token: string): SupabaseClient {
-  const url = env("SUPABASE_URL", "VITE_SUPABASE_URL");
-  const key = env("SUPABASE_PUBLISHABLE_KEY", "VITE_SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY");
+  const url = env("SUPABASE_URL");
+  const key = env("SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY");
   if (!url || !key) throw new ApiError(500, "The search server isn't connected to Supabase.", "supabase_config");
   const databaseFetch: typeof fetch = (input, init = {}) => fetch(input, {
     ...init,
     signal: AbortSignal.timeout(4_000),
   });
-  return createClient(url, key, {
-    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-    global: { headers: { Authorization: `Bearer ${token}` }, fetch: databaseFetch },
-  });
+  try {
+    return createClient(url, key, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+      global: { headers: { Authorization: `Bearer ${token}` }, fetch: databaseFetch },
+    });
+  } catch {
+    throw new ApiError(500, "The search server has invalid Supabase configuration.", "supabase_config");
+  }
 }
 
 async function assertWorkspaceAccess(sb: SupabaseClient, workspaceId: string, userId: string) {
@@ -165,13 +197,20 @@ async function refundLeads(sb: SupabaseClient, workspaceId: string, count: numbe
   try {
     const { error } = await sb.rpc("reserve_leads", { ws: workspaceId, delta: -count });
     if (!error) return true;
-    console.error("lead quota refund failed", { workspaceId, count, code: error.code });
+    console.error("api request", {
+      route: "/api/search-run",
+      status: 500,
+      code: "usage_refund_failed",
+      providerCategory: undefined,
+      durationMs: undefined,
+    });
   } catch (error) {
-    console.error("lead quota refund failed", {
-      workspaceId,
-      count,
-      name: error instanceof Error ? error.name : "Unknown",
-      message: error instanceof Error ? error.message : "Unknown error",
+    console.error("api request", {
+      route: "/api/search-run",
+      status: 500,
+      code: "usage_refund_failed",
+      providerCategory: undefined,
+      durationMs: undefined,
     });
   }
   return false;
@@ -473,7 +512,13 @@ async function existingKeys(sb: SupabaseClient, workspaceId: string, keys: strin
 async function updateSearch(sb: SupabaseClient, searchId: string, values: Record<string, unknown>, strict = false) {
   const { error } = await sb.from("lead_searches").update(values).eq("id", searchId);
   if (!error) return;
-  console.error("search status update failed", { searchId, code: error.code, message: error.message });
+  console.error("api request", {
+    route: "/api/search-run",
+    status: 500,
+    code: "search_status_update_failed",
+    providerCategory: undefined,
+    durationMs: undefined,
+  });
   if (strict) throw new ApiError(500, "The search completed but its history couldn't be updated.", "search_finalize_failed");
 }
 
@@ -650,7 +695,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         .upsert(chunk, { onConflict: "workspace_id,dedupe_key", ignoreDuplicates: true })
         .select("id");
       if (error) {
-        console.error("lead insert failed", { message: error.message, code: error.code });
+        console.error("api request", {
+          route: "/api/search-run",
+          status: 500,
+          code: "lead_save_failed",
+          providerCategory: undefined,
+          durationMs: undefined,
+        });
         throw new ApiError(500, "The leads were found but couldn't be saved. Try again.", "lead_save_failed");
       }
       for (const item of inserted ?? []) savedIds.push(item.id);
@@ -730,16 +781,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     }
     const diagnostics = {
-      name: error instanceof Error ? error.name : "Unknown",
-      message: error instanceof Error ? error.message : "Unknown error",
-      searchId: searchId || undefined,
-      workspaceId: workspaceId || undefined,
+      route: "/api/search-run",
+      status: apiError.status,
       code: apiError.code,
       providerCategory: apiError.code.startsWith("provider_") ? apiError.code : undefined,
-      elapsedMs: Date.now() - startedAt,
+      durationMs: Date.now() - startedAt,
     };
-    if (error instanceof ApiError) console.warn("search-run failed", diagnostics);
-    else console.error("search-run unexpected error", diagnostics);
+    console.error("api request", diagnostics);
     return res.status(apiError.status).json({ error: apiError.message, code: apiError.code });
   }
 }

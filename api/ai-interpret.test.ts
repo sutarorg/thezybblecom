@@ -74,4 +74,24 @@ describe("AI interpretation validation", () => {
     expect(getStatus()).toBe(400);
     expect(getBody()).toMatchObject({ code: "missing_body" });
   });
+
+  it("rejects an expired or missing auth token before workspace/provider access", async () => {
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      body: { workspaceId: "11111111-1111-1111-1111-111111111111", request: "dentists in Austin" },
+    });
+    await handler(req, res);
+    expect(getStatus()).toBe(401);
+    expect(getBody()).toMatchObject({ code: "auth_missing" });
+  });
+
+  it("rejects an invalid workspace before auth/provider access", async () => {
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      body: { workspaceId: "not-a-uuid", request: "dentists in Austin" },
+    });
+    await handler(req, res);
+    expect(getStatus()).toBe(400);
+    expect(getBody()).toMatchObject({ code: "workspace_invalid" });
+  });
 });
