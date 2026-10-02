@@ -4,7 +4,7 @@ import {
   OpenAIError,
   getOpenAIModel,
   openAIJson,
-} from "./_lib/openai";
+} from "./_lib/openai.ts";
 
 type VercelRequest = IncomingMessage & { body?: unknown };
 type VercelResponse = ServerResponse & { status(code: number): VercelResponse; json(body: unknown): void };
@@ -13,9 +13,14 @@ type JsonObject = Record<string, unknown>;
 export const maxDuration = 30;
 
 class ApiError extends Error {
-  constructor(readonly status: number, message: string, readonly code = "ai_error") {
+  readonly status: number;
+  readonly code: string;
+
+  constructor(status: number, message: string, code = "ai_error") {
     super(message);
     this.name = "ApiError";
+    this.status = status;
+    this.code = code;
   }
 }
 
