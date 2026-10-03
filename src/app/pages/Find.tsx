@@ -27,6 +27,7 @@ import {
 import { cn } from "../../utils/cn";
 import { AppLayout } from "../components/AppLayout";
 import { LeadsTable } from "../components/LeadsTable";
+import { RecentLeads } from "../components/RecentLeads";
 import {
   Badge,
   Btn,
@@ -599,25 +600,30 @@ export function FindPage() {
           {/* idle — while the workspace context resolves, mirror the empty-state
               card exactly so nothing shifts once the real state renders */}
           {phase === "idle" && !runError ? (
-            ctxLoading ? (
-              <Card className="p-5" aria-hidden="true">
-                <div className="flex flex-col items-center px-6 py-8 text-center">
-                  <Skel className="size-9 rounded-md" />
-                  <Skel className="mt-3 h-3 w-36 rounded" />
-                  <Skel className="mt-2 h-2 w-64 max-w-full rounded" />
-                  <Skel className="mt-1.5 h-2 w-52 max-w-full rounded" />
-                </div>
-              </Card>
-            ) : (
-              <Card className="p-5">
-                <EmptyState
-                  className="border-0 bg-transparent py-8"
-                  icon={<Search className="size-4" aria-hidden="true" />}
-                  title="Set your criteria above"
-                  description="Enter a business type and location, refine what matters, then press Find leads. Or describe what you want to Zybble AI on the right and it will fill the filters in for you."
-                />
-              </Card>
-            )
+            <>
+              {ctxLoading ? (
+                <Card className="p-5" aria-hidden="true">
+                  <div className="flex flex-col items-center px-6 py-8 text-center">
+                    <Skel className="size-9 rounded-md" />
+                    <Skel className="mt-3 h-3 w-36 rounded" />
+                    <Skel className="mt-2 h-2 w-64 max-w-full rounded" />
+                    <Skel className="mt-1.5 h-2 w-52 max-w-full rounded" />
+                  </div>
+                </Card>
+              ) : (
+                <Card className="p-5">
+                  <EmptyState
+                    className="border-0 bg-transparent py-8"
+                    icon={<Search className="size-4" aria-hidden="true" />}
+                    title="Set your criteria above"
+                    description="Enter a business type and location, refine what matters, then press Find leads. Or describe what you want to Zybble AI on the right and it will fill the filters in for you."
+                  />
+                </Card>
+              )}
+              {/* Recent workspace leads — real rows, strictly constrained inside
+                  the card so long names/emails never overflow or overlap. */}
+              <RecentLeads workspaceId={workspace?.id ?? null} />
+            </>
           ) : null}
 
           {/* results */}
