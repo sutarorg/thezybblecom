@@ -74,8 +74,9 @@ const RUN_STAGES = [
   "Resolving location",
   "Scanning businesses",
   "Collecting public data",
-  "Enriching contact information",
+  "Contact information",
   "Validating unique leads",
+  "Scoring lead quality",
   "Preparing results",
 ] as const;
 
@@ -191,6 +192,9 @@ export function FindPage() {
   const [searchId, setSearchId] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const timers = useRef<number[]>([]);
+  /* The search-run animation card — scrolled into view as soon as a search
+     starts so the user immediately sees the progress checklist. */
+  const runCardRef = useRef<HTMLDivElement | null>(null);
 
   /* ------------ AI interpretation ------------ */
   const [request, setRequest] = useState("");
@@ -208,6 +212,13 @@ export function FindPage() {
     },
     []
   );
+
+  /* When "Find leads" starts a search, bring the loading animation card into
+     view (smooth scroll, leaving room for the sticky app header). */
+  useEffect(() => {
+    if (phase !== "running") return;
+    runCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [phase]);
 
   /* The button stays clickable unless a search is already in flight (or the
      workspace context is still loading) — missing input is reported with a
@@ -594,7 +605,9 @@ export function FindPage() {
 
           {/* running */}
           {phase === "running" ? (
-            <SearchRunAnimation category={filters.category} location={filters.location} stage={runStage} />
+            <div ref={runCardRef} className="scroll-mt-16">
+              <SearchRunAnimation category={filters.category} location={filters.location} stage={runStage} />
+            </div>
           ) : null}
 
           {/* idle — while the workspace context resolves, mirror the empty-state

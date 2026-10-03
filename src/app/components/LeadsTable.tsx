@@ -98,7 +98,9 @@ export function LeadsTable({
   const [page, setPage] = useState(1);
   const searchMode = mode === "search-results";
   const visible = (id: LeadColumnId) => {
-    if (searchMode) return id !== "status" && id !== "list";
+    /* Search results (the "Leads collected" section on /find) hide status,
+       list and location columns. */
+    if (searchMode) return id !== "status" && id !== "list" && id !== "location";
     return (visibleColumns ? visibleColumns.includes(id) : true) && !(id === "list" && noLists);
   };
   const showSelection = !searchMode;
