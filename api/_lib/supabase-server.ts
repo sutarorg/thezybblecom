@@ -16,7 +16,7 @@
 // the configured value itself.
 //
 // NOTE: like the other files in api/_lib, this module is imported with the
-// emitted ".js" extension (see api/module-resolution.test.ts) because Vercel
+// emitted ".js" extension (see api/_tests/module-resolution.test.ts) because Vercel
 // compiles api/**/*.ts to .js without rewriting import specifiers.
 // ============================================================================
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";

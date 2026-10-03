@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import handler from "./health";
+import handler from "../health";
 
 function createMockReqRes(options: { method?: string; headers?: Record<string, string>; body?: unknown }) {
   const req = {

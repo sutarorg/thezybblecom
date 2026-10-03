@@ -22,7 +22,7 @@ vi.mock("node:dns/promises", () => ({
   },
 }));
 
-import handler from "./search-run";
+import handler from "../search-run";
 
 const SUPABASE_URL = "https://stub.supabase.co";
 const SUPABASE_KEY = "sb_publishable_stub_key";

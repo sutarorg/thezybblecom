@@ -141,9 +141,14 @@ describe("OpenAI retry and resilience handling", () => {
       });
       vi.stubGlobal("fetch", fetchMock);
 
-      const pending = openAIJson({ ...options, timeoutMs: 10 });
+      // Attach the rejection assertion before advancing the clock. Otherwise
+      // Node can report the expected rejection as unhandled between ticks.
+      const rejection = expect(openAIJson({ ...options, timeoutMs: 10 })).rejects.toMatchObject({
+        status: 504,
+        code: "provider_unreachable",
+      });
       await vi.advanceTimersByTimeAsync(6_000);
-      await expect(pending).rejects.toMatchObject({ status: 504, code: "provider_unreachable" });
+      await rejection;
       expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();

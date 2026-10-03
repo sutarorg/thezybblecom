@@ -19,7 +19,9 @@ import { fileURLToPath } from "node:url";
  * import inside `api/` written with the emitted `.js` extension.
  */
 
-const apiDir = dirname(fileURLToPath(import.meta.url));
+// Tests live below an underscore-prefixed directory so Vercel does not
+// register them as functions. Scan the parent `api/` source tree.
+const apiDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 function apiSourceFiles(dir: string): string[] {
   const out: string[] = [];

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import handler, { ApiError, pageResults, serpApiMaps } from "./search-run";
+import handler, { ApiError, pageResults, serpApiMaps } from "../search-run";
 
 afterEach(() => vi.unstubAllGlobals());
 
