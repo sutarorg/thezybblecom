@@ -1,7 +1,12 @@
 // ============================================================================
-// search-run — the Zybble lead engine.
+// search-run — the Zybble lead engine (Supabase Edge Function fallback).
 // Auth → workspace auth → entitlement → usage reservation → optional OpenAI
-// interpretation → SerpApi fetch → normalize → dedupe → persist → accounting.
+// interpretation → SerpApi fetch → normalize → dedupe → enrich → filter →
+// persist → accounting.
+//
+// Pipeline order (matches api/search-run.ts on Vercel):
+//   provider search → normalize → dedupe → cheap pre-checks → website
+//   enrichment → ALL selected refinements → save → return leads.
 // ============================================================================
 import {
   HttpError,
@@ -13,6 +18,7 @@ import {
   handleError,
   json,
   logActivity,
+  normalizeOpenState,
   openAIJson,
   requireWorkspaceRole,
   reserveLeads,
@@ -23,14 +29,21 @@ import {
   OPENAI_MODEL,
 } from "../_shared/index.ts";
 
-const MAX_PER_RUN = 240; // v1 cap per search (12 pages × 20)
-const MAX_BATCHES = 12;
+const MAX_PER_RUN = 240; // v1 cap per search
+const MAX_BATCHES_PER_PLAN = 12;
+const PAGE_SIZE = 20;
+const MAX_PROVIDER_PAGES_TOTAL = 30;
 const SEARCH_BUDGET_MS = 48_000;
 const PROVIDER_TIMEOUT_MS = 8_000;
-const WEBSITE_TIMEOUT_MS = 2_500;
+const ENRICHMENT_ROW_BUDGET_MS = 3_000;
+const ENRICHMENT_PAGE_TIMEOUT_MS = 1_500;
+// Rows are enriched in concurrent waves so a page of results never
+// serializes 20 × 3s website visits.
+const ENRICHMENT_WAVE = 8;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type LocalResult = Record<string, any>;
+type LeadRow = Record<string, unknown> & { dedupe_key: string };
 
 /* ------------------------------------------------------------------ */
 /* Deterministic fallback for legacy raw-query requests                 */
@@ -58,6 +71,16 @@ function fallbackInterpret(query: string) {
   };
 }
 
+/** Query plans mirror the Vercel function: broad phrasing variants. */
+function searchPlans(category: string, location: string | null) {
+  if (!location) return [category];
+  return [...new Set([
+    `${category} in ${location}`,
+    `${category} near ${location}`,
+    `${category} ${location}`,
+  ])];
+}
+
 /* ------------------------------------------------------------------ */
 /* Normalization + dedupe key                                          */
 /* ------------------------------------------------------------------ */
@@ -75,7 +98,7 @@ function domainOf(url: string | null | undefined) {
   }
 }
 
-function normalize(t: LocalResult, meta: { query: string; location: string | null }): Record<string, unknown> {
+function normalize(t: LocalResult, meta: { query: string; location: string | null }): LeadRow {
   const gps = t.gps_coordinates ?? {};
   const domain = domainOf(t.website);
   const phoneNorm = t.phone ? String(t.phone).replace(/\D+/g, "") : null;
@@ -88,6 +111,7 @@ function normalize(t: LocalResult, meta: { query: string; location: string | nul
     `n:${norm(t.title)}:${norm(t.address)}`;
 
   const email = extractEmail(t);
+  const size = providerBusinessSize(t);
 
   return {
     name: t.title ?? "Unknown business",
@@ -103,11 +127,11 @@ function normalize(t: LocalResult, meta: { query: string; location: string | nul
     rating: t.rating != null ? Number(t.rating) : null,
     reviews: t.reviews != null ? Number(t.reviews) : 0,
     price: t.price ?? null,
-    price_level: typeof t.price_level === "number" ? t.price_level : null,
-    business_size: typeof t.employee_count === "number" ? (t.employee_count >= 250 ? "enterprise" : t.employee_count >= 50 ? "medium" : "small") : "unknown",
-    employee_count: typeof t.employee_count === "number" ? t.employee_count : null,
-    business_size_source: typeof t.employee_count === "number" ? "provider" : "unknown",
-    business_size_confidence: typeof t.employee_count === "number" ? 0.95 : 0,
+    price_level: safePriceLevel(t),
+    business_size: size.business_size,
+    employee_count: size.employee_count,
+    business_size_source: size.business_size_source,
+    business_size_confidence: size.business_size_confidence,
     popular_times: t.popular_times ?? {},
     phone: t.phone ?? null,
     phone_normalized: phoneNorm,
@@ -126,7 +150,7 @@ function normalize(t: LocalResult, meta: { query: string; location: string | nul
     longitude: gps.longitude ?? null,
     plus_code: t.plus_code ?? null,
     hours: t.hours && typeof t.hours === "object" ? t.hours : {},
-    open_state: t.open_state ? (String(t.open_state).toLowerCase().includes("open") && !String(t.open_state).toLowerCase().includes("close") ? "open" : "closed") : "unknown",
+    open_state: normalizeOpenState(t.open_state ?? t.open_state_text ?? t.operating_hours_state),
     hours_display: t.open_state ?? null,
     services: extractExtensions(t, "services"),
     service_options: extractExtensions(t, "service_options"),
@@ -171,7 +195,16 @@ function toArray(value: unknown): string[] {
   return [String(value)];
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function safePriceLevel(t: LocalResult): number | null {
+  if (typeof t.price_level === "number" && Number.isFinite(t.price_level) && t.price_level >= 1 && t.price_level <= 4) {
+    return t.price_level;
+  }
+  const price = typeof t.price === "string" ? t.price.trim() : "";
+  if (/^\$+$/.test(price) && price.length <= 4) return price.length;
+  return null;
+}
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
 function extractExtensions(t: any, _key: string): string[] {
   const ext = t.extensions;
   if (!Array.isArray(ext)) return [];
@@ -188,14 +221,130 @@ function extractExtensions(t: any, _key: string): string[] {
   return [...new Set(lines)].slice(0, 12);
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractEmail(t: any): string | null {
   // SerpApi rarely returns an email; never fabricate one.
-  const candidate = t.email ?? t.emails?.[0] ?? t.contact?.email ?? null;
-  if (typeof candidate === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate)) return candidate;
+  const candidates = [
+    ...(Array.isArray(t.emails) ? t.emails : []),
+    t.email,
+    t.contact?.email,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate)) {
+      return candidate.trim().toLowerCase();
+    }
+  }
   return null;
 }
 
+function parseEmployeeCountValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return Math.round(value);
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) return null;
+  const range = text.match(/(\d[\d,]*)\s*(?:-|–|to)\s*(\d[\d,]*)\s+(?:employees|staff|team members|people)/i);
+  if (range) return Number(range[2].replace(/,/g, ""));
+  const plus = text.match(/(\d[\d,]*)\s*\+\s+(?:employees|staff|team members|people)/i);
+  if (plus) return Number(plus[1].replace(/,/g, ""));
+  const plain = text.match(/(?:employees|staff|team members|people|team of)\D{0,16}(\d[\d,]*)|(?:^|\b)(\d[\d,]*)\s+(?:employees|staff|team members|people)\b/i);
+  const raw = plain?.[1] ?? plain?.[2];
+  return raw ? Number(raw.replace(/,/g, "")) : null;
+}
+
+function sizeFromEmployeeCount(count: number | null, source: "provider" | "website") {
+  if (!count || count < 1) return { business_size: "unknown", employee_count: null, business_size_source: "unknown", business_size_confidence: 0 };
+  return {
+    business_size: count >= 250 ? "enterprise" : count >= 50 ? "medium" : "small",
+    employee_count: count,
+    business_size_source: source,
+    business_size_confidence: source === "provider" ? 0.95 : 0.75,
+  };
+}
+
+function providerBusinessSize(t: LocalResult) {
+  const directKeys = ["employee_count", "employees", "number_of_employees", "staff_count", "company_size"];
+  for (const key of directKeys) {
+    const count = parseEmployeeCountValue(t[key]);
+    if (count) return sizeFromEmployeeCount(count, "provider");
+  }
+  const ext = t.extensions;
+  if (Array.isArray(ext)) {
+    for (const group of ext) {
+      const values = Array.isArray(group?.values) ? group.values : [];
+      for (const value of values) {
+        const text = typeof value === "string" ? value : value?.text;
+        const count = parseEmployeeCountValue(text);
+        if (count) return sizeFromEmployeeCount(count, "provider");
+      }
+    }
+  }
+  return { business_size: "unknown", employee_count: null, business_size_source: "unknown", business_size_confidence: 0 };
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
+/* ------------------------------------------------------------------ */
+/* Refinements — same AND semantics as api/search-run.ts               */
+/* ------------------------------------------------------------------ */
+type AppliedFilters = {
+  requireWebsite: boolean;
+  requirePhone: boolean;
+  requireEmail: boolean;
+  openNow: boolean;
+  minRating: number | null;
+  priceLevel: number | null;
+  businessSize: string | null;
+};
+
+function appliedFilters(interpretation: Record<string, unknown>): AppliedFilters {
+  const nested = (interpretation.filters ?? {}) as Record<string, unknown>;
+  const minRating = nested.min_rating;
+  const priceLevel = interpretation.price_level;
+  return {
+    requireWebsite: Boolean(nested.require_website),
+    requirePhone: Boolean(interpretation.require_phone),
+    requireEmail: Boolean(interpretation.require_email),
+    openNow: Boolean(interpretation.open_now),
+    minRating: typeof minRating === "number" && Number.isFinite(minRating) ? minRating : null,
+    priceLevel: typeof priceLevel === "number" && Number.isFinite(priceLevel) ? priceLevel : null,
+    businessSize: ["small", "medium", "enterprise"].includes(String(interpretation.business_size)) ? String(interpretation.business_size) : null,
+  };
+}
+
+/**
+ * Cheap refinements that never change during enrichment run BEFORE website
+ * enrichment; refinements enrichment can discover (public email, business
+ * size) run after it. All selected refinements remain AND conditions.
+ */
+function matchesPreEnrichmentFilters(row: LeadRow, f: AppliedFilters) {
+  if (f.requireWebsite && !row.website) return false;
+  if (f.requirePhone && !row.phone) return false;
+  if (f.openNow && row.open_state !== "open") return false;
+  if (f.minRating != null && Number(row.rating ?? 0) < f.minRating) return false;
+  if (f.priceLevel != null && row.price_level != null && Number(row.price_level) !== f.priceLevel) return false;
+  if (f.requireEmail && !row.website && !row.emails?.length) return false;
+  if (f.businessSize && row.business_size === "unknown" && !row.website) return false;
+  return true;
+}
+
+function needsEnrichment(row: LeadRow, f: AppliedFilters) {
+  if (!row.website) return false;
+  if (f.requireEmail && !row.emails?.length) return true;
+  if (f.businessSize && row.business_size === "unknown") return true;
+  return false;
+}
+
+function matchesFilters(row: LeadRow, f: AppliedFilters) {
+  if (f.requireWebsite && !row.website) return false;
+  if (f.requirePhone && !row.phone) return false;
+  if (f.requireEmail && !(Array.isArray(row.emails) && row.emails.length)) return false;
+  if (f.openNow && row.open_state !== "open") return false;
+  if (f.minRating != null && Number(row.rating ?? 0) < f.minRating) return false;
+  if (f.priceLevel != null && row.price_level != null && Number(row.price_level) !== f.priceLevel) return false;
+  if (f.businessSize && row.business_size !== f.businessSize) return false;
+  return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Public-website enrichment (homepage + contact/about pages)           */
+/* ------------------------------------------------------------------ */
 function privateHost(hostname: string) {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host === "::1") return true;
@@ -206,7 +355,67 @@ function privateHost(hostname: string) {
   return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
 }
 
-async function enrichWebsiteRow(row: Record<string, unknown>, deadlineAt: number) {
+const EMAIL_RE = /(?<![\w.%+-])([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+)(?![\w.%+-])/gi;
+
+function stripHtml(html: string) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/&commat;|&#64;/gi, "@")
+    .replace(/\s+\[at\]\s+|\s+\(at\)\s+/gi, "@")
+    .replace(/\s+\[dot\]\s+|\s+\(dot\)\s+/gi, ".")
+    .replace(/<[^>]+>/g, " ");
+}
+
+function extractEmails(text: string, websiteDomain: string | null): string[] {
+  const normalized = stripHtml(text).toLowerCase();
+  const out = new Set<string>();
+  for (const match of normalized.matchAll(EMAIL_RE)) {
+    const email = match[1].replace(/^mailto:/, "").replace(/[.,;:]+$/, "");
+    if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(email)) continue;
+    if (/\.(png|jpe?g|gif|webp|svg|css|js)$/i.test(email)) continue;
+    const local = email.split("@")[0];
+    if (["example", "test", "invalid", "noreply", "no-reply"].includes(local)) continue;
+    if (websiteDomain) {
+      const emailDomain = email.split("@")[1].replace(/^www\./, "");
+      const siteRoot = websiteDomain.replace(/^www\./, "");
+      // Prefer same-domain public addresses. Permit subdomains both ways.
+      if (emailDomain !== siteRoot && !emailDomain.endsWith(`.${siteRoot}`) && !siteRoot.endsWith(`.${emailDomain}`)) {
+        continue;
+      }
+    }
+    out.add(email);
+  }
+  return [...out].slice(0, 8);
+}
+
+const CONTACT_PATHS = ["/", "/contact", "/contact-us", "/about", "/about-us"];
+
+async function fetchPublicPage(url: URL, timeoutMs: number): Promise<string> {
+  const addresses = await Promise.race([
+    Promise.all([
+      Deno.resolveDns(url.hostname, "A").catch(() => [] as string[]),
+      Deno.resolveDns(url.hostname, "AAAA").catch(() => [] as string[]),
+    ]).then((sets) => sets.flat()),
+    new Promise<string[]>((_, reject) => setTimeout(() => reject(new Error("DNS timeout")), timeoutMs)),
+  ]);
+  if (!addresses.length || addresses.some(privateHost)) throw new Error("Private or unresolvable host");
+  const response = await fetch(url, {
+    redirect: "error",
+    headers: { Accept: "text/html,text/plain;q=0.8", "User-Agent": "ZybbleBot/1.0 (+https://zybble.com)" },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok || !/text\/html|text\/plain|application\/xhtml\+xml/i.test(response.headers.get("content-type") ?? "")) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  return (await response.text()).slice(0, 300_000);
+}
+
+/**
+ * Visit the business's public website (homepage, contact, about) to discover
+ * a real public email and employee-count evidence. Never fabricates either.
+ */
+async function enrichWebsiteRow(row: LeadRow, deadlineAt: number): Promise<LeadRow> {
   const website = typeof row.website === "string" ? row.website : "";
   if (!website || Date.now() >= deadlineAt) return row;
   let url: URL;
@@ -217,48 +426,40 @@ async function enrichWebsiteRow(row: Record<string, unknown>, deadlineAt: number
   }
   if (!["http:", "https:"].includes(url.protocol) || privateHost(url.hostname)) return row;
 
-  try {
-    const timeoutMs = Math.max(1, Math.min(WEBSITE_TIMEOUT_MS, deadlineAt - Date.now()));
-    const addresses = await Promise.race([
-      Promise.all([
-        Deno.resolveDns(url.hostname, "A").catch(() => [] as string[]),
-        Deno.resolveDns(url.hostname, "AAAA").catch(() => [] as string[]),
-      ]).then((sets) => sets.flat()),
-      new Promise<string[]>((_, reject) => setTimeout(() => reject(new Error("DNS timeout")), timeoutMs)),
-    ]);
-    if (!addresses.length || addresses.some(privateHost)) return row;
-    const response = await fetch(url, {
-      redirect: "error",
-      headers: { Accept: "text/html,text/plain;q=0.8", "User-Agent": "ZybbleBot/1.0 (+https://zybble.com)" },
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!response.ok || !/text\/html|text\/plain|application\/xhtml\+xml/i.test(response.headers.get("content-type") ?? "")) return row;
-    const text = (await response.text()).slice(0, 300_000);
-    const siteDomain = domainOf(website)?.toLowerCase() ?? "";
-    const emails = new Set<string>(Array.isArray(row.emails) ? row.emails.map(String) : []);
-    for (const match of text.toLowerCase().matchAll(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+/gi)) {
-      const email = match[0].replace(/[.,;:]+$/, "");
-      const emailDomain = email.split("@")[1]?.replace(/^www\./, "") ?? "";
-      if (siteDomain && emailDomain !== siteDomain && !emailDomain.endsWith(`.${siteDomain}`)) continue;
-      emails.add(email);
-      if (emails.size >= 8) break;
+  const siteDomain = domainOf(website)?.toLowerCase() ?? null;
+  const emails = new Set<string>(Array.isArray(row.emails) ? row.emails.map(String) : []);
+  let combinedText = "";
+
+  for (const path of CONTACT_PATHS) {
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 50) break;
+    try {
+      const text = await fetchPublicPage(new URL(path, url), Math.min(ENRICHMENT_PAGE_TIMEOUT_MS, remaining));
+      combinedText += `\n${text}`;
+      for (const email of extractEmails(text, siteDomain)) emails.add(email);
+      // Enough public evidence — stop visiting more pages.
+      if (emails.size >= 4) break;
+    } catch {
+      // Public enrichment is opportunistic per page; no fabricated fallback.
     }
-    const employeeMatch = text.replace(/<[^>]+>/g, " ").match(/(?:team of|employees|staff|team members|people)\D{0,18}(\d[\d,]*)|(\d[\d,]*)\s+(?:employees|staff|team members|people)\b/i);
-    const employeeCount = employeeMatch ? Number((employeeMatch[1] ?? employeeMatch[2]).replace(/,/g, "")) : null;
-    const size = employeeCount ? (employeeCount >= 250 ? "enterprise" : employeeCount >= 50 ? "medium" : "small") : row.business_size;
-    const emailList = [...emails];
-    return {
-      ...row,
-      email: emailList[0] ?? row.email ?? null,
-      emails: emailList,
-      business_size: row.business_size === "unknown" && employeeCount ? size : row.business_size,
-      employee_count: row.business_size === "unknown" && employeeCount ? employeeCount : row.employee_count,
-      business_size_source: row.business_size === "unknown" && employeeCount ? "website" : row.business_size_source,
-      business_size_confidence: row.business_size === "unknown" && employeeCount ? 0.75 : row.business_size_confidence,
-    };
-  } catch {
-    return row;
   }
+
+  const employeeMatch = stripHtml(combinedText).match(
+    /(?:team of|employees|staff|team members|people)\D{0,18}(\d[\d,]*)|(\d[\d,]*)\s+(?:employees|staff|team members|people)\b/i
+  );
+  const employeeCount = employeeMatch ? Number((employeeMatch[1] ?? employeeMatch[2]).replace(/,/g, "")) : null;
+  const size = employeeCount ? sizeFromEmployeeCount(employeeCount, "website") : null;
+  const emailList = [...emails];
+
+  return {
+    ...row,
+    email: emailList[0] ?? row.email ?? null,
+    emails: emailList,
+    business_size: row.business_size === "unknown" && size ? size.business_size : row.business_size,
+    employee_count: row.business_size === "unknown" && size ? size.employee_count : row.employee_count,
+    business_size_source: row.business_size === "unknown" && size ? size.business_size_source : row.business_size_source,
+    business_size_confidence: row.business_size === "unknown" && size ? size.business_size_confidence : row.business_size_confidence,
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -292,6 +493,7 @@ Deno.serve(async (req) => {
     const f = (body.filters ?? null) as Record<string, unknown> | null;
     let interpretation: ReturnType<typeof fallbackInterpret>;
     let query: string;
+    let plans: string[];
 
     if (f) {
       const category = String(f.category ?? "").trim();
@@ -318,6 +520,7 @@ Deno.serve(async (req) => {
       (interpretation as Record<string, unknown>).price_level = f.priceLevel ? Number(f.priceLevel) : null;
       (interpretation as Record<string, unknown>).business_size = ["small", "medium", "enterprise"].includes(String(f.businessSize)) ? String(f.businessSize) : null;
       query = interpretation.q;
+      plans = searchPlans(category, location || null);
     } else {
       query = String(body.query ?? "").trim();
       if (!query || query.length < 2) throw new HttpError(400, "Describe the businesses you need.");
@@ -378,6 +581,7 @@ Deno.serve(async (req) => {
         status: "completed",
         model: OPENAI_MODEL,
       });
+      plans = [interpretation.q];
     }
 
     /* 2 — create search + job rows (status staging) */
@@ -420,80 +624,89 @@ Deno.serve(async (req) => {
       throw e;
     }
 
-    /* 4 — SerpApi pagination: controlled batches */
-    const collected: Record<string, unknown>[] = [];
+    /* 4 — SerpApi pagination: controlled batches across query plans */
+    const req = appliedFilters(interpretation as unknown as Record<string, unknown>);
+    const collected: LeadRow[] = [];
     const seenKeys = new Set<string>();
     let dedupeRemoved = 0;
-    let batches = 0;
+    let pagesTried = 0;
     let providerError: HttpError | null = null;
     let deadlineReached = false;
     const target = requestedCount;
     let ll: string | null = null;
 
     try {
-      while (collected.length < target && batches < MAX_BATCHES && !providerError) {
-        const remaining = deadlineAt - Date.now();
-        if (remaining <= 250) {
-          deadlineReached = true;
-          break;
-        }
-        const start = batches * 20;
-        let page: Record<string, unknown>;
-        try {
-          page = await serpApiMaps({
-            q: interpretation!.q,
-            ll,
-            start,
-            timeoutMs: Math.min(PROVIDER_TIMEOUT_MS, remaining),
-          });
-        } catch (e) {
-          providerError = e instanceof HttpError
-            ? e
-            : new HttpError(502, "The business-data provider failed. Try again shortly.", "provider_failed");
-          if (Date.now() >= deadlineAt) deadlineReached = true;
-          break;
-        }
-        const results: LocalResult[] = serpApiResults(page);
-        if (!results.length) break;
-        if (!ll) ll = serpApiLl(page, results);
-
-        const req = interpretation as unknown as Record<string, unknown>;
-        const needsEnrichment = Boolean(req.require_email || req.business_size);
-        const normalizedResults = await Promise.all(results.map(async (raw) => {
-          const normalized = normalize(raw, { query: interpretation!.q, location: interpretation!.location });
-          return needsEnrichment ? enrichWebsiteRow(normalized, deadlineAt) : normalized;
-        }));
-
-        for (const normalized of normalizedResults) {
-          if (interpretation.filters?.require_website && !normalized.website) continue;
-          if (req.require_phone && !normalized.phone) continue;
-          if (req.require_email && !(Array.isArray(normalized.emails) && normalized.emails.length)) continue;
-          if (req.open_now && normalized.open_state !== "open") continue;
-          const minR = interpretation.filters?.min_rating;
-          if (minR != null && Number(normalized.rating ?? 0) < minR) continue;
-          if (req.price_level != null && normalized.price_level != null && normalized.price_level !== req.price_level) continue;
-          if (req.business_size && normalized.business_size !== req.business_size) continue;
-
-          const key = String(normalized.dedupe_key);
-          if (seenKeys.has(key)) {
-            dedupeRemoved++;
-            continue;
-          }
-          seenKeys.add(key);
-          collected.push(normalized);
-          if (collected.length >= target) break;
-        }
+      searchLoop: for (const planQuery of plans) {
+        if (collected.length >= target || pagesTried >= MAX_PROVIDER_PAGES_TOTAL) break;
         if (Date.now() >= deadlineAt) {
           deadlineReached = true;
           break;
         }
-        batches++;
-        const pagination = page.serpapi_pagination && typeof page.serpapi_pagination === "object"
-          ? page.serpapi_pagination as Record<string, unknown>
-          : {};
-        const hasNext = Boolean(pagination.next);
-        if (results.length < 20 || !ll) break;
-        if (batches > 1 && !hasNext) break;
+        ll = null;
+        for (let batch = 0; batch < MAX_BATCHES_PER_PLAN && collected.length < target && pagesTried < MAX_PROVIDER_PAGES_TOTAL; batch++) {
+          const remaining = deadlineAt - Date.now();
+          if (remaining <= 250) {
+            deadlineReached = true;
+            break searchLoop;
+          }
+          pagesTried++;
+          let page: Record<string, unknown>;
+          try {
+            page = await serpApiMaps({
+              q: planQuery,
+              ll,
+              start: batch * PAGE_SIZE,
+              timeoutMs: Math.min(PROVIDER_TIMEOUT_MS, remaining),
+            });
+          } catch (e) {
+            providerError = e instanceof HttpError
+              ? e
+              : new HttpError(502, "The business-data provider failed. Try again shortly.", "provider_failed");
+            if (Date.now() >= deadlineAt) deadlineReached = true;
+            break searchLoop;
+          }
+          const results: LocalResult[] = serpApiResults(page);
+          if (!results.length) break;
+          if (!ll) ll = serpApiLl(page, results);
+
+          const normalizedBatch: LeadRow[] = [];
+          for (const raw of results) {
+            const normalized = normalize(raw, { query: planQuery, location: interpretation!.location });
+            const key = String(normalized.dedupe_key);
+            if (seenKeys.has(key)) {
+              dedupeRemoved++;
+              continue;
+            }
+            seenKeys.add(key);
+            normalizedBatch.push(normalized);
+          }
+
+          // normalize → dedupe → cheap pre-checks → enrich → ALL refinements
+          const pending = normalizedBatch.filter((row) => matchesPreEnrichmentFilters(row, req));
+          for (let i = 0; i < pending.length && collected.length < target; i += ENRICHMENT_WAVE) {
+            if (Date.now() >= deadlineAt) {
+              deadlineReached = true;
+              break;
+            }
+            const wave = pending.slice(i, i + ENRICHMENT_WAVE);
+            const processed = await Promise.all(
+              wave.map((row) => enrichWebsiteRow(row, Math.min(deadlineAt, Date.now() + ENRICHMENT_ROW_BUDGET_MS)))
+            );
+            for (const row of processed) {
+              if (collected.length >= target) break;
+              if (!matchesFilters(row, req)) continue;
+              collected.push(row);
+            }
+          }
+          if (deadlineReached) break searchLoop;
+
+          const pagination = page.serpapi_pagination && typeof page.serpapi_pagination === "object"
+            ? page.serpapi_pagination as Record<string, unknown>
+            : {};
+          const noMorePages = batch > 0 && !pagination.next;
+          if (results.length < PAGE_SIZE || noMorePages) break;
+          if (!ll) break;
+        }
       }
     } catch (e) {
       providerError = e instanceof HttpError
@@ -503,10 +716,14 @@ Deno.serve(async (req) => {
 
     if (providerError && collected.length === 0) throw providerError;
     if (deadlineReached && collected.length === 0) {
-      throw new HttpError(504, "The search timed out before any matching leads were collected. Please try again.", "search_timeout");
+      throw new HttpError(
+        504,
+        "The search ran out of time before any business matched every selected refinement. Try removing a refinement, broadening the location, or requesting fewer leads — then run it again.",
+        "search_timeout",
+      );
     }
 
-    /* 5 — rows are normalized and enriched; prepare them for persistence. */
+    /* 5 — rows are normalized, enriched, and filtered; prepare for persistence. */
     if (jobRow) await sb.from("lead_search_jobs").update({ status: "normalizing" }).eq("id", jobRow.id);
     const rows = collected.map((normalized) => ({
       ...normalized,
@@ -581,6 +798,10 @@ Deno.serve(async (req) => {
       : saved > 0
         ? `Search partially completed — ${saved} new lead${saved === 1 ? "" : "s"} collected`
         : "Search completed — no new matching leads were available";
+    const insights = [`Searched “${interpretation!.q}”.`, message];
+    if (req.requireEmail && saved < requestedCount) {
+      insights.push("Only businesses with a publicly listed email — from the provider or their own website — were included. Emails are never guessed.");
+    }
     return json({
       searchId: searchRow.id,
       leads: fresh,
@@ -592,9 +813,10 @@ Deno.serve(async (req) => {
         status,
         reason,
         message,
+        pagesSearched: pagesTried,
         interpretation,
         dedupeRemoved,
-        insights: [`Searched “${interpretation!.q}”.`, message],
+        insights,
       },
     });
   } catch (e) {

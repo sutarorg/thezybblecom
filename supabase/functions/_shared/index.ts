@@ -4,6 +4,10 @@
 // ============================================================================
 import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.0";
 import { OpenAIError, getOpenAIModel, openAIJson } from "./openai.ts";
+import { normalizeOpenState, type OpenState } from "./open-state.ts";
+
+export { normalizeOpenState };
+export type { OpenState };
 
 export const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
