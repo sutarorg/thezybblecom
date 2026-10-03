@@ -10,6 +10,7 @@ export type ParsedApiResponse<T> = {
 
 function defaultMessage(service: ApiService, status: number) {
   if (status === 401) return "Your session expired — sign in again.";
+  if (status === 402) return `The ${service} service ran out of usage quota. An administrator must review the provider plan and billing before it works again.`;
   if (status === 403) return "You don't have access to complete that action.";
   if (status === 408 || status === 504) return `The ${service} service timed out. Please try again.`;
   if (status === 429) return `The ${service} service is busy or rate-limited. Please try again shortly.`;

@@ -15,6 +15,7 @@ import { ArrowUpRight, FileSearch, Mail, Phone, Star } from "lucide-react";
 import { LeadAvatar } from "./LeadsTable";
 import { Badge, Card, EmptyState, SectionTitle, Skel } from "./ui";
 import type { Lead } from "../data/types";
+import { truncateBusinessName } from "../lib/text";
 import { listLeads } from "../services/api";
 
 export function RecentLeadsSkeleton({ rows = 3 }: { rows?: number }) {
@@ -113,15 +114,26 @@ export function RecentLeadsCard({
         <ul className="divide-y divide-black/[0.04]">
           {leads.map((lead) => (
             <li key={lead.id} className="min-w-0">
+              {/* The whole row carries the complete business name: `title`
+                  exposes it as a hover/focus tooltip and aria-label keeps the
+                  full name in the accessible name even when the visible
+                  label is truncated. */}
               <a
                 href={`/leads/${lead.id}`}
-                className="group flex items-center gap-3 px-4 py-2.5 transition-colors hover:bg-neutral-50/70"
+                title={lead.name}
+                aria-label={`View ${lead.name}`}
+                className="group flex min-w-0 items-center gap-3 px-4 py-2.5 transition-colors hover:bg-neutral-50/70"
               >
                 <LeadAvatar lead={lead} className="shrink-0" />
                 <span className="min-w-0 flex-1">
-                  {/* Long names truncate — they never wrap past the card or
-                      overlap the meta block on the right. */}
-                  <span className="block truncate text-xs font-medium text-ink">{lead.name}</span>
+                  {/* Names over 26 characters are cut with an ellipsis, and
+                      CSS `truncate` (min-width: 0 + overflow: hidden +
+                      nowrap + text-overflow) still guards narrower widths —
+                      a long name can never wrap, overlap or push the meta
+                      block outside the card. */}
+                  <span className="block truncate whitespace-nowrap text-xs font-medium text-ink">
+                    {truncateBusinessName(lead.name)}
+                  </span>
                   <span className="mt-0.5 block truncate text-[11px] text-ink-mute">
                     {[lead.category, lead.city || lead.state].filter(Boolean).join(" · ") || "—"}
                   </span>

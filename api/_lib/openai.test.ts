@@ -71,11 +71,14 @@ describe("OpenAI server client", () => {
     vi.restoreAllMocks();
   });
 
-  it("maps timeout and malformed successful responses", async () => {
+  it("maps network, timeout and malformed successful responses", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     process.env.OPENAI_API_KEY = "test-key";
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new DOMException("timed out", "TimeoutError")));
-    await expect(openAIJson({ ...options, timeoutMs: 10 })).rejects.toMatchObject({ status: 504, code: "provider_unreachable" });
+    await expect(openAIJson({ ...options, timeoutMs: 10 })).rejects.toMatchObject({ status: 504, code: "provider_timeout" });
+
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("fetch failed")));
+    await expect(openAIJson(options)).rejects.toMatchObject({ status: 502, code: "provider_network" });
 
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("not-json", { status: 200 })));
     await expect(openAIJson(options)).rejects.toMatchObject({ status: 502, code: "malformed_response" });
@@ -145,7 +148,7 @@ describe("OpenAI retry and resilience handling", () => {
       // Node can report the expected rejection as unhandled between ticks.
       const rejection = expect(openAIJson({ ...options, timeoutMs: 10 })).rejects.toMatchObject({
         status: 504,
-        code: "provider_unreachable",
+        code: "provider_timeout",
       });
       await vi.advanceTimersByTimeAsync(6_000);
       await rejection;
@@ -204,17 +207,136 @@ describe("OpenAI retry and resilience handling", () => {
     vi.restoreAllMocks();
   });
 
-  it("treats a 200 response carrying an error body as a failure", async () => {
+  it("treats a 200 response carrying an error body as a failure, classified by its error code", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     process.env.OPENAI_API_KEY = "test-key";
+    // A gateway-style 200 carrying insufficient_quota is a billing failure,
+    // NOT a rate limit — and it must not be retried.
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      error: { message: "Insufficient quota", code: "insufficient_quota", status: 429 },
+      error: { message: "You exceeded your current quota", code: "insufficient_quota", status: 429 },
     }), { status: 200 })));
 
     await expect(openAIJson(options)).rejects.toMatchObject({
-      status: 429,
-      code: "rate_limited",
+      status: 402,
+      code: "provider_quota",
     });
+    vi.restoreAllMocks();
+  });
+});
+
+describe("OpenAI failure-class accuracy", () => {
+  it("fails fast on a 429 insufficient_quota — never labels it a rate limit, never retries", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    process.env.OPENAI_API_KEY = "sk-test-secret-key";
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: {
+        message: "You exceeded your current quota, please check your plan and billing details.",
+        type: "insufficient_quota",
+        code: "insufficient_quota",
+      },
+    }), { status: 429 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await openAIJson(options).catch((e: OpenAIError) => e);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(error).toBeInstanceOf(OpenAIError);
+    expect(error).toMatchObject({
+      status: 402,
+      code: "provider_quota",
+      message: expect.stringContaining("quota"),
+    });
+    expect(error.message).not.toContain("rate-limited");
+    expect(error.message).not.toContain("sk-test-secret-key");
+    vi.restoreAllMocks();
+  });
+
+  it("fails fast on a spend-limit 429 (project_spend_limit_exceeded)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    process.env.OPENAI_API_KEY = "test-key";
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: { message: "The project reached its spend limit.", code: "project_spend_limit_exceeded" },
+    }), { status: 429 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(openAIJson(options)).rejects.toMatchObject({ status: 402, code: "provider_quota" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    vi.restoreAllMocks();
+  });
+
+  it("retries a genuine 429 rate_limit_exceeded and then succeeds", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    process.env.OPENAI_API_KEY = "test-key";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: "Rate limit reached for requests", type: "rate_limit_error", code: "rate_limit_exceeded" },
+      }), { status: 429, headers: { "retry-after": "0" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ output_text: JSON.stringify({ value: "recovered" }) }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(openAIJson(options)).resolves.toEqual({ value: "recovered" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.restoreAllMocks();
+  });
+
+  it("refuses to retry sooner than a Retry-After that exceeds the function budget", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    process.env.OPENAI_API_KEY = "test-key";
+    const fetchMock = vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: { message: "Rate limit reached", code: "rate_limit_exceeded" } }),
+      { status: 429, headers: { "retry-after": "45" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(openAIJson(options)).rejects.toMatchObject({ status: 429, code: "rate_limited" });
+    // One attempt only: 45s exceeds the retry budget, so no sooner-than-asked retry.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    vi.restoreAllMocks();
+  });
+
+  it("classifies a non-model 400 as a request failure, not a rate limit, and does not retry", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    process.env.OPENAI_API_KEY = "test-key";
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: { message: "Unsupported parameter: 'max_tokens'", code: "unsupported_parameter", type: "invalid_request_error" },
+    }), { status: 400 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(openAIJson(options)).rejects.toMatchObject({
+      status: 502,
+      code: "provider_request_invalid",
+      message: "Zybble AI couldn't process that request. Please try rephrasing it.",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    vi.restoreAllMocks();
+  });
+
+  it("classifies a 503 model overload as unavailable and retries it", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    process.env.OPENAI_API_KEY = "test-key";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: "The model is overloaded", type: "server_is_overloaded" },
+      }), { status: 503, headers: { "retry-after": "0" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ output_text: JSON.stringify({ value: "ok" }) }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(openAIJson(options)).resolves.toEqual({ value: "ok" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.restoreAllMocks();
+  });
+
+  it("still maps an unlabeled bare 429 to a retryable rate limit", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    process.env.OPENAI_API_KEY = "test-key";
+    const fetchMock = vi.fn().mockResolvedValue(new Response("too many requests", { status: 429, headers: { "retry-after": "0" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Without an error code there is no quota evidence: treat the 429 as a
+    // genuine rate limit — retried across all attempts, then reported.
+    await expect(openAIJson(options)).rejects.toMatchObject({ status: 429, code: "rate_limited" });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     vi.restoreAllMocks();
   });
 });

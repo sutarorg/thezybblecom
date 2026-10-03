@@ -46,6 +46,7 @@ export async function readFunctionError(error: any, functionName = "requested", 
       }
       if (status === 404) return `The requested Edge Function "${functionName}" is not deployed.`;
       if (status === 401) return "Your session expired — sign in again.";
+      if (status === 402) return `The ${service} service ran out of usage quota. An administrator must review the provider plan and billing before it works again.`;
       if (status === 403) return "You don't have access to complete that action.";
       if (status === 429) return `The ${service} service is busy or rate-limited. Please try again shortly.`;
     }

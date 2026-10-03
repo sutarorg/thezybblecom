@@ -1,21 +1,39 @@
 // Shared OpenAI Responses API client used by both Vercel and Supabase Edge
 // server runtimes. This module is deliberately web-standard and server-only.
+// The API key is read exclusively from the server runtime environment
+// (OPENAI_API_KEY) — it is never imported by browser code, never logged, and
+// never interpolated into an error message.
 //
-// Robustness contract (mirrored in api/_lib/openai.ts):
-// - transient provider failures (429 rate limit, 5xx, network/timeout) are
-//   retried with bounded backoff inside the caller's time budget;
-// - persistent failures surface as precise, secret-free OpenAIError codes;
+// Robustness contract (mirrored in api/_lib/openai.ts),
+// aligned with https://developers.openai.com/api/docs/guides/rate-limits
+// and the platform error-code reference:
+// - errors are classified by the provider's status AND error.code/error.type,
+//   never by status alone. Notably a 429 is a transient rate limit ONLY when
+//   the provider reports a rate-limit condition; the same status carrying
+//   insufficient_quota / project_spend_limit_exceeded is a billing failure
+//   that no amount of retrying will fix;
+// - transient conditions (genuine 429s, 408, 5xx/503 overload, network and
+//   timeout failures) are retried with exponential backoff plus jitter inside
+//   the caller's time budget, honoring Retry-After as a minimum delay (and
+//   refusing to retry sooner than the provider asked);
+// - authentication, quota, malformed-request and malformed-response failures
+//   fail fast with precise, secret-free OpenAIError codes, each with its own
+//   user-friendly message;
 // - malformed/empty/incomplete provider output is never passed through.
 
 export type OpenAIErrorCode =
   | "missing_key"
-  | "provider_unreachable"
   | "provider_auth"
+  | "provider_quota"
   | "rate_limited"
-  | "empty_response"
-  | "malformed_response"
+  | "provider_request_invalid"
+  | "provider_timeout"
+  | "provider_network"
+  | "provider_unreachable"
   | "provider_unavailable"
-  | "model_invalid";
+  | "model_invalid"
+  | "empty_response"
+  | "malformed_response";
 
 export class OpenAIError extends Error {
   constructor(
@@ -79,49 +97,54 @@ function responseText(payload: Record<string, unknown>) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Retry policy                                                        */
+/* Provider error classification                                       */
 /* ------------------------------------------------------------------ */
-const MAX_ATTEMPTS = 3;
-const RETRY_SLACK_MS = 4_000; // wall-clock headroom for retries of FAST failures
-const MAX_BACKOFF_MS = 2_000;
 
-function isRetryableStatus(status: number) {
-  return status === 429 || status === 408 || status >= 500;
+/** Normalized view of the provider's error object (code/type/message). */
+type ProviderErrorInfo = { code: string; type: string; message: string };
+
+function providerErrorInfo(payload: Record<string, unknown>): ProviderErrorInfo | null {
+  const error = payload.error && typeof payload.error === "object"
+    ? (payload.error as Record<string, unknown>)
+    : null;
+  if (!error) return null;
+  return {
+    code: typeof error.code === "string" ? error.code.toLowerCase() : "",
+    type: typeof error.type === "string" ? error.type.toLowerCase() : "",
+    message: typeof error.message === "string" ? error.message.toLowerCase() : "",
+  };
 }
 
-function isTimeoutError(error: unknown) {
-  return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+/**
+ * A 429 is a transient rate limit ONLY when the provider says so. The same
+ * status is also used for exhausted credit balances and enforced spend
+ * limits (error.code `insufficient_quota` / `project_spend_limit_exceeded`
+ * or type `insufficient_quota`) — billing conditions that never recover by
+ * retrying and must be reported as quota failures instead of "rate-limited".
+ */
+export function isQuotaError(info: ProviderErrorInfo | null) {
+  if (!info) return false;
+  if (info.code.includes("insufficient_quota") || info.code.includes("spend_limit_exceeded")) return true;
+  if (info.type.includes("insufficient_quota")) return true;
+  if (info.type.includes("billing")) return true;
+  return /exceeded (your )?current quota/.test(info.message);
 }
 
-function isNetworkError(error: unknown) {
-  return error instanceof TypeError || error instanceof Error && /fetch|network|ECONNRESET|ECONNREFUSED|ENOTFOUND|socket/i.test(error.message);
+/** True only for failures a retry can plausibly fix. */
+function isTransientFailure(status: number, info: ProviderErrorInfo | null) {
+  if (status === 408 || status >= 500) return true; // timeout / outage / 503 overload
+  if (status === 429) return !isQuotaError(info);   // genuine rate limit only
+  return false;
 }
-
-/** Parse Retry-After (seconds or HTTP-date); clamped to [0, MAX_BACKOFF_MS]. */
-function retryAfterMs(response: Response | null | undefined) {
-  const raw = response?.headers?.get("retry-after");
-  if (!raw) return 0;
-  const seconds = Number(raw);
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(MAX_BACKOFF_MS, seconds * 1_000);
-  const date = Date.parse(raw);
-  if (!Number.isNaN(date)) return Math.min(MAX_BACKOFF_MS, Math.max(0, date - Date.now()));
-  return 0;
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-type AttemptFailure = { error: OpenAIError; response: Response | null };
 
 /** Classify a non-OK provider response; never includes secrets. */
 function failureFromResponse(response: Response, payload: Record<string, unknown>, model: string): OpenAIError {
-  const providerError = payload.error && typeof payload.error === "object"
-    ? (payload.error as Record<string, unknown>)
-    : null;
-  const message = providerError && typeof providerError.message === "string" ? providerError.message.toLowerCase() : "";
-  const errorCode = providerError && typeof providerError.code === "string" ? providerError.code.toLowerCase() : "";
+  const info = providerErrorInfo(payload);
+  const message = info?.message ?? "";
+  const errorCode = info?.code ?? "";
 
+  // 401 invalid_api_key / 403 permission errors — the server-side key is
+  // rejected; users cannot fix this by retrying or rephrasing.
   if (response.status === 401 || response.status === 403) {
     return new OpenAIError(502, "The AI provider rejected the server credentials.", "provider_auth");
   }
@@ -136,13 +159,75 @@ function failureFromResponse(response: Response, payload: Record<string, unknown
     );
   }
   if (response.status === 429) {
+    if (isQuotaError(info)) {
+      return new OpenAIError(
+        402,
+        "Zybble AI ran out of usage quota. An administrator needs to review the AI provider plan and billing before AI features work again.",
+        "provider_quota",
+      );
+    }
     return new OpenAIError(429, "Zybble AI is rate-limited. Please try again shortly.", "rate_limited");
   }
   if (response.status >= 500 || response.status === 408) {
     return new OpenAIError(502, "Zybble AI is temporarily unavailable. Please try again shortly.", "provider_unavailable");
   }
-  return new OpenAIError(502, "Zybble AI couldn't process that request. Please try rephrasing it.", "provider_unavailable");
+  // 4xx without a more specific meaning: our request was malformed for the
+  // provider (bad input, unsupported parameter). Never retried, never
+  // labeled a rate limit.
+  return new OpenAIError(502, "Zybble AI couldn't process that request. Please try rephrasing it.", "provider_request_invalid");
 }
+
+/** Log-safe category for metrics; mirrors failureFromResponse without bodies. */
+function failureCategory(status: number, info: ProviderErrorInfo | null): OpenAIErrorCode {
+  if (status === 401 || status === 403) return "provider_auth";
+  if (status === 429) return isQuotaError(info) ? "provider_quota" : "rate_limited";
+  if (status >= 500 || status === 408) return "provider_unavailable";
+  return "provider_request_invalid";
+}
+
+/* ------------------------------------------------------------------ */
+/* Retry policy — exponential backoff with jitter, Retry-After aware   */
+/* ------------------------------------------------------------------ */
+const MAX_ATTEMPTS = 3;
+const RETRY_SLACK_MS = 4_000; // wall-clock headroom for retries of FAST failures
+const BASE_BACKOFF_MS = 400;
+const MAX_BACKOFF_MS = 2_000;
+
+function isTimeoutError(error: unknown) {
+  return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+}
+
+function isNetworkError(error: unknown) {
+  return error instanceof TypeError || error instanceof Error && /fetch|network|ECONNRESET|ECONNREFUSED|ENOTFOUND|socket/i.test(error.message);
+}
+
+/**
+ * Parse Retry-After (seconds delta or HTTP-date) as raw milliseconds.
+ * Deliberately NOT clamped: when the provider asks for a longer wait than
+ * this short-lived function can honor, the correct response is to stop
+ * retrying rather than to retry sooner than requested.
+ */
+function retryAfterMs(response: Response | null | undefined) {
+  const raw = response?.headers?.get?.("retry-after");
+  if (!raw) return 0;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
+  const date = Date.parse(raw);
+  if (!Number.isNaN(date)) return Math.max(0, date - Date.now());
+  return 0;
+}
+
+/** Exponential backoff with ±25% jitter (doubles per attempt, capped). */
+function backoffMs(attempt: number) {
+  const exp = Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** (attempt - 1));
+  return exp * (0.75 + Math.random() * 0.5);
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type AttemptFailure = { error: OpenAIError; response: Response | null };
 
 export async function openAIJson(options: {
   instructions: string;
@@ -205,13 +290,13 @@ export async function openAIJson(options: {
             timedOut ? 504 : 502,
             timedOut
               ? "Zybble AI took too long to respond. Please try again."
-              : "Zybble AI couldn't be reached. Please try again shortly.",
-            "provider_unreachable",
+              : "Zybble AI couldn't reach the AI provider. Please try again shortly.",
+            timedOut ? "provider_timeout" : "provider_network",
           ),
           response: null,
         };
         if (attempt < MAX_ATTEMPTS && overallDeadline - Date.now() > 1_000) {
-          await sleep(Math.min(400 * attempt, MAX_BACKOFF_MS));
+          await sleep(backoffMs(attempt));
           continue;
         }
       }
@@ -238,6 +323,7 @@ export async function openAIJson(options: {
     }
 
     if (!response.ok) {
+      const info = providerErrorInfo(payload);
       // Well-known statuses are classified by the status itself so a
       // non-JSON error body can never mask the real failure.
       const knownStatus =
@@ -254,27 +340,27 @@ export async function openAIJson(options: {
           status: response.status,
           model,
           attempt,
-          category:
-            response.status === 401 || response.status === 403
-              ? "provider_auth"
-              : response.status === 429
-                ? "rate_limited"
-                : response.status >= 500
-                  ? "provider_unavailable"
-                  : "provider_request",
+          category: failureCategory(response.status, info),
+          providerCode: info?.code || undefined,
+          providerType: info?.type || undefined,
         });
         lastFailure = { error: failureFromResponse(response, payload, model), response };
       }
-      // Transient provider conditions are retried within the time budget.
+      // Only transient conditions (genuine rate limits, timeouts, 5xx,
+      // overload) are retried — auth, quota and request-shape failures are
+      // final by definition. The provider's Retry-After is a MINIMUM wait:
+      // when it exceeds this short-lived function's budget we stop and
+      // report the failure instead of retrying sooner than asked.
       if (
         attempt < MAX_ATTEMPTS &&
-        isRetryableStatus(response.status) &&
-        lastFailure.error.code !== "model_invalid" &&
+        isTransientFailure(response.status, info) &&
         overallDeadline - Date.now() > 1_000
       ) {
-        const backoff = Math.max(retryAfterMs(response), Math.min(400 * attempt, MAX_BACKOFF_MS));
-        await sleep(backoff);
-        continue;
+        const serverWait = retryAfterMs(response);
+        if (serverWait <= MAX_BACKOFF_MS) {
+          await sleep(Math.max(serverWait, backoffMs(attempt)));
+          continue;
+        }
       }
       throw lastFailure.error;
     }
@@ -289,12 +375,23 @@ export async function openAIJson(options: {
       throw new OpenAIError(502, "Zybble AI returned malformed data. Please try again.", "malformed_response");
     }
 
-    // Some gateways return 200 with an error body — treat it as a failure.
+    // Some gateways return 200 with an error body — classify and (only for
+    // genuine transient rate limits / overloads) retry it like the real
+    // status. Quota and auth errors in this shape fail just as fast.
     if (payload.error && typeof payload.error === "object") {
       const errorRecord = payload.error as Record<string, unknown>;
       const errorStatus = typeof errorRecord.status === "number" ? errorRecord.status : response.status;
+      const info = providerErrorInfo(payload);
       const failure = failureFromResponse({ status: errorStatus } as Response, payload, model);
       console.warn("openai error payload with 200 status", { model, code: failure.code });
+      if (
+        attempt < MAX_ATTEMPTS &&
+        isTransientFailure(errorStatus, info) &&
+        overallDeadline - Date.now() > 1_000
+      ) {
+        await sleep(backoffMs(attempt));
+        continue;
+      }
       throw failure;
     }
 
