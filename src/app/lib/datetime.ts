@@ -1,14 +1,12 @@
 export type DateFormat = "MMM D, YYYY" | "D MMM YYYY" | "YYYY-MM-DD";
 
 export type RuntimePreferences = {
-  appearance: "system" | "light" | "dark";
   timezone: string;
   language: "en" | "es" | "fr" | "de";
   date_format: DateFormat;
 };
 
 const DEFAULT_PREFS: RuntimePreferences = {
-  appearance: "system",
   timezone: "UTC",
   language: "en",
   date_format: "MMM D, YYYY",
@@ -20,7 +18,15 @@ const listeners = new Set<() => void>();
 function readPrefs(): RuntimePreferences {
   try {
     const raw = localStorage.getItem("zybble.preferences");
-    return raw ? { ...DEFAULT_PREFS, ...JSON.parse(raw) } : DEFAULT_PREFS;
+    if (!raw) return DEFAULT_PREFS;
+    const parsed = JSON.parse(raw) as Partial<RuntimePreferences>;
+    // Only known preference keys are kept — a legacy "appearance" value from
+    // an older build is dropped here for good.
+    return {
+      timezone: typeof parsed.timezone === "string" && parsed.timezone ? parsed.timezone : DEFAULT_PREFS.timezone,
+      language: parsed.language ?? DEFAULT_PREFS.language,
+      date_format: parsed.date_format ?? DEFAULT_PREFS.date_format,
+    };
   } catch {
     return DEFAULT_PREFS;
   }
@@ -37,7 +43,7 @@ export function setRuntimePreferences(next: Partial<RuntimePreferences>) {
   } catch {
     /* storage unavailable */
   }
-  applyAppearance(prefs.appearance);
+  applyLightAppearance();
   listeners.forEach((fn) => fn());
 }
 
@@ -46,11 +52,16 @@ export function subscribePreferences(fn: () => void) {
   return () => listeners.delete(fn);
 }
 
-export function applyAppearance(appearance = prefs.appearance) {
+/**
+ * Zybble is light-mode only. The theme is pinned to light regardless of any
+ * stored preference or the operating system's color scheme, so dark mode can
+ * never be activated and the browser never auto-darkens form controls or
+ * scrollbars.
+ */
+export function applyLightAppearance() {
   const root = document.documentElement;
-  const dark = appearance === "dark" || (appearance === "system" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
-  root.dataset.theme = dark ? "dark" : "light";
-  root.style.colorScheme = dark ? "dark" : "light";
+  root.dataset.theme = "light";
+  root.style.colorScheme = "light";
 }
 
 export function formatAppDate(value: string | Date, options?: { includeTime?: boolean }) {

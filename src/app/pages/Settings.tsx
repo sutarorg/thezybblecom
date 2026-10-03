@@ -119,8 +119,9 @@ export function SettingsPage() {
   const [nExport, setNExport] = useState(true);
   const [nDigest, setNDigest] = useState(false);
   const [nProduct, setNProduct] = useState(false);
-  /* preferences */
-  const [prefs, setPrefs] = useState<UserPreferences>({ appearance: "system", timezone: "UTC", language: "en", date_format: "MMM D, YYYY" });
+  /* preferences — the interface is permanently light mode, so appearance is
+     not a preference anymore; only locale formatting is configurable. */
+  const [prefs, setPrefs] = useState<UserPreferences>({ timezone: "UTC", language: "en", date_format: "MMM D, YYYY" });
   const [savingPrefs, setSavingPrefs] = useState(false);
   const [sessions, setSessions] = useState<AppSessionRecord[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
@@ -429,7 +430,6 @@ export function SettingsPage() {
                 <SectionTitle title="Preferences" description="How the product behaves for you." />
               </div>
               <div className="grid gap-3 px-4 py-5 sm:grid-cols-2 sm:px-5">
-                <SelectField label="Appearance" value={prefs.appearance} onChange={(v) => setPrefs((p) => ({ ...p, appearance: v as UserPreferences["appearance"] }))} options={["system", "light", "dark"]} />
                 <SelectField label="Timezone" value={prefs.timezone} onChange={(v) => setPrefs((p) => ({ ...p, timezone: v }))} options={["UTC", "America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London", "Europe/Paris", "Asia/Kolkata"]} />
                 <SelectField label="Language" value={prefs.language} onChange={(v) => setPrefs((p) => ({ ...p, language: v as UserPreferences["language"] }))} options={["en", "es", "fr", "de"]} />
                 <SelectField label="Date format" value={prefs.date_format} onChange={(v) => setPrefs((p) => ({ ...p, date_format: v as UserPreferences["date_format"] }))} options={["MMM D, YYYY", "D MMM YYYY", "YYYY-MM-DD"]} />
