@@ -1,11 +1,14 @@
 /**
  * Zybble Assistant — DeepSeek chatbot grounding.
  *
- * The chatbot answers with Puter.js (DeepSeek V3.2), but its knowledge is
- * still the reviewed knowledge base in ./knowledge.ts: every intent is
- * flattened into a fact sheet that becomes the system prompt. That keeps the
- * CONTENT RULE the static assistant had — answers only state facts that
- * appear elsewhere on the public site; nothing is invented.
+ * The chatbot answers through the Zybble backend (/api/ai-chat — DeepSeek
+ * V3.2 on Puter's server-side API; no Puter.js in the browser, no puter.com
+ * sign-in), but its knowledge is still the reviewed knowledge base in
+ * ./knowledge.ts: every intent is flattened into a fact sheet that becomes
+ * the system prompt. That keeps the CONTENT RULE the static assistant had —
+ * answers only state facts that appear elsewhere on the public site; nothing
+ * is invented. The backend pins the conversation shape to this assistant via
+ * ASSISTANT_MARKER below (kept in sync with api/ai-chat.ts).
  */
 
 import { INTENTS, type AnswerBlock } from "./knowledge";
@@ -16,6 +19,14 @@ export const SUGGESTED_PROMPTS = [
   "How does Zybble find business leads?",
   "Which plan should I choose?",
 ] as const;
+
+/**
+ * Opening line of the assistant system prompt. The /api/ai-chat route pins
+ * the proxy to this product assistant by requiring this exact marker in the
+ * first (system) message — keep it byte-identical to ASSISTANT_MARKER in
+ * api/ai-chat.ts (a test in api/_tests/ai-chat.test.ts enforces the sync).
+ */
+export const ASSISTANT_MARKER = 'You are "Ask Zybble", the assistant on the Zybble website';
 
 /** Flatten answer blocks into compact plain-text lines for the fact sheet. */
 function flattenAnswer(blocks: AnswerBlock[]): string[] {
@@ -47,7 +58,7 @@ export function assistantSystemPrompt(): string {
   );
 
   cachedPrompt = [
-    'You are "Ask Zybble", the assistant on the Zybble website. Zybble (zybble.com) is an AI-powered business lead discovery tool: you describe the businesses you need in plain language, and Zybble finds them, structures the data into leads, and helps you work them.',
+    `${ASSISTANT_MARKER}. Zybble (zybble.com) is an AI-powered business lead discovery tool: you describe the businesses you need in plain language, and Zybble finds them, structures the data into leads, and helps you work them.`,
     "",
     "Answer questions about Zybble using ONLY the fact sheet below. If the answer is not in the fact sheet, say you're not sure and point the visitor to the contact page (/contact). Never invent features, prices, limits, or guarantees.",
     "",

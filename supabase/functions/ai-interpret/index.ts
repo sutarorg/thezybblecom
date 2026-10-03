@@ -1,27 +1,67 @@
 // ============================================================================
-// ai-interpret — authorization + usage gate for Zybble AI interpretation.
+// ai-interpret — authorization, usage accounting, and the DeepSeek V3.2
+// interpretation itself, all server-side (Supabase Edge twin of
+// /api/ai-interpret, sharing the same response contract).
 //
-// The interpretation itself runs in the browser through Puter.js
-// (deepseek/deepseek-v3.2), so this function performs no AI-provider call
-// and reads no provider key. It keeps the server-side guarantees the flow
-// always had, in the same order: the caller's session, workspace
-// membership, plan entitlement, and one ai_requests usage row.
+// The interpretation used to run in the browser through Puter.js after this
+// function authorized it, which pushed users into a puter.com sign-in. It now
+// runs here through Puter's server-side API (PUTER_AUTH_TOKEN), keeping every
+// guarantee the gate always had, in the same order: the caller's session,
+// workspace membership, plan entitlement, the (validated, clamped)
+// interpretation, and one ai_requests usage row.
 // It never calls SerpApi, writes leads, or consumes lead quota.
 // ============================================================================
 import {
   HttpError,
+  INTERPRET_SYSTEM_PROMPT,
+  PUTER_MODEL,
   callerFromRequest,
+  cleanInterpretResult,
   corsHeaders,
   errorJson,
+  extractJsonObject,
   getEntitlements,
   handleError,
   json,
+  puterChatJson,
   requireWorkspaceRole,
   serviceClient,
 } from "../_shared/index.ts";
 
-/** Model used by the client-side Puter.js interpretation; recorded with usage. */
-const INTERPRET_MODEL = "deepseek/deepseek-v3.2";
+/**
+ * DeepSeek V3.2 (via the server-side Puter integration) turns the request
+ * into filters. One silent retry when the reply isn't usable JSON; the
+ * result is fully validated and clamped before it ever reaches the client.
+ */
+async function interpretWithAi(request: string) {
+  let sawCategoryMissing = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const system =
+      attempt === 0
+        ? INTERPRET_SYSTEM_PROMPT
+        : `${INTERPRET_SYSTEM_PROMPT}\nYour previous reply was not usable. Respond with the JSON object only, and always include a non-empty "category".`;
+    const text = await puterChatJson({
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: `User request: ${request}` },
+      ],
+      maxOutputTokens: 900,
+      timeoutMs: 25_000,
+    });
+    const parsed = extractJsonObject(text);
+    if (!parsed) continue;
+    const cleaned = cleanInterpretResult(parsed, request);
+    if (cleaned) return cleaned;
+    sawCategoryMissing = true;
+  }
+  throw new HttpError(
+    502,
+    sawCategoryMissing
+      ? "Zybble AI couldn't identify a business category. Try rephrasing."
+      : "Zybble AI couldn't turn that into filters. Try rephrasing.",
+    sawCategoryMissing ? "category_missing" : "malformed_response",
+  );
+}
 
 Deno.serve(async (req) => {
   const startedAt = Date.now();
@@ -46,19 +86,22 @@ Deno.serve(async (req) => {
       throw new HttpError(403, "Zybble AI isn't available on your current plan.", "ai_not_entitled");
     }
 
-    // Usage accounting: one row per authorized interpretation, attributed to
-    // the workspace/user, tagged with the client-side model. The filter
-    // values are produced in the browser after this gate returns.
+    // The interpretation itself — server-side, so the browser never touches a
+    // Puter credential or sign-in flow.
+    const interpretation = await interpretWithAi(request);
+
+    // Usage accounting: one row per completed interpretation, attributed to
+    // the workspace/user, tagged with the model that produced it.
     await sb.from("ai_requests").insert({
       workspace_id: workspaceId,
       user_id: user.id,
       kind: "interpret",
       input: { request },
       status: "completed",
-      model: INTERPRET_MODEL,
+      model: PUTER_MODEL,
     });
 
-    return json({ ok: true, model: INTERPRET_MODEL });
+    return json({ ok: true, model: PUTER_MODEL, ...interpretation });
   } catch (e) {
     return handleError(e, { functionName: "ai-interpret", startedAt });
   }

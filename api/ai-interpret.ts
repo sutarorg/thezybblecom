@@ -1,34 +1,39 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
+  INTERPRET_SYSTEM_PROMPT,
+  cleanInterpretResult,
+  extractJsonObject,
+} from "./_lib/interpret.js";
+import { PuterError, getPuterModel, puterChatJson } from "./_lib/puter.js";
+import {
   createUserSupabaseClient,
   requireSupabaseServerConfig,
   SupabaseServerConfigError,
 } from "./_lib/supabase-server.js";
 
 /**
- * Zybble AI interpretation — authorization + usage gate.
+ * Zybble AI interpretation — authorization, usage accounting, and the
+ * DeepSeek V3.2 interpretation itself, all server-side.
  *
- * The interpretation itself runs in the browser through Puter.js
- * (deepseek/deepseek-v3.2), so this route performs no AI-provider call and
- * needs no provider key (OPENAI_* is not read here). What it keeps is every
- * server-side guarantee the flow always had, in the same order:
+ * The interpretation used to run in the browser through Puter.js after this
+ * route authorized it, which pushed users into a puter.com sign-in. It now
+ * runs here through Puter's server-side API (PUTER_AUTH_TOKEN), keeping every
+ * guarantee the gate always had, in the same order:
  *
  *   1. the caller's Supabase session,
  *   2. workspace membership (workspace authorization),
  *   3. plan entitlement (plans.has_ai),
- *   4. one ai_requests usage row per interpretation.
+ *   4. the AI interpretation (validated and clamped server-side),
+ *   5. one ai_requests usage row per completed interpretation.
  *
  * It never runs a search, consumes lead quota, or creates leads — the
- * browser only fills the filter form, and the user presses "Find leads".
+ * response only fills the filter form, and the user presses "Find leads".
  */
 type VercelRequest = IncomingMessage & { body?: unknown };
 type VercelResponse = ServerResponse & { status(code: number): VercelResponse; json(body: unknown): void };
 
 export const maxDuration = 30;
-
-/** Model used by the client-side Puter.js interpretation; recorded with usage. */
-export const INTERPRET_MODEL = "deepseek/deepseek-v3.2";
 
 class ApiError extends Error {
   readonly status: number;
@@ -71,6 +76,41 @@ function userClient(token: string): SupabaseClient {
   return createUserSupabaseClient(config, token, { serverLabel: "AI" });
 }
 
+/**
+ * DeepSeek V3.2 (via the server-side Puter integration) turns the request
+ * into filters. One silent retry when the reply isn't usable JSON; the
+ * result is fully validated and clamped before it ever reaches the client.
+ */
+async function interpretWithAi(request: string) {
+  let sawCategoryMissing = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const system =
+      attempt === 0
+        ? INTERPRET_SYSTEM_PROMPT
+        : `${INTERPRET_SYSTEM_PROMPT}\nYour previous reply was not usable. Respond with the JSON object only, and always include a non-empty "category".`;
+    const text = await puterChatJson({
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: `User request: ${request}` },
+      ],
+      maxOutputTokens: 900,
+      timeoutMs: 25_000,
+    });
+    const parsed = extractJsonObject(text);
+    if (!parsed) continue;
+    const cleaned = cleanInterpretResult(parsed, request);
+    if (cleaned) return cleaned;
+    sawCategoryMissing = true;
+  }
+  throw new ApiError(
+    502,
+    sawCategoryMissing
+      ? "Zybble AI couldn't identify a business category. Try rephrasing."
+      : "Zybble AI couldn't turn that into filters. Try rephrasing.",
+    sawCategoryMissing ? "category_missing" : "malformed_response",
+  );
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const startedAt = Date.now();
   res.setHeader("Cache-Control", "no-store");
@@ -106,29 +146,36 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const { data: plan } = await sb.from("plans").select("has_ai").eq("id", planId).maybeSingle();
     if (plan?.has_ai === false) throw new ApiError(403, "Zybble AI isn't available on your current plan.", "ai_not_entitled");
 
-    // Usage accounting: one row per authorized interpretation, attributed to
-    // the workspace/user, tagged with the client-side model. The filter values
-    // are produced in the browser after this gate returns.
+    // The interpretation itself — server-side, so the browser never touches a
+    // Puter credential or sign-in flow.
+    const interpretation = await interpretWithAi(request);
+    const model = getPuterModel();
+
+    // Usage accounting: one row per completed interpretation, attributed to
+    // the workspace/user, tagged with the model that produced it.
     await sb.from("ai_requests").insert({
       workspace_id: workspaceId,
       user_id: auth.user.id,
       kind: "interpret",
       input: { request },
       status: "completed",
-      model: INTERPRET_MODEL,
+      model,
     }).then(() => undefined);
 
-    return res.status(200).json({ ok: true, model: INTERPRET_MODEL });
+    return res.status(200).json({ ok: true, model, ...interpretation });
   } catch (error) {
     const apiError = error instanceof ApiError
       ? error
       : error instanceof SupabaseServerConfigError
         ? new ApiError(error.status, error.message, error.code)
-        : new ApiError(500, "The AI service couldn't complete that action. Please try again.", "unknown");
+        : error instanceof PuterError
+          ? new ApiError(error.status, error.message, error.code)
+          : new ApiError(500, "The AI service couldn't complete that action. Please try again.", "unknown");
     console.error("api request", {
       route: "/api/ai-interpret",
       status: apiError.status,
       code: apiError.code,
+      providerCategory: apiError.code.startsWith("provider_") || apiError.code.startsWith("rate_") || apiError.code === "model_invalid" ? apiError.code : undefined,
       durationMs: Date.now() - startedAt,
     });
     return res.status(apiError.status).json({ error: apiError.message, code: apiError.code });

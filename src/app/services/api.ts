@@ -3,17 +3,13 @@
 /* No mock data, no simulated success. Reads go through RLS-guarded    */
 /* PostgREST; provider/money actions go through Edge Functions.        */
 /* ------------------------------------------------------------------ */
-import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabase, BACKEND_ENABLED } from "./supabase";
 import { planFromId, planLabel } from "../data/plans";
 import { mergeTags, validateTag } from "../lib/tags";
 import { formatAppDate, setRuntimePreferences, type RuntimePreferences } from "../lib/datetime";
 import { parseApiResponse } from "./api-response";
 import { readFunctionError } from "./edge-error";
-import {
-  interpretSearchRequest,
-  PuterAIError,
-} from "../../lib/puter-ai";
+import { cleanServerInterpretation } from "../../lib/puter-ai";
 import type {
   ActivityItem,
   ExportRecord,
@@ -663,47 +659,26 @@ export type Interpretation = {
 };
 
 /**
- * Authorization + usage gate for an AI interpretation. The AI call itself
- * runs in the browser through Puter.js (DeepSeek V3.2) — no provider key
- * exists on either side of this flow. The gate keeps every server-side
- * guarantee the interpretation always had: the caller's Supabase session,
- * workspace membership, plan entitlement, and one ai_requests usage row.
- * Returns null when interpretation may proceed.
+ * Re-validate a server interpretation (same-origin route or Edge fallback)
+ * before it can touch the search form. Both servers already clamp the model
+ * output; cleanServerInterpretation repeats the checks here so a malformed
+ * payload can never reach the filters through any path.
  */
-async function requestInterpretationGate(
-  sb: SupabaseClient,
-  workspaceId: string,
+function interpretResponse(
+  data: unknown,
   request: string,
-  token: string,
-): Promise<string | null> {
-  /* Prefer the same-origin server function. Non-Vercel deployments retain
-     the Supabase Edge fallback. */
-  try {
-    const response = await fetch("/api/ai-interpret", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ workspaceId, request }),
-    });
-    const parsed = await parseApiResponse<{ ok: boolean }>(response, "AI");
-    if (parsed.data?.ok) return null;
-    if (!parsed.shouldFallback) return parsed.error ?? "Zybble AI couldn't interpret that request.";
-  } catch {
-    // Same-origin route unavailable; use the deployed Edge Function below.
+): { result?: Interpretation; error?: string } {
+  const cleaned = cleanServerInterpretation(data, request);
+  if (!cleaned) {
+    return { error: "Zybble AI couldn't identify a business category. Try rephrasing." };
   }
-
-  const { data, error } = await sb.functions.invoke("ai-interpret", {
-    body: { workspaceId, request },
-    // Do not rely on the SDK's implicit session lookup. Supplying the token
-    // explicitly makes the JWT boundary visible.
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (error) return await readFunctionError(error, "ai-interpret", "AI");
-  if (data?.error) return String(data.error);
-  if (data?.ok !== true) return "Zybble AI couldn't interpret that request.";
-  return null;
+  return {
+    result: {
+      filters: cleaned.filters,
+      summary: cleaned.summary,
+      notes: cleaned.notes,
+    },
+  };
 }
 
 export async function interpretRequest(
@@ -718,28 +693,37 @@ export async function interpretRequest(
   } = await sb.auth.getSession();
   if (!session) return { error: "Your session expired — sign in again." };
 
-  const gateError = await requestInterpretationGate(sb, workspaceId, request, session.access_token);
-  if (gateError) return { error: gateError };
-
-  /* Client-side interpretation through Puter.js (DeepSeek V3.2). The helper
-     validates and clamps every value before it reaches the search form. */
+  /* Prefer the same-origin server function, which authorizes (session →
+     workspace membership → plan entitlement) and then runs the DeepSeek V3.2
+     interpretation itself through the server-side Puter integration
+     (PUTER_AUTH_TOKEN) — the browser never sees a Puter credential or a
+     puter.com sign-in. Non-Vercel deployments retain the Supabase Edge
+     fallback with the same contract. */
   try {
-    const interpretation = await interpretSearchRequest(request);
-    return {
-      result: {
-        filters: interpretation.filters,
-        summary: interpretation.summary,
-        notes: interpretation.notes,
+    const response = await fetch("/api/ai-interpret", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
       },
-    };
-  } catch (error) {
-    return {
-      error:
-        error instanceof PuterAIError
-          ? error.message
-          : "Zybble AI couldn't interpret that request. Please try again.",
-    };
+      body: JSON.stringify({ workspaceId, request }),
+    });
+    const parsed = await parseApiResponse<Record<string, unknown>>(response, "AI");
+    if (parsed.data) return interpretResponse(parsed.data, request);
+    if (!parsed.shouldFallback) return { error: parsed.error ?? "Zybble AI couldn't interpret that request." };
+  } catch {
+    // Same-origin route unavailable; use the deployed Edge Function below.
   }
+
+  const { data, error } = await sb.functions.invoke("ai-interpret", {
+    body: { workspaceId, request },
+    // Do not rely on the SDK's implicit session lookup. Supplying the token
+    // explicitly makes the JWT boundary visible.
+    headers: { Authorization: `Bearer ${session.access_token}` },
+  });
+  if (error) return { error: await readFunctionError(error, "ai-interpret", "AI") };
+  if (data?.error) return { error: String(data.error) };
+  return interpretResponse(data, request);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1223,7 +1207,7 @@ export async function analyzeLead(leadId: string, workspaceId: string, refresh =
   } = await sb.auth.getSession();
   if (!session) return { error: "Your session expired — sign in again." };
 
-  /* Prefer the same-origin server function, where OPENAI_API_KEY remains
+  /* Prefer the same-origin server function, where PUTER_AUTH_TOKEN remains
      server-only. Non-Vercel deployments retain the Supabase Edge fallback. */
   try {
     const response = await fetch("/api/ai-analyze", {

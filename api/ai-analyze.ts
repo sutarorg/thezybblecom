@@ -1,13 +1,19 @@
 // ============================================================================
-// ai-analyze — OpenAI-powered lead intelligence (cached per lead).
+// ai-analyze — DeepSeek-powered lead intelligence (cached per lead).
 // Vercel twin of the Supabase Edge Function supabase/functions/ai-analyze:
-// same request/response contract, but running on the same-origin /api route
-// where OPENAI_API_KEY lives on Vercel deployments. All database access runs
-// with the caller's bearer token so RLS stays the security boundary.
+// same request/response contract, running on the same-origin /api route.
+//
+// The analysis used to call OpenAI's Responses API (OPENAI_API_KEY), whose
+// exhausted quota surfaced as the "ran out of usage quota" error. It now runs
+// on the same provider as every other Zybble AI surface — DeepSeek V3.2
+// through Puter's server-side API (PUTER_AUTH_TOKEN) — so there is no
+// OpenAI dependency left in this path. All database access runs with the
+// caller's bearer token so RLS stays the security boundary.
 // ============================================================================
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { getOpenAIModel, openAIJson, OpenAIError } from "./_lib/openai.js";
+import { extractJsonObject } from "./_lib/interpret.js";
+import { PuterError, getPuterModel, puterChatJson } from "./_lib/puter.js";
 import {
   createUserSupabaseClient,
   requireSupabaseServerConfig,
@@ -36,24 +42,9 @@ const ANALYZE_SYSTEM = `You are Zybble's lead analyst. You interpret ONLY the st
 Rules:
 - Never invent facts. When information is missing (e.g. no email), say it's unavailable.
 - 3-5 short observations: local presence, review activity, contactability, and one honest outreach angle.
-- Be concrete but skeptical. Mark uncertainty.`;
-
-const ANALYSIS_SCHEMA: Record<string, unknown> = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    summary: { type: "string", description: "One concise sentence about this lead." },
-    points: {
-      type: "array",
-      items: { type: "string" },
-      minItems: 3,
-      maxItems: 5,
-      description: "Honest observations grounded only in the supplied business record.",
-    },
-    outreach_angle: { type: "string", description: "One cautious, data-grounded outreach angle." },
-  },
-  required: ["summary", "points", "outreach_angle"],
-};
+- Be concrete but skeptical. Mark uncertainty.
+Respond with ONLY a JSON object (no markdown, no code fences) using exactly this shape:
+{"summary": "one concise sentence about this lead", "points": ["3 to 5 honest observations grounded only in the supplied business record"], "outreach_angle": "one cautious, data-grounded outreach angle"}`;
 
 function bodyOf(req: VercelRequest): Json {
   if (req.body && typeof req.body === "object" && !Array.isArray(req.body)) return req.body as Json;
@@ -82,6 +73,44 @@ function userClient(token: string): SupabaseClient {
   // RLS keeps evaluating as the signed-in user.
   const config = requireSupabaseServerConfig("AI");
   return createUserSupabaseClient(config, token, { serverLabel: "AI" });
+}
+
+/**
+ * DeepSeek V3.2 (via the server-side Puter integration) analyzes the record.
+ * One silent retry when the reply isn't usable JSON; whatever the provider
+ * returned is validated field-by-field before it can reach the response.
+ */
+async function analyzeWithAi(lead: unknown): Promise<{ summary: string; observations: string[]; outreachAngle: string }> {
+  let sawMalformed = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const system =
+      attempt === 0
+        ? ANALYZE_SYSTEM
+        : `${ANALYZE_SYSTEM}\nYour previous reply was not usable. Respond with the JSON object only, with a non-empty "summary", 3-5 "points", and a non-empty "outreach_angle".`;
+    const text = await puterChatJson({
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: `Analyze this public business record:\n${JSON.stringify(lead, null, 2)}` },
+      ],
+      maxOutputTokens: 2_500,
+      timeoutMs: 25_000,
+    });
+    const out = extractJsonObject(text);
+    if (!out) {
+      sawMalformed = true;
+      continue;
+    }
+    const summary = typeof out.summary === "string" ? out.summary.trim().slice(0, 500) : "";
+    const observations = Array.isArray(out.points)
+      ? out.points.slice(0, 5).map((point) => String(point).trim().slice(0, 300)).filter(Boolean)
+      : [];
+    const outreachAngle = typeof out.outreach_angle === "string" ? out.outreach_angle.trim().slice(0, 300) : "";
+    if (summary && observations.length > 0 && outreachAngle) {
+      return { summary, observations, outreachAngle };
+    }
+    sawMalformed = true;
+  }
+  throw new ApiError(502, "Zybble AI returned incomplete analysis. Please try again.", sawMalformed ? "malformed_response" : "empty_response");
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -135,7 +164,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       .maybeSingle();
     if (leadError || !lead) throw new ApiError(404, "This lead doesn't exist.", "lead_not_found");
 
-    const model = getOpenAIModel();
+    const model = getPuterModel();
     const { data: cached } = await sb
       .from("ai_insights")
       .select("summary, points, model, created_at")
@@ -150,24 +179,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     }
 
-    const out = await openAIJson({
-      instructions: ANALYZE_SYSTEM,
-      input: `Analyze this public business record:\n${JSON.stringify(lead, null, 2)}`,
-      schema: ANALYSIS_SCHEMA,
-      schemaName: "zybble_lead_analysis",
-      maxOutputTokens: 2_500,
-      timeoutMs: 25_000,
-    });
-
-    const summary = typeof out.summary === "string" ? out.summary.trim().slice(0, 500) : "";
-    const observations = Array.isArray(out.points)
-      ? out.points.slice(0, 5).map((point) => String(point).trim().slice(0, 300)).filter(Boolean)
-      : [];
-    const outreachAngle = typeof out.outreach_angle === "string" ? out.outreach_angle.trim().slice(0, 300) : "";
-    if (!summary || observations.length === 0 || !outreachAngle) {
-      // Never return a successful response with blank analysis output.
-      throw new ApiError(502, "Zybble AI returned incomplete analysis. Please try again.", "malformed_response");
-    }
+    const { summary, observations, outreachAngle } = await analyzeWithAi(lead);
     // Keep the existing UI behavior: the outreach angle is the final displayed point.
     const points = [...observations, outreachAngle];
 
@@ -204,7 +216,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       ? error
       : error instanceof SupabaseServerConfigError
         ? new ApiError(error.status, error.message, error.code)
-        : error instanceof OpenAIError
+        : error instanceof PuterError
           ? new ApiError(error.status, error.message, error.code)
           : new ApiError(500, "The AI service couldn't complete that action. Please try again.", "unknown");
     console.error("api request", {

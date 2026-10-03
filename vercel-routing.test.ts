@@ -47,6 +47,18 @@ describe("Vercel routing", () => {
     expect(routePattern.test("/leads")).toBe(true);
     expect(routePattern.test("/api/search-run")).toBe(false);
     expect(routePattern.test("/api/ai-interpret")).toBe(false);
+    expect(routePattern.test("/api/ai-analyze")).toBe(false);
+    expect(routePattern.test("/api/ai-chat")).toBe(false);
+  });
+
+  it("routes every browser AI surface to a deployed same-origin function", () => {
+    // The browser must never leave the site for AI: interpret, analyze, and
+    // the Ask Zybble chat all POST to same-origin /api routes. If one of
+    // these files disappears the matching UI falls back to the Edge Function
+    // or breaks, so keep the routing contract explicit.
+    expect(deployedApiFunctions).toContain("ai-interpret.ts");
+    expect(deployedApiFunctions).toContain("ai-analyze.ts");
+    expect(deployedApiFunctions).toContain("ai-chat.ts");
   });
 
   it("passes /api through the SPA fallback file untouched", () => {

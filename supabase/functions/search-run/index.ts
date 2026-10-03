@@ -1,8 +1,8 @@
 // ============================================================================
 // search-run — the Zybble lead engine (Supabase Edge Function fallback).
-// Auth → workspace auth → entitlement → usage reservation → optional OpenAI
-// interpretation → SerpApi fetch → normalize → dedupe → enrich → filter →
-// persist → accounting.
+// Auth → workspace auth → entitlement → usage reservation → optional AI
+// interpretation (DeepSeek via the server-side Puter integration) → SerpApi
+// fetch → normalize → dedupe → enrich → filter → persist → accounting.
 //
 // Pipeline order (matches api/search-run.ts on Vercel):
 //   provider search → normalize → dedupe → cheap pre-checks → website
@@ -11,22 +11,23 @@
 import {
   HttpError,
   INTERPRET_SYSTEM,
+  PUTER_MODEL,
   callerFromRequest,
   corsHeaders,
   errorJson,
+  extractJsonObject,
   getEntitlements,
   handleError,
   json,
   logActivity,
   normalizeOpenState,
-  openAIJson,
+  puterChatJson,
   requireWorkspaceRole,
   reserveLeads,
   serpApiMaps,
   serpApiResults,
   serpApiLl,
   serviceClient,
-  OPENAI_MODEL,
 } from "../_shared/index.ts";
 
 const MAX_PER_RUN = 240; // v1 cap per search
@@ -526,33 +527,20 @@ Deno.serve(async (req) => {
       if (!query || query.length < 2) throw new HttpError(400, "Describe the businesses you need.");
       if (query.length > 400) throw new HttpError(400, "Keep the request under 400 characters.");
       try {
-        const planned = await openAIJson({
-          instructions: `${INTERPRET_SYSTEM}\nOnly structure the request. Do not run a search or invent requirements.`,
-          input: `User request: ${query}`,
-          schemaName: "zybble_legacy_search_plan",
-          schema: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              q: { type: "string" },
-              category: { type: ["string", "null"] },
-              location: { type: ["string", "null"] },
-              requested_count: { type: "integer" },
-              filters: {
-                type: "object",
-                additionalProperties: false,
-                properties: {
-                  require_website: { type: "boolean" },
-                  min_rating: { type: ["number", "null"] },
-                },
-                required: ["require_website", "min_rating"],
-              },
+        // DeepSeek V3.2 through the server-side Puter integration (formerly
+        // OpenAI's Responses API) — same plan shape, validated field-by-field.
+        const plannedText = await puterChatJson({
+          messages: [
+            {
+              role: "system",
+              content: `${INTERPRET_SYSTEM}\nOnly structure the request. Do not run a search or invent requirements.`,
             },
-            required: ["q", "category", "location", "requested_count", "filters"],
-          },
+            { role: "user", content: `User request: ${query}` },
+          ],
           maxOutputTokens: 1_600,
           timeoutMs: 20_000,
         });
+        const planned = extractJsonObject(plannedText) ?? {};
         interpretation = {
           q: String(planned.q || query),
           category: planned.category ? String(planned.category) : null,
@@ -579,7 +567,7 @@ Deno.serve(async (req) => {
         kind: "interpret",
         input: { query, plan: interpretation },
         status: "completed",
-        model: OPENAI_MODEL,
+        model: PUTER_MODEL,
       });
       plans = [interpretation.q];
     }

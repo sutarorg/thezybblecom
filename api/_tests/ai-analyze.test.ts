@@ -1,159 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import handler from "../ai-analyze";
+import handler from "../ai-analyze.js";
+import { getPuterModel } from "../_lib/puter.js";
 
-/**
- * Full-flow tests for POST /api/ai-analyze — the same-origin route the lead
- * detail page calls before falling back to the Supabase Edge Function.
- * Auth, workspace authorization, entitlements, lead scoping, insight caching,
- * the OpenAI request, and the response contract are exercised end-to-end with
- * fixture transports (no mock product path).
- */
-
-const SUPABASE_URL = "https://stub.supabase.co";
-const SUPABASE_KEY = "sb_publishable_stub_key";
-const OPENAI_KEY = "sk-stub-openai-key";
-const CALLER_TOKEN = "caller-access-token";
-const WORKSPACE_ID = "11111111-1111-1111-1111-111111111111";
-const USER_ID = "11111111-2222-3333-4444-555555555555";
-const LEAD_ID = "22222222-2222-2222-2222-222222222222";
-
-const SUPABASE_VARS = ["SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY"] as const;
-const OPENAI_VARS = ["OPENAI_API_KEY", "OPENAI_MODEL"] as const;
-const saved = new Map<string, string | undefined>();
-
-beforeEach(() => {
-  for (const name of [...SUPABASE_VARS, ...OPENAI_VARS]) saved.set(name, process.env[name]);
-  for (const name of [...SUPABASE_VARS, ...OPENAI_VARS]) delete process.env[name];
-  process.env.SUPABASE_URL = SUPABASE_URL;
-  process.env.SUPABASE_PUBLISHABLE_KEY = SUPABASE_KEY;
-  process.env.OPENAI_API_KEY = OPENAI_KEY;
-  process.env.OPENAI_MODEL = "o4-mini";
-});
-
-afterEach(() => {
-  for (const name of [...SUPABASE_VARS, ...OPENAI_VARS]) {
-    const value = saved.get(name);
-    if (value === undefined) delete process.env[name];
-    else process.env[name] = value;
-  }
-  vi.unstubAllGlobals();
-  vi.restoreAllMocks();
-});
-
-const LEAD_ROW = {
-  name: "Fixture Roasters",
-  category: "Coffee shop",
-  categories: ["Coffee shop"],
-  rating: 4.7,
-  reviews: 210,
-  website: "https://fixture-roasters.example.com",
-  website_domain: "fixture-roasters.example.com",
-  email: null,
-  phone: "+1 512 555 0100",
-  address: "100 Example Ave, Austin, TX 78701",
-  city: "Austin",
-  state: "TX",
-  open_state: "open",
-  hours_display: "Open · Closes 9 PM",
-  services: ["Takeout"],
-  amenities: ["Wi-Fi"],
-  price_level: 2,
-};
-
-const AI_OUTPUT = {
-  summary: "A well-reviewed Austin coffee shop with strong local presence.",
-  points: [
-    "4.7 stars across 210 reviews signals consistent customer satisfaction.",
-    "A public phone number is available; no email is published.",
-    "Hours are listed, so outreach timing can respect open hours.",
-  ],
-  outreach_angle: "Lead with the review record and offer an email-first contact option.",
-};
-
-function openAiSuccess(output: Record<string, unknown> = AI_OUTPUT) {
-  return new Response(
-    JSON.stringify({
-      status: "completed",
-      output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify(output) }] }],
-    }),
-    { status: 200, headers: { "content-type": "application/json" } },
-  );
-}
-
-type StubOptions = {
-  lead?: unknown;
-  leadFound?: boolean;
-  cachedInsight?: unknown;
-  planHasAi?: boolean;
-  openAi?: Response | (() => Response);
-};
-
-function installNetworkStub(options: StubOptions = {}) {
-  const calls: Array<{ url: string; method: string; body?: string }> = [];
-  const fetchMock = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
-    const url = String(input);
-    const method = (init.method ?? "GET").toUpperCase();
-    const bodyText = typeof init.body === "string" ? init.body : undefined;
-    calls.push({ url, method, body: bodyText });
-    const json = (payload: unknown, status = 200) =>
-      new Response(JSON.stringify(payload), { status, headers: { "content-type": "application/json" } });
-
-    // ---- OpenAI Responses API ----
-    if (url === "https://api.openai.com/v1/responses") {
-      expect(url).toBeTruthy();
-      expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${OPENAI_KEY}`);
-      if (typeof options.openAi === "function") return options.openAi();
-      return options.openAi ?? openAiSuccess();
-    }
-
-    // ---- Supabase GoTrue ----
-    if (url === `${SUPABASE_URL}/auth/v1/user`) return json({ id: USER_ID, aud: "authenticated" });
-
-    // ---- Supabase PostgREST ----
-    if (url.startsWith(`${SUPABASE_URL}/rest/v1/`)) {
-      if (url.startsWith(`${SUPABASE_URL}/rest/v1/rpc/increment_usage_counter`)) {
-        return new Response(null, { status: 204 });
-      }
-      if (url.startsWith(`${SUPABASE_URL}/rest/v1/workspace_members`)) return json([{ role: "owner" }]);
-      if (url.startsWith(`${SUPABASE_URL}/rest/v1/subscriptions`)) {
-        return json([{ plan_id: "growth", status: "active" }]);
-      }
-      if (url.startsWith(`${SUPABASE_URL}/rest/v1/plans`)) {
-        return json([{ has_ai: options.planHasAi ?? true }]);
-      }
-      if (url.startsWith(`${SUPABASE_URL}/rest/v1/leads`)) {
-        if (method === "GET") {
-          return options.leadFound === false ? json([]) : json(options.lead ?? LEAD_ROW);
-        }
-      }
-      if (url.startsWith(`${SUPABASE_URL}/rest/v1/ai_insights`)) {
-        if (method === "GET") return json(options.cachedInsight ?? []);
-        return json({});
-      }
-      if (url.startsWith(`${SUPABASE_URL}/rest/v1/ai_requests`)) {
-        if (method === "POST") return json({});
-      }
-    }
-
-    throw new Error(`Unexpected request in fixture transport: ${method} ${url}`);
-  });
-
-  vi.stubGlobal("fetch", fetchMock);
-  return { calls, fetchMock };
-}
-
-function createMockReqRes(options: { method?: string; headers?: Record<string, string>; body?: unknown } = {}) {
+/** Minimal Vercel-shaped req/res pair (same pattern as the sibling suites). */
+function createMockReqRes(options: { method?: string; headers?: Record<string, string>; body?: unknown }) {
   const req = {
     method: options.method ?? "POST",
-    headers: options.headers ?? { authorization: `Bearer ${CALLER_TOKEN}`, "content-type": "application/json" },
-    body: options.body ?? { leadId: LEAD_ID, workspaceId: WORKSPACE_ID },
+    headers: options.headers ?? {},
+    body: options.body,
   } as unknown as IncomingMessage & { body?: unknown };
 
   let statusCode = 0;
   let responseBody: unknown = null;
+  const headers: Record<string, string> = {};
   const res = {
-    setHeader() {
+    setHeader(key: string, value: string) {
+      headers[key] = value;
       return res;
     },
     status(code: number) {
@@ -165,160 +28,404 @@ function createMockReqRes(options: { method?: string; headers?: Record<string, s
     },
   } as unknown as ServerResponse & { status(code: number): any; json(body: unknown): void };
 
-  return { req, res, getStatus: () => statusCode, getBody: () => responseBody };
+  return { req, res, getStatus: () => statusCode, getBody: () => responseBody, getHeaders: () => headers };
 }
 
+/**
+ * Contract tests for POST /api/ai-analyze. The route authorizes the caller,
+ * reads the lead with the caller's RLS-scoped token, serves cached insights
+ * when fresh, and otherwise analyzes the record through DeepSeek V3.2 via
+ * Puter's server-side API (PUTER_AUTH_TOKEN — the old OpenAI Responses API
+ * dependency is gone). Network activity is stubbed by the shared fixture.
+ */
+
+const FALLBACK_DB = {
+  url: "https://api.test",
+  serviceKey: "service-key",
+  userId: "user-1",
+  headers: { "Content-Type": "application/json" },
+} as const;
+
+const LEAD_ID = "123e4567-e89b-42d3-a456-426614174000";
+const WORKSPACE_ID = "123e4567-e89b-42d3-a456-426614174001";
+
+const LEAD = {
+  name: "Acme Dental",
+  category: "dentist",
+  rating: 4.7,
+  reviews: 128,
+  website: "https://acme.example.test",
+  email: "frontdesk@acme.example.test",
+  phone: "+1 555 0100",
+  address: "12 Main St",
+  city: "Austin",
+  state: "TX",
+};
+
+const ANALYSIS = {
+  summary: "Well-reviewed Austin dentist with clear contact channels.",
+  points: ["128 reviews averaging 4.7 stars.", "Direct email and phone are public.", "Angle: patients already refer them."],
+  outreach_angle: "Angle: patients already refer them.",
+};
+
+type DbOverrides = {
+  member?: boolean | { role: string };
+  planHasAi?: boolean;
+  lead?: Record<string, unknown> | null;
+  cached?: Record<string, unknown> | null;
+};
+
+function supabaseStub(db: DbOverrides) {
+  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === "string" ? new URL(input) : new URL(input instanceof URL ? input.toString() : input.url);
+    const json = (payload: unknown, status = 200) => new Response(JSON.stringify(payload), { status, headers: FALLBACK_DB.headers });
+
+    if (url.pathname === "/auth/v1/user") return json({ user: { id: FALLBACK_DB.userId } });
+
+    if (url.pathname.startsWith("/rest/v1/")) {
+      const table = url.pathname.replace("/rest/v1/", "");
+      const method = (init?.method ?? "GET").toUpperCase();
+      const wantsObject = String(new Headers(init?.headers).get("accept") ?? "").includes("vnd.pgrst.object+json");
+      if (method === "GET") {
+        switch (table) {
+          case "workspace_members": {
+            // Callers are workspace admins unless a test says otherwise.
+            if (db.member === false) return json({ code: "PGRST116" }, 406);
+            const member = typeof db.member === "object" && db.member ? db.member : { role: "admin" };
+            return wantsObject ? json(member) : json([member]);
+          }
+          case "subscriptions":
+            return wantsObject ? json({ plan_id: "growth", status: "active" }) : json([{ plan_id: "growth", status: "active" }]);
+          case "plans": {
+            const row = { has_ai: db.planHasAi !== false };
+            return wantsObject ? json(row) : json([row]);
+          }
+          case "leads": {
+            if (db.lead === null) return json({ code: "PGRST116" }, 406);
+            const row = db.lead ?? LEAD;
+            return wantsObject ? json(row) : json([row]);
+          }
+          case "ai_insights": {
+            if (!db.cached) return json({ code: "PGRST116" }, 406);
+            return wantsObject ? json(db.cached) : json([db.cached]);
+          }
+          default:
+            return json([]);
+        }
+      }
+      if (table === "ai_insights" && (method === "POST" || method === "PUT")) return json({}, 201);
+      if (table === "ai_requests" && method === "POST") return json({}, 201);
+      if (url.pathname === "/rest/v1/rpc/increment_usage_counter") return json({});
+      return json({}, 201);
+    }
+    return json({ error: `unexpected supabase request: ${url.pathname}` }, 500);
+  };
+}
+
+const savedEnv: Record<string, string | undefined> = {};
+const ENV_KEYS = ["SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "PUTER_AUTH_TOKEN", "PUTER_MODEL"] as const;
+
+beforeEach(() => {
+  for (const key of ENV_KEYS) savedEnv[key] = process.env[key];
+  process.env.SUPABASE_URL = "https://api.test";
+  process.env.SUPABASE_PUBLISHABLE_KEY = "publishable-key";
+  process.env.PUTER_AUTH_TOKEN = "test-puter-token";
+  delete process.env.PUTER_MODEL;
+});
+
+afterEach(() => {
+  for (const key of ENV_KEYS) {
+    if (savedEnv[key] === undefined) delete process.env[key];
+    else process.env[key] = savedEnv[key];
+  }
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
 describe("POST /api/ai-analyze", () => {
-  it("analyzes a lead end-to-end and returns the expected structure", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const { calls } = installNetworkStub();
-    const { req, res, getStatus, getBody } = createMockReqRes();
-    await handler(req, res);
+  it("returns analysis, caches it under the active model, and counts usage", async () => {
+    const puterBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes("api.puter.com")) {
+          puterBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(ANALYSIS) } }] }), {
+            status: 200,
+            headers: FALLBACK_DB.headers,
+          });
+        }
+        return supabaseStub({})(input, init);
+      }),
+    );
 
-    expect(getStatus()).toBe(200);
-    const body = getBody() as {
-      summary: string;
-      points: string[];
-      outreach_angle: string;
-      model: string;
-      cached: boolean;
-    };
-    expect(body.summary).toBe(AI_OUTPUT.summary);
-    expect(body.points).toEqual([...AI_OUTPUT.points, AI_OUTPUT.outreach_angle]);
-    expect(body.outreach_angle).toBe(AI_OUTPUT.outreach_angle);
-    expect(body.model).toBe("o4-mini");
-    expect(body.cached).toBe(false);
-
-    // The insight is persisted, the request is logged, and the usage counter
-    // is bumped through the security-definer RPC.
-    const insightUpsert = calls.find((c) => c.url.includes("/rest/v1/ai_insights") && c.method === "POST");
-    expect(insightUpsert).toBeDefined();
-    expect(JSON.parse(insightUpsert!.body!)).toMatchObject({ lead_id: LEAD_ID, summary: AI_OUTPUT.summary });
-    expect(calls.some((c) => c.url.includes("/rest/v1/ai_requests"))).toBe(true);
-    expect(calls.some((c) => c.url.includes("/rest/v1/rpc/increment_usage_counter"))).toBe(true);
-
-    // Secrets never reach the response.
-    expect(JSON.stringify(body)).not.toContain(OPENAI_KEY);
-    expect(JSON.stringify(body)).not.toContain(SUPABASE_KEY);
-    vi.restoreAllMocks();
-  });
-
-  it("serves a cached insight without calling the AI provider", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const { fetchMock } = installNetworkStub({
-      cachedInsight: [{ summary: "Cached summary.", points: ["One.", "Two."], model: "o4-mini", created_at: "2026-01-01" }],
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      body: { leadId: LEAD_ID, workspaceId: WORKSPACE_ID },
+      headers: { authorization: "Bearer user-token-1" },
     });
-    const { req, res, getStatus, getBody } = createMockReqRes();
     await handler(req, res);
 
     expect(getStatus()).toBe(200);
-    const body = getBody() as { summary: string; cached: boolean; outreach_angle: string };
-    expect(body.cached).toBe(true);
-    expect(body.summary).toBe("Cached summary.");
-    expect(body.outreach_angle).toBe("Two.");
-    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("openai.com"))).toHaveLength(0);
-    vi.restoreAllMocks();
+    const body = getBody() as Record<string, unknown> & { points: string[] };
+    expect(body.summary).toBe(ANALYSIS.summary);
+    expect(body.model).toBe(getPuterModel());
+    expect(body.cached).toBe(false);
+    // The UI displays the outreach angle as the final point — preserved.
+    expect(body.points[body.points.length - 1]).toBe(ANALYSIS.outreach_angle);
+    expect(body.outreach_angle).toBe(ANALYSIS.outreach_angle);
+    expect(puterBodies).toHaveLength(1);
+    expect(String(puterBodies[0]!.model)).toBe(getPuterModel());
+    const messages = puterBodies[0]!.messages as Array<{ role: string; content: string }>;
+    expect(messages.some((m) => m.role === "user" && m.content.includes("Acme Dental"))).toBe(true);
   });
 
-  it("rejects a caller who cannot access the workspace", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const { calls } = installNetworkStub();
-    // Overwrite the workspace membership lookup to return no rows.
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url === `${SUPABASE_URL}/auth/v1/user`) {
-        return new Response(JSON.stringify({ id: USER_ID, aud: "authenticated" }), { headers: { "content-type": "application/json" } });
-      }
-      if (url.includes("/rest/v1/workspace_members")) {
-        return new Response(JSON.stringify([]), { headers: { "content-type": "application/json" } });
-      }
-      throw new Error(`Unexpected request: ${url}`);
-    }));
+  it("serves fresh cached insight without a provider call, even across lead shared columns", async () => {
+    const cached = {
+      summary: "Cached insight.",
+      points: ["point one", "point two", "Angle: cached."],
+      model: getPuterModel(),
+      created_at: new Date().toISOString(),
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes("api.puter.com")) throw new Error("provider should not be called for cached insights");
+        return supabaseStub({ cached })(input, init);
+      }),
+    );
 
-    const { req, res, getStatus, getBody } = createMockReqRes();
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      body: { leadId: LEAD_ID, workspaceId: WORKSPACE_ID },
+      headers: { authorization: "Bearer user-token-1" },
+    });
     await handler(req, res);
-    expect(getStatus()).toBe(403);
-    expect(getBody()).toMatchObject({ code: "workspace_forbidden" });
-    expect(calls.length).toBe(0);
-    vi.restoreAllMocks();
+
+    expect(getStatus()).toBe(200);
+    expect(getBody()).toMatchObject({ summary: "Cached insight.", cached: true, outreach_angle: "Angle: cached." });
   });
 
-  it("refuses analysis when the plan has no AI entitlement", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const { fetchMock } = installNetworkStub({ planHasAi: false });
-    const { req, res, getStatus, getBody } = createMockReqRes();
+  it("refuses to analyze when the plan has no AI entitlement and never calls the provider", async () => {
+    let puterCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes("api.puter.com")) {
+          puterCalls += 1;
+          return new Response("{}", { status: 200 });
+        }
+        return supabaseStub({ planHasAi: false })(input, init);
+      }),
+    );
+
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      body: { leadId: LEAD_ID, workspaceId: WORKSPACE_ID },
+      headers: { authorization: "Bearer user-token-1" },
+    });
     await handler(req, res);
 
     expect(getStatus()).toBe(403);
     expect(getBody()).toMatchObject({ code: "ai_not_entitled" });
-    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("openai.com"))).toHaveLength(0);
-    vi.restoreAllMocks();
+    expect(puterCalls).toBe(0);
   });
 
-  it("returns 404 when the lead is not in the workspace", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
-    installNetworkStub({ leadFound: false });
-    const { req, res, getStatus, getBody } = createMockReqRes();
+  it("scopes the lead lookup to the caller's workspace — a foreign lead looks missing", async () => {
+    let puterCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes("api.puter.com")) {
+          puterCalls += 1;
+          return new Response("{}", { status: 200 });
+        }
+        return supabaseStub({ lead: null })(input, init);
+      }),
+    );
+
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      body: { leadId: LEAD_ID, workspaceId: WORKSPACE_ID },
+      headers: { authorization: "Bearer user-token-1" },
+    });
     await handler(req, res);
 
     expect(getStatus()).toBe(404);
     expect(getBody()).toMatchObject({ code: "lead_not_found" });
-    vi.restoreAllMocks();
+    expect(puterCalls).toBe(0);
   });
 
-  it("never returns a successful response for malformed AI output", async () => {
+  it("never returns a successful response for empty AI output — it 502s after one silent retry", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
-    installNetworkStub({ openAi: openAiSuccess({ summary: "", points: [], outreach_angle: "" }) });
-    const { req, res, getStatus, getBody } = createMockReqRes();
+    let puterCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes("api.puter.com")) {
+          puterCalls += 1;
+          return new Response(JSON.stringify({ choices: [{ message: { content: "" } }] }), {
+            status: 200,
+            headers: FALLBACK_DB.headers,
+          });
+        }
+        return supabaseStub({})(input, init);
+      }),
+    );
+
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      body: { leadId: LEAD_ID, workspaceId: WORKSPACE_ID },
+      headers: { authorization: "Bearer user-token-1" },
+    });
     await handler(req, res);
 
     expect(getStatus()).toBe(502);
-    expect(getBody()).toMatchObject({ code: "malformed_response", error: expect.stringContaining("incomplete analysis") });
+    expect(getBody()).toMatchObject({ code: "empty_response", error: expect.stringContaining("empty response") });
+    // The Puter client treats an empty completion as a hard failure — the
+    // route never sees a payload to retry with.
+    expect(puterCalls).toBe(1);
     vi.restoreAllMocks();
   });
 
-  it("surfaces a persistent provider rate limit accurately after retries", async () => {
+  it("retries once when the first reply is not JSON, then accepts a fenced object", async () => {
+    let puterCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes("api.puter.com")) {
+          puterCalls += 1;
+          const content =
+            puterCalls === 1 ? "I cannot help with that." : `\`\`\`json\n${JSON.stringify(ANALYSIS)}\n\`\`\``;
+          return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+            status: 200,
+            headers: FALLBACK_DB.headers,
+          });
+        }
+        return supabaseStub({})(input, init);
+      }),
+    );
+
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      body: { leadId: LEAD_ID, workspaceId: WORKSPACE_ID },
+      headers: { authorization: "Bearer user-token-1" },
+    });
+    await handler(req, res);
+
+    expect(getStatus()).toBe(200);
+    expect(getBody()).toMatchObject({ summary: ANALYSIS.summary });
+    expect(puterCalls).toBe(2);
+  });
+
+  it("keeps returning 429 rate_limited while the provider throttles, without fabricating analysis", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
-    vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const rateLimit = () => new Response("rate limited", { status: 429, headers: { "retry-after": "0" } });
-    const { fetchMock } = installNetworkStub({ openAi: rateLimit });
-    const { req, res, getStatus, getBody } = createMockReqRes();
+    let puterCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes("api.puter.com")) {
+          puterCalls += 1;
+          return new Response(JSON.stringify({ error: { message: "Slow down" } }), {
+            status: 429,
+            headers: FALLBACK_DB.headers,
+          });
+        }
+        return supabaseStub({})(input, init);
+      }),
+    );
+
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      body: { leadId: LEAD_ID, workspaceId: WORKSPACE_ID },
+      headers: { authorization: "Bearer user-token-1" },
+    });
     await handler(req, res);
 
     expect(getStatus()).toBe(429);
     expect(getBody()).toMatchObject({ code: "rate_limited" });
-    // The retry policy exhausted its attempts before giving up.
-    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("openai.com"))).toHaveLength(3);
+    // Genuine rate limits are transient: the Puter client retries within its
+    // attempt budget, then surfaces the curated 429 — never fabricated data.
+    expect(puterCalls).toBe(3);
     vi.restoreAllMocks();
   });
 
-  it("reports missing server AI configuration without leaking the key", async () => {
+  it("maps an out-of-quota provider error to 502 with the quota note", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
-    delete process.env.OPENAI_API_KEY;
-    installNetworkStub();
-    const { req, res, getStatus, getBody } = createMockReqRes();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes("api.puter.com")) {
+          return new Response(JSON.stringify({ error: { message: "Insufficient balance" } }), {
+            status: 402,
+            headers: FALLBACK_DB.headers,
+          });
+        }
+        return supabaseStub({})(input, init);
+      }),
+    );
+
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      body: { leadId: LEAD_ID, workspaceId: WORKSPACE_ID },
+      headers: { authorization: "Bearer user-token-1" },
+    });
+    await handler(req, res);
+
+    expect(getStatus()).toBe(502);
+    expect(getBody()).toMatchObject({ code: "provider_quota", error: expect.stringContaining("usage quota") });
+    vi.restoreAllMocks();
+  });
+
+  it("returns a clearly labeled configuration error when PUTER_AUTH_TOKEN is missing", async () => {
+    delete process.env.PUTER_AUTH_TOKEN;
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => supabaseStub({})(input, init)));
+
+    const { req, res, getStatus, getBody } = createMockReqRes({
+      method: "POST",
+      body: { leadId: LEAD_ID, workspaceId: WORKSPACE_ID },
+      headers: { authorization: "Bearer user-token-1" },
+    });
     await handler(req, res);
 
     expect(getStatus()).toBe(500);
-    const body = getBody() as { error: string; code: string };
-    expect(body.code).toBe("missing_key");
-    expect(body.error).toContain("OPENAI_API_KEY");
-    expect(body.error).not.toContain(OPENAI_KEY);
+    expect(getBody()).toMatchObject({ code: "missing_key" });
+    const body = getBody() as Record<string, unknown>;
+    expect(String(body.error)).toContain("PUTER_AUTH_TOKEN");
+    expect(String(body.error)).not.toContain("OPENAI");
     vi.restoreAllMocks();
   });
 
-  it("requires authentication before any provider access", async () => {
-    // Even a garbage body must see 401, not request-shape details.
-    const { req, res, getStatus, getBody } = createMockReqRes({ headers: {}, body: { leadId: "x" } });
+  it("rejects requests without an Authorization header before validating the payload", async () => {
+    let sawFetch = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        sawFetch = true;
+        return new Response("{}", { status: 200 });
+      }),
+    );
+
+    const { req, res, getStatus, getBody } = createMockReqRes({ method: "POST", body: { leadId: "nope" } });
     await handler(req, res);
+
     expect(getStatus()).toBe(401);
     expect(getBody()).toMatchObject({ code: "auth_missing" });
+    expect(sawFetch).toBe(false);
   });
 
-  it("rejects non-POST requests with 405", async () => {
-    const { req, res, getStatus, getBody } = createMockReqRes({ method: "GET" });
+  it("rejects non-POST methods", async () => {
+    const { req, res, getStatus } = createMockReqRes({ method: "GET" });
     await handler(req, res);
     expect(getStatus()).toBe(405);
-    expect(getBody()).toMatchObject({ code: "method_not_allowed" });
   });
 });

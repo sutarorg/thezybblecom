@@ -1,25 +1,24 @@
 /* ------------------------------------------------------------------ */
-/* Zybble — reusable client-side Puter.js AI helper.                   */
+/* Zybble — reusable client-side AI helper.                            */
 /*                                                                     */
 /* One implementation shared by every AI surface in the browser: the   */
-/* /find request interpreter and the landing-page assistant. All calls */
-/* go through puter.ai.chat(...) with model deepseek/deepseek-v3.2 and */
-/* stream: true; streamed part.text values are surfaced through an     */
-/* onDelta callback so UIs render them as plain text (React escapes    */
-/* text nodes — no HTML from the model is ever interpreted).           */
+/* /find request interpreter (through services/api) and the landing-   */
+/* page assistant. All calls go to the same-origin Zybble backend      */
+/* (/api/ai-chat), which runs DeepSeek V3.2 through Puter's server     */
+/* API with a server-only PUTER_AUTH_TOKEN. The browser never loads    */
+/* Puter.js, never holds a Puter credential, and is never sent to a    */
+/* puter.com sign-in — the redirect users used to hit is gone by       */
+/* construction, not by suppression.                                   */
 /*                                                                     */
-/* Puter.js is loaded by the <script src="https://js.puter.com/v2/">   */
-/* tag in index.html; ensurePuter() waits for it and self-heals by     */
-/* injecting the same tag once if it is missing or was blocked.        */
-/* No API key of any kind is required — Puter's User-Pays model keeps  */
-/* provider credentials entirely out of this codebase.                 */
+/* The route streams server-sent events of the form                    */
+/*   data: {"text": "…"} / data: {"error": "…"} / data: [DONE]         */
+/* and this helper surfaces text deltas through onDelta so UIs render  */
+/* them as plain text (React escapes text nodes — model output is      */
+/* never interpreted as HTML).                                         */
 /* ------------------------------------------------------------------ */
 
-/** Official Puter.js script tag (also present in index.html). */
-export const PUTER_SCRIPT_SRC = "https://js.puter.com/v2/";
-
-/** The only model Zybble's client-side AI surfaces use. */
-export const PUTER_MODEL = "deepseek/deepseek-v3.2";
+/** Same-origin backend route that streams the assistant reply. */
+export const AI_CHAT_ROUTE = "/api/ai-chat";
 
 export type PuterChatMessage = {
   role: "system" | "user" | "assistant";
@@ -44,78 +43,7 @@ export class PuterAIError extends Error {
 }
 
 /* ------------------------------------------------------------------ */
-/* Minimal structural types for the Puter.js global (no official       */
-/* type package exists; these describe only what we consume).          */
-/* ------------------------------------------------------------------ */
-type PuterStreamPart = {
-  type?: unknown;
-  text?: unknown;
-  message?: unknown;
-};
-type PuterChatCompletion = {
-  text?: unknown;
-  message?: { content?: unknown } | Array<{ text?: unknown }>;
-};
-type PuterChatResult = AsyncIterable<PuterStreamPart> | PuterChatCompletion;
-
-interface PuterGlobal {
-  ai: {
-    chat(
-      prompt: string | PuterChatMessage[],
-      options?: { model?: string; stream?: boolean },
-    ): Promise<PuterChatResult>;
-  };
-}
-
-declare global {
-  interface Window {
-    puter?: PuterGlobal;
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* Puter.js availability                                               */
-/* ------------------------------------------------------------------ */
-const PUTER_LOAD_TIMEOUT_MS = 15_000;
-const PUTER_POLL_MS = 150;
-
-let scriptInjected = false;
-
-function injectPuterScript() {
-  if (scriptInjected || typeof document === "undefined") return;
-  scriptInjected = true;
-  if (document.querySelector(`script[src="${PUTER_SCRIPT_SRC}"]`)) return;
-  const script = document.createElement("script");
-  script.src = PUTER_SCRIPT_SRC;
-  script.async = true;
-  document.head.appendChild(script);
-}
-
-function isPuterReady(puter: PuterGlobal | undefined): puter is PuterGlobal {
-  return Boolean(puter?.ai && typeof puter.ai.chat === "function");
-}
-
-/**
- * Resolve the Puter.js global, waiting for the index.html script tag and
- * injecting it once if it never loaded. Throws a friendly PuterAIError when
- * AI is unavailable in this browser.
- */
-export async function ensurePuter(timeoutMs = PUTER_LOAD_TIMEOUT_MS): Promise<PuterGlobal> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (isPuterReady(window.puter)) return window.puter;
-    injectPuterScript();
-    if (Date.now() >= deadline) break;
-    await new Promise((resolve) => setTimeout(resolve, PUTER_POLL_MS));
-  }
-  throw new PuterAIError(
-    "Zybble AI couldn't load in your browser. Check your connection (or content blocker) and try again.",
-    "ai_unavailable",
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* Streaming chat                                                      */
+/* Streaming chat over the Zybble backend                              */
 /* ------------------------------------------------------------------ */
 const STREAM_TIMEOUT_MS = 45_000;
 
@@ -128,45 +56,15 @@ export function sanitizeStreamText(value: string) {
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
 }
 
-/** Text carried by one streamed part; anything else is ignored. */
-function streamPartText(part: PuterStreamPart): string {
-  if (part?.type === "error") {
-    const message = typeof part.message === "string" ? part.message : "";
-    throw new PuterAIError(
-      message && !/https?:\/\//i.test(message) && message.length < 300
-        ? `Zybble AI couldn't complete that request. ${message}`
-        : "Zybble AI couldn't complete that request. Please try again.",
-      "provider_error",
-    );
-  }
-  return typeof part?.text === "string" ? sanitizeStreamText(part.text) : "";
-}
-
-/** Defensive text extraction for a non-streamed completion object. */
-function completionText(result: PuterChatCompletion): string {
-  if (typeof result?.text === "string") return sanitizeStreamText(result.text);
-  const message = result?.message;
-  if (message && !Array.isArray(message)) {
-    const content = message.content;
-    if (typeof content === "string") return sanitizeStreamText(content);
-    if (Array.isArray(content)) {
-      return content
-        .map((part) => (part && typeof part.text === "string" ? part.text : ""))
-        .join("");
-    }
-  }
-  return "";
-}
-
-/** Race one stream chunk against an inactivity timeout. */
-async function nextWithTimeout<T>(
-  iterator: AsyncIterator<T>,
+/** Race one SSE read against an inactivity timeout. */
+async function readWithTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
   timeoutMs: number,
-): Promise<IteratorResult<T>> {
+): Promise<ReadableStreamReadResult<Uint8Array>> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      iterator.next(),
+      reader.read(),
       new Promise<never>((_, reject) => {
         timer = setTimeout(
           () =>
@@ -185,92 +83,161 @@ async function nextWithTimeout<T>(
   }
 }
 
-/** Map a raw puter.ai.chat failure to a safe, friendly message. */
+/** A server-reported failure: keep the curated message, stay secret-free. */
+function serverErrorMessage(value: unknown): string {
+  if (typeof value !== "string") return "Zybble AI couldn't complete that request. Please try again.";
+  const message = value.trim();
+  if (!message || message.length > 300 || /https?:\/\/|<\/?[a-z]|\\n\s*at\s/i.test(message)) {
+    return "Zybble AI couldn't complete that request. Please try again.";
+  }
+  return message;
+}
+
+/** Map a fetch-level failure to a safe, friendly message. */
 function toPuterAIError(error: unknown): PuterAIError {
   if (error instanceof PuterAIError) return error;
-  const message = error instanceof Error ? error.message : "";
-  if (/permission|auth|sign.?in|log.?in|token/i.test(message)) {
+  if (error instanceof Error && error.name === "AbortError") {
     return new PuterAIError(
-      "Zybble AI runs on Puter — complete the quick Puter sign-in (allow the pop-up) and try again.",
-      "provider_error",
+      "Zybble AI took too long to respond. Please try again.",
+      "ai_timeout",
     );
   }
-  if (/usage|limit|quota|credit/i.test(message)) {
-    return new PuterAIError(
-      "Zybble AI usage was declined by Puter. Check your Puter account and try again.",
-      "provider_error",
-    );
-  }
+  // TypeError from fetch = network/DNS/CORS — the service is unreachable.
   return new PuterAIError(
-    "Zybble AI couldn't complete that request. Please try again.",
-    "provider_error",
+    "Zybble AI couldn't be reached. Check your connection and try again.",
+    "ai_unavailable",
   );
 }
 
 export type StreamPuterChatOptions = {
-  /** Called for every streamed part.text delta, already sanitized. */
+  /** Called for every streamed text delta, already sanitized. */
   onDelta?: (delta: string) => void;
   /** Per-chunk inactivity timeout in milliseconds. */
   timeoutMs?: number;
 };
 
 /**
- * The one shared AI call: puter.ai.chat(messages, { model, stream: true }).
- * Consumes the stream, forwards every part.text through onDelta, and
- * resolves with the complete text. Falls back defensively to a non-streamed
- * completion shape if the runtime ignores `stream`.
+ * The one shared AI call: POST the conversation to the Zybble backend and
+ * consume the SSE stream. Every {"text": …} frame is forwarded through
+ * onDelta (sanitized) and accumulated; the promise resolves with the
+ * complete text. An {"error": …} frame, a truncated stream, or an empty
+ * completion rejects — partial text is never presented as a result.
  */
 export async function streamPuterChat(
   messages: PuterChatMessage[],
   options?: StreamPuterChatOptions,
 ): Promise<string> {
-  const puter = await ensurePuter();
   const timeoutMs = options?.timeoutMs ?? STREAM_TIMEOUT_MS;
+  const controller = new AbortController();
 
-  let response: PuterChatResult;
+  let response: Response;
   try {
-    response = await puter.ai.chat(messages, { model: PUTER_MODEL, stream: true });
+    response = await fetch(AI_CHAT_ROUTE, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages }),
+      signal: controller.signal,
+    });
   } catch (error) {
     throw toPuterAIError(error);
   }
 
-  if (response && typeof (response as AsyncIterable<PuterStreamPart>)[Symbol.asyncIterator] === "function") {
-    let full = "";
-    const iterator = (response as AsyncIterable<PuterStreamPart>)[Symbol.asyncIterator]();
-    for (;;) {
-      let chunk: IteratorResult<PuterStreamPart>;
-      try {
-        chunk = await nextWithTimeout(iterator, timeoutMs);
-      } catch (error) {
-        throw toPuterAIError(error);
-      }
-      if (chunk.done) break;
-      const delta = streamPartText(chunk.value);
+  if (!response.ok) {
+    // Pre-stream failures are ordinary JSON: { error, code }.
+    let message: string | undefined;
+    try {
+      const body = (await response.json()) as Record<string, unknown>;
+      message = typeof body?.error === "string" ? body.error : undefined;
+    } catch {
+      message = undefined;
+    }
+    if (response.status === 429) {
+      throw new PuterAIError(
+        message ?? "Zybble AI is busy right now. Please try again shortly.",
+        "provider_error",
+      );
+    }
+    throw new PuterAIError(serverErrorMessage(message), "provider_error");
+  }
+
+  if (!response.body) {
+    throw new PuterAIError(
+      "Zybble AI couldn't load in this browser. Please try again.",
+      "ai_unavailable",
+    );
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let full = "";
+
+  const handleEvent = (rawEvent: string) => {
+    const data = rawEvent
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).replace(/^ /, ""))
+      .join("\n")
+      .trim();
+    if (!data || data === "[DONE]") return;
+    let frame: Record<string, unknown>;
+    try {
+      frame = JSON.parse(data) as Record<string, unknown>;
+    } catch {
+      throw new PuterAIError("Zybble AI returned malformed data. Please try again.", "malformed_response");
+    }
+    if (typeof frame.error === "string") {
+      throw new PuterAIError(serverErrorMessage(frame.error), "provider_error");
+    }
+    if (typeof frame.text === "string" && frame.text) {
+      const delta = sanitizeStreamText(frame.text);
       if (delta) {
         full += delta;
         options?.onDelta?.(delta);
       }
     }
-    if (!full.trim()) {
-      throw new PuterAIError("Zybble AI returned an empty response. Please try again.", "empty_response");
+  };
+
+  try {
+    for (;;) {
+      const { done, value } = await readWithTimeout(reader, timeoutMs).catch((error) => {
+        throw toPuterAIError(error);
+      });
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let match: RegExpExecArray | null;
+      while ((match = /\r?\n\r?\n/.exec(buffer)) !== null) {
+        handleEvent(buffer.slice(0, match.index));
+        buffer = buffer.slice(match.index + match[0].length);
+      }
     }
-    return full;
+    buffer += decoder.decode();
+    if (buffer.trim()) handleEvent(buffer);
+  } catch (error) {
+    controller.abort();
+    throw toPuterAIError(error);
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* already released */
+    }
   }
 
-  const text = completionText(response as PuterChatCompletion);
-  if (!text.trim()) {
+  if (!full.trim()) {
     throw new PuterAIError("Zybble AI returned an empty response. Please try again.", "empty_response");
   }
-  options?.onDelta?.(text);
-  return text;
+  return full;
 }
 
 /* ------------------------------------------------------------------ */
 /* /find — natural-language request → search filters                   */
 /*                                                                     */
-/* Same contract the server-side interpreter used to enforce: the      */
-/* model only fills the filter form, every value is validated and      */
-/* clamped client-side, and the search itself is NEVER run.            */
+/* The interpretation itself runs server-side in /api/ai-interpret;    */
+/* this module carries the shared contract: the model only fills the   */
+/* filter form, every value is validated and clamped (mirrored         */
+/* server-side in api/_lib/interpret.ts), and the search itself is     */
+/* NEVER run.                                                          */
 /* ------------------------------------------------------------------ */
 export type InterpretedSearchFilters = {
   category?: string;
@@ -291,15 +258,8 @@ export type SearchInterpretation = {
   notes: string[];
 };
 
-const MAX_INTERPRET_LEADS = 240;
-
-const INTERPRET_SYSTEM_PROMPT = `You turn a user's lead-discovery request into search-form filters.
-You only fill the form; you do not run a search, consume quota, create leads, or claim that results were found.
-Do not invent requirements. Use null for optional values the user did not request and false for requirements the user did not state.
-Only set businessSize to small, medium, or enterprise when the user actually requests that size.
-Keep category suitable for a Google Maps business search. Keep summary and notes concise.
-Respond with ONLY a JSON object (no markdown, no code fences) using exactly this shape:
-{"category": "string — the requested business category", "location": "string or null — only the location stated by the user", "quantity": "integer or null — the requested quantity", "minRating": "one of null, '3', '3.5', '4', '4.5'", "priceLevel": "one of null, '1', '2', '3', '4'", "businessSize": "one of null, 'small', 'medium', 'enterprise' — only when explicitly requested", "requireWebsite": false, "requirePhone": false, "requireEmail": false, "openNow": false, "summary": "one short sentence", "notes": ["at most two short strings"]}`;
+/** Per-search clamp applied to AI-proposed quantities (matches the server). */
+export const MAX_INTERPRET_LEADS = 240;
 
 function explicitlyRequestedBusinessSize(request: string, size: string) {
   const text = request.toLowerCase();
@@ -311,9 +271,10 @@ function explicitlyRequestedBusinessSize(request: string, size: string) {
 }
 
 /**
- * Validate and clamp a raw model interpretation. Returns null when no usable
- * business category was produced. Mirrors the validation the server-side
- * interpreter always applied before any value reached the search form.
+ * Validate and clamp a raw interpretation. Returns null when no usable
+ * business category was produced. Mirrors the validation the server applies
+ * before the filters leave /api/ai-interpret — kept here as defense-in-depth
+ * for every response path (same-origin route and Edge fallback alike).
  */
 export function cleanInterpretResult(
   raw: Record<string, unknown>,
@@ -367,6 +328,21 @@ export function cleanInterpretResult(
 }
 
 /**
+ * The server-side interpretation shape ({ ok, model, filters, summary,
+ * notes }) re-validated and clamped client-side. Returns null when the
+ * payload lacks a usable business category.
+ */
+export function cleanServerInterpretation(payload: unknown, request: string): SearchInterpretation | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const body = payload as Record<string, unknown>;
+  const filters =
+    body.filters && typeof body.filters === "object" && !Array.isArray(body.filters)
+      ? (body.filters as Record<string, unknown>)
+      : {};
+  return cleanInterpretResult({ ...filters, summary: body.summary, notes: body.notes }, request);
+}
+
+/**
  * Pull the first JSON object out of a model reply — plain JSON, a fenced
  * ```json block, or JSON surrounded by prose. Returns null when no object
  * can be recovered.
@@ -395,33 +371,4 @@ export function extractJsonObject(text: string): Record<string, unknown> | null 
     }
   }
   return null;
-}
-
-/**
- * Interpret a plain-language lead request into search filters with the
- * shared DeepSeek V3.2 stream. One silent retry when the reply isn't usable
- * JSON; the result is fully validated and clamped. Never runs a search.
- */
-export async function interpretSearchRequest(request: string): Promise<SearchInterpretation> {
-  let sawCategoryMissing = false;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const system = attempt === 0
-      ? INTERPRET_SYSTEM_PROMPT
-      : `${INTERPRET_SYSTEM_PROMPT}\nYour previous reply was not usable. Respond with the JSON object only, and always include a non-empty "category".`;
-    const text = await streamPuterChat([
-      { role: "system", content: system },
-      { role: "user", content: `User request: ${request}` },
-    ]);
-    const parsed = extractJsonObject(text);
-    if (!parsed) continue;
-    const cleaned = cleanInterpretResult(parsed, request);
-    if (cleaned) return cleaned;
-    sawCategoryMissing = true;
-  }
-  throw new PuterAIError(
-    sawCategoryMissing
-      ? "Zybble AI couldn't identify a business category. Try rephrasing."
-      : "Zybble AI couldn't turn that into filters. Try rephrasing.",
-    sawCategoryMissing ? "category_missing" : "malformed_response",
-  );
 }

@@ -1,46 +1,149 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  PUTER_MODEL,
-  PuterAIError,
+  MAX_INTERPRET_LEADS,
   cleanInterpretResult,
-  ensurePuter,
+  cleanServerInterpretation,
   extractJsonObject,
-  interpretSearchRequest,
   sanitizeStreamText,
   streamPuterChat,
 } from "./puter-ai";
 
 /**
- * The shared client-side Puter AI helper (DeepSeek V3.2). These tests pin the
- * contract both AI surfaces rely on: streamed part.text handling, safe
- * parsing of model JSON, and the exact filter validation the server-side
- * interpreter used to enforce.
+ * The shared client-side AI helper. The browser no longer loads Puter.js or
+ * contacts Puter at all: conversations POST to the same-origin Zybble backend
+ * (/api/ai-chat — DeepSeek V3.2 on Puter's server-side API) and stream back
+ * as server-sent events. These tests pin the SSE contract both AI surfaces
+ * rely on, the friendly-error mapping, and the interpret-response validation
+ * the search form depends on.
  */
 
-function streamOf(parts: unknown[]) {
-  return {
-    async *[Symbol.asyncIterator]() {
-      for (const part of parts) yield part;
-    },
-  };
+function sseResponse(frames: Array<Record<string, unknown> | "[DONE]">, status = 200) {
+  const body = frames
+    .map((frame) => (frame === "[DONE]" ? "data: [DONE]\n\n" : `data: ${JSON.stringify(frame)}\n\n`))
+    .join("");
+  return new Response(body, {
+    status,
+    headers: { "content-type": "text/event-stream" },
+  });
 }
 
-beforeEach(() => {
-  delete (window as { puter?: unknown }).puter;
-});
+function jsonErrorResponse(payload: Record<string, unknown>, status: number) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
 describe("sanitizeStreamText", () => {
   it("normalizes line endings and strips control characters", () => {
-    expect(sanitizeStreamText("a\r\nb\rc\u0000d\u0007e\u001Ff")).toBe("a\nb\ncdef");
+    const dirty = `a\r\nb\rc${String.fromCharCode(0)}d${String.fromCharCode(7)}e${String.fromCharCode(31)}f`;
+    expect(sanitizeStreamText(dirty)).toBe("a\nb\ncdef");
   });
 });
 
-describe("cleanInterpretResult — same clamps the server applied", () => {
+describe("streamPuterChat — Zybble backend transport", () => {
+  it("POSTs the conversation to the same-origin /api/ai-chat route and streams text deltas", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(sseResponse([{ text: "Hello" }, { text: " there" }, "[DONE]"]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const deltas: string[] = [];
+    const full = await streamPuterChat([{ role: "user", content: "hi" }], {
+      onDelta: (delta) => deltas.push(delta),
+    });
+
+    expect(full).toBe("Hello there");
+    expect(deltas).toEqual(["Hello", " there"]);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("/api/ai-chat");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({
+      messages: [{ role: "user", content: "hi" }],
+    });
+    // No Puter script, key, or origin appears anywhere in the request.
+    expect(JSON.stringify(init.headers ?? {})).not.toContain("puter.com");
+  });
+
+  it("resolves from a single-frame reply and tolerates frames split across chunks", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"text":"one an'));
+        controller.enqueue(encoder.encode('d two"}\n\ndata: {"text":" three"}\n'));
+        controller.enqueue(encoder.encode("\ndata: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } })),
+    );
+    await expect(streamPuterChat([{ role: "user", content: "hi" }])).resolves.toBe("one and two three");
+  });
+
+  it("rejects with the curated server message on pre-stream errors", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonErrorResponse({ error: "Zybble AI is busy right now. Please try again shortly.", code: "rate_limited" }, 429)),
+    );
+    await expect(streamPuterChat([{ role: "user", content: "hi" }])).rejects.toMatchObject({
+      name: "PuterAIError",
+      message: "Zybble AI is busy right now. Please try again shortly.",
+      code: "provider_error",
+    });
+  });
+
+  it("never surfaces internal URLs or markup from server errors", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonErrorResponse({ error: "stack at https://api.puter.com/internal\nat x.js:1" }, 500)),
+    );
+    await expect(streamPuterChat([{ role: "user", content: "hi" }])).rejects.toMatchObject({
+      message: "Zybble AI couldn't complete that request. Please try again.",
+    });
+  });
+
+  it("rejects on an in-stream error frame, discarding partial text", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(sseResponse([{ text: "partial" }, { error: "Zybble AI couldn't complete that request. Please try again." }, "[DONE]"])),
+    );
+    await expect(streamPuterChat([{ role: "user", content: "hi" }])).rejects.toMatchObject({
+      code: "provider_error",
+    });
+  });
+
+  it("rejects on an empty stream", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(sseResponse(["[DONE]"])));
+    await expect(streamPuterChat([{ role: "user", content: "hi" }])).rejects.toThrow(/empty response/i);
+  });
+
+  it("rejects on malformed stream frames", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("data: not-json\n\n", { status: 200, headers: { "content-type": "text/event-stream" } }),
+      ),
+    );
+    await expect(streamPuterChat([{ role: "user", content: "hi" }])).rejects.toThrow(/malformed/i);
+  });
+
+  it("maps a dropped network call to an availability error", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+    await expect(streamPuterChat([{ role: "user", content: "hi" }])).rejects.toMatchObject({
+      code: "ai_unavailable",
+    });
+  });
+});
+
+describe("cleanInterpretResult — the same clamps the server applies", () => {
   const base = {
     category: "dentists",
     location: "Austin",
@@ -55,9 +158,9 @@ describe("cleanInterpretResult — same clamps the server applied", () => {
     notes: [],
   };
 
-  it("keeps valid filters and clamps the quantity to the per-search maximum", () => {
+  it(`keeps valid filters and clamps the quantity to the per-search maximum (${MAX_INTERPRET_LEADS})`, () => {
     const result = cleanInterpretResult({ ...base, quantity: 500 }, "Find 500 dentists in Austin");
-    expect(result?.filters).toMatchObject({ category: "dentists", quantity: 240 });
+    expect(result?.filters).toMatchObject({ category: "dentists", quantity: MAX_INTERPRET_LEADS });
   });
 
   it("accepts a numeric string quantity from the model", () => {
@@ -105,6 +208,30 @@ describe("cleanInterpretResult — same clamps the server applied", () => {
   });
 });
 
+describe("cleanServerInterpretation — the /api/ai-interpret response contract", () => {
+  it("accepts the server payload shape and re-clamps it", () => {
+    const result = cleanServerInterpretation(
+      {
+        ok: true,
+        model: "deepseek/deepseek-v3.2",
+        filters: { category: "dentists", location: "Austin, TX", quantity: 500 },
+        summary: "Austin dentists.",
+        notes: [],
+      },
+      "500 dentists in Austin",
+    );
+    expect(result?.filters).toMatchObject({ category: "dentists", quantity: MAX_INTERPRET_LEADS });
+    expect(result?.summary).toBe("Austin dentists.");
+  });
+
+  it("rejects malformed and category-less payloads", () => {
+    expect(cleanServerInterpretation(null, "x")).toBeNull();
+    expect(cleanServerInterpretation({ ok: true }, "x")).toBeNull();
+    expect(cleanServerInterpretation({ filters: { location: "Austin" } }, "x")).toBeNull();
+    expect(cleanServerInterpretation(["not", "an", "object"], "x")).toBeNull();
+  });
+});
+
 describe("extractJsonObject", () => {
   it("parses plain JSON", () => {
     expect(extractJsonObject('{"category":"dentists"}')).toEqual({ category: "dentists" });
@@ -127,118 +254,14 @@ describe("extractJsonObject", () => {
   });
 });
 
-describe("streamPuterChat", () => {
-  it("streams part.text deltas through onDelta and resolves with the full text", async () => {
-    const chat = vi.fn().mockResolvedValue(
-      streamOf([{ text: "Hello" }, { type: "other" }, { text: " there" }, { text: "" }]),
-    );
-    (window as { puter?: unknown }).puter = { ai: { chat } };
-
-    const deltas: string[] = [];
-    const full = await streamPuterChat([{ role: "user", content: "hi" }], {
-      onDelta: (delta) => deltas.push(delta),
-    });
-
-    expect(full).toBe("Hello there");
-    expect(deltas).toEqual(["Hello", " there"]);
-    expect(chat).toHaveBeenCalledWith([{ role: "user", content: "hi" }], {
-      model: PUTER_MODEL,
-      stream: true,
-    });
-  });
-
-  it("falls back to a non-streamed completion shape", async () => {
-    (window as { puter?: unknown }).puter = {
-      ai: { chat: vi.fn().mockResolvedValue({ message: { content: "Instant answer." } }) },
-    };
-    const full = await streamPuterChat([{ role: "user", content: "hi" }]);
-    expect(full).toBe("Instant answer.");
-  });
-
-  it("throws a friendly error when the provider rejects the call", async () => {
-    (window as { puter?: unknown }).puter = {
-      ai: { chat: vi.fn().mockRejectedValue(new Error("Permission denied by user")) },
-    };
-    await expect(streamPuterChat([{ role: "user", content: "hi" }])).rejects.toThrow(/Puter sign-in/);
-  });
-
-  it("throws on an empty stream", async () => {
-    (window as { puter?: unknown }).puter = {
-      ai: { chat: vi.fn().mockResolvedValue(streamOf([{ text: "" }, { type: "other" }])) },
-    };
-    await expect(streamPuterChat([{ role: "user", content: "hi" }])).rejects.toThrow(/empty response/i);
-  });
-
-  it("surfaces an error part from the stream", async () => {
-    (window as { puter?: unknown }).puter = {
-      ai: { chat: vi.fn().mockResolvedValue(streamOf([{ type: "error", message: "model overloaded" }])) },
-    };
-    await expect(streamPuterChat([{ role: "user", content: "hi" }])).rejects.toThrow(/model overloaded/);
-  });
-
-  it("times out when the stream stalls", async () => {
-    (window as { puter?: unknown }).puter = {
-      ai: {
-        chat: vi.fn().mockResolvedValue({
-          async *[Symbol.asyncIterator]() {
-            yield { text: "partial" };
-            await new Promise(() => undefined); // never resolves
-          },
-        }),
-      },
-    };
-    await expect(
-      streamPuterChat([{ role: "user", content: "hi" }], { timeoutMs: 20 }),
-    ).rejects.toThrow(/took too long/i);
-  });
-});
-
-describe("interpretSearchRequest", () => {
-  it("returns validated filters from the model's JSON", async () => {
-    (window as { puter?: unknown }).puter = {
-      ai: {
-        chat: vi.fn().mockResolvedValue(
-          streamOf([
-            { text: '{"category":"dentists","location":"Austin, TX","quantity":' },
-            { text: '100,"requireWebsite":true,"summary":"Austin dentists.","notes":[]}' },
-          ]),
-        ),
-      },
-    };
-    const result = await interpretSearchRequest("100 dentists in Austin with websites");
-    expect(result.filters).toEqual({ category: "dentists", location: "Austin, TX", quantity: 100, requireWebsite: true });
-    expect(result.summary).toBe("Austin dentists.");
-  });
-
-  it("retries once when the first reply is not usable JSON", async () => {
-    const chat = vi
-      .fn()
-      .mockResolvedValueOnce(streamOf([{ text: "Sure — dentists sound great!" }]))
-      .mockResolvedValueOnce(streamOf([{ text: '{"category":"dentists"}' }]));
-    (window as { puter?: unknown }).puter = { ai: { chat } };
-
-    const result = await interpretSearchRequest("dentists");
-    expect(result.filters.category).toBe("dentists");
-    expect(chat).toHaveBeenCalledTimes(2);
-  });
-
-  it("fails with a category error when the model never produces a category", async () => {
-    (window as { puter?: unknown }).puter = {
-      ai: { chat: vi.fn().mockResolvedValue(streamOf([{ text: '{"category":null}' }])) },
-    };
-    await expect(interpretSearchRequest("hello")).rejects.toThrow(/couldn't identify a business category/i);
-  });
-});
-
-describe("ensurePuter", () => {
-  it("resolves the global when Puter.js is present", async () => {
-    const puter = { ai: { chat: vi.fn() } };
-    (window as { puter?: unknown }).puter = puter;
-    await expect(ensurePuter()).resolves.toBe(puter);
-  });
-
-  it("throws a friendly error when Puter.js cannot load", async () => {
-    await expect(ensurePuter(170)).rejects.toThrow(PuterAIError);
-    await expect(ensurePuter(170)).rejects.toThrow(/couldn't load/i);
+describe("no browser Puter dependency", () => {
+  it("the module never references the Puter.js script or sign-in", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const source = readFileSync(resolve(process.cwd(), "src", "lib", "puter-ai.ts"), "utf8");
+    expect(source).not.toContain("js.puter.com");
+    expect(source).not.toContain("puter.auth");
+    expect(source).not.toContain("window.puter");
+    expect(source).not.toContain("signIn");
   });
 });

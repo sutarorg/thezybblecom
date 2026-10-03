@@ -6,9 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * when that route is unavailable, and never turn a malformed/empty payload
  * into a fake success.
  *
- * Interpretation is now client-side: the route is an authorization + usage
- * gate, and the DeepSeek V3.2 interpretation itself runs through the shared
- * Puter.js helper (mocked here).
+ * Interpretation now runs fully server-side: the route both authorizes the
+ * caller (session → membership → plan) and runs the DeepSeek V3.2
+ * interpretation through the server-side Puter integration, returning
+ * ready-to-apply filters. The browser never loads Puter.js, never sees a
+ * Puter credential, and never triggers a puter.com sign-in.
  */
 
 const h = vi.hoisted(() => {
@@ -17,17 +19,7 @@ const h = vi.hoisted(() => {
   const getSession = vi.fn();
   const invoke = vi.fn();
   const client = { auth: { getSession }, functions: { invoke } };
-  // Stand-in for the client-side Puter AI helper.
-  const interpretSearchRequest = vi.fn();
-  const PuterAIError = class extends Error {
-    code: string;
-    constructor(message: string, code: string) {
-      super(message);
-      this.name = "PuterAIError";
-      this.code = code;
-    }
-  };
-  return { client, getSession, invoke, interpretSearchRequest, PuterAIError };
+  return { client, getSession, invoke };
 });
 
 vi.mock("./supabase", () => ({
@@ -35,18 +27,10 @@ vi.mock("./supabase", () => ({
   BACKEND_ENABLED: true,
 }));
 
-vi.mock("../../lib/puter-ai", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../../lib/puter-ai")>();
-  return {
-    ...original,
-    interpretSearchRequest: h.interpretSearchRequest,
-    PuterAIError: h.PuterAIError,
-  };
-});
-
 import { analyzeLead, interpretRequest } from "./api";
 
 const SESSION = { data: { session: { access_token: "caller-token", user: { id: "u1" } } } };
+const DEEPSEEK_MODEL = "deepseek/deepseek-v3.2";
 
 beforeEach(() => {
   h.getSession.mockReset().mockResolvedValue(SESSION);
@@ -67,7 +51,7 @@ describe("analyzeLead — same-origin route first, Edge fallback second", () => 
       summary: "Strong local presence.",
       points: ["4.7 stars.", "Phone available.", "Angle: lead with reviews."],
       outreach_angle: "Angle: lead with reviews.",
-      model: "o4-mini",
+      model: DEEPSEEK_MODEL,
       cached: false,
     }));
     vi.stubGlobal("fetch", fetchMock);
@@ -76,7 +60,7 @@ describe("analyzeLead — same-origin route first, Edge fallback second", () => 
     expect(error).toBeUndefined();
     expect(result?.summary).toBe("Strong local presence.");
     expect(result?.points).toHaveLength(3);
-    expect(result?.model).toBe("o4-mini");
+    expect(result?.model).toBe(DEEPSEEK_MODEL);
 
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).toBe("/api/ai-analyze");
@@ -95,7 +79,7 @@ describe("analyzeLead — same-origin route first, Edge fallback second", () => 
   it("falls back to the Edge Function when the route is missing (404)", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("Not Found", { status: 404, headers: { "content-type": "text/html" } })));
     h.client.functions.invoke.mockResolvedValue({
-      data: { summary: "From the edge.", points: ["p1", "p2"], model: "o4-mini" },
+      data: { summary: "From the edge.", points: ["p1", "p2"], model: DEEPSEEK_MODEL },
       error: null,
     });
 
@@ -109,7 +93,7 @@ describe("analyzeLead — same-origin route first, Edge fallback second", () => 
   });
 
   it("never fabricates analysis for a blank 200 payload", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ summary: "", points: [], model: "o4-mini" })));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ summary: "", points: [], model: DEEPSEEK_MODEL })));
     const { result, error } = await analyzeLead("lead-1", "ws-1");
     expect(result).toBeUndefined();
     expect(error).toBe("Zybble AI returned incomplete analysis. Please try again.");
@@ -135,23 +119,24 @@ describe("analyzeLead — same-origin route first, Edge fallback second", () => 
   });
 });
 
-describe("interpretRequest — gated client-side filter interpretation", () => {
-  beforeEach(() => {
-    h.interpretSearchRequest.mockReset().mockResolvedValue({
-      filters: { category: "dentists", location: "Austin, TX", requireEmail: true },
-      summary: "Austin dentists with public emails.",
-      notes: [],
-    });
-  });
+describe("interpretRequest — server-side DeepSeek interpretation", () => {
+  const serverPayload = {
+    ok: true,
+    model: DEEPSEEK_MODEL,
+    filters: { category: "dentists", location: "Austin, TX", requireEmail: true, quantity: 75 },
+    summary: "Austin dentists with public emails.",
+    notes: [],
+  };
 
-  it("runs the client-side interpretation after the gate authorizes it", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true, model: "deepseek/deepseek-v3.2" }));
+  it("returns the server's interpreted filters — the browser runs no AI itself", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(serverPayload));
     vi.stubGlobal("fetch", fetchMock);
 
     const { result, error } = await interpretRequest("ws-1", "dentists in Austin with emails");
     expect(error).toBeUndefined();
     expect(result?.filters.category).toBe("dentists");
     expect(result?.filters.requireEmail).toBe(true);
+    expect(result?.filters.quantity).toBe(75);
     expect(result?.summary).toContain("Austin dentists");
 
     const [url, init] = fetchMock.mock.calls[0];
@@ -161,23 +146,52 @@ describe("interpretRequest — gated client-side filter interpretation", () => {
       workspaceId: "ws-1",
       request: "dentists in Austin with emails",
     });
-    expect(h.interpretSearchRequest).toHaveBeenCalledWith("dentists in Austin with emails");
+    // Exactly one request: the interpretation happened on the server.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(h.invoke).not.toHaveBeenCalled();
   });
 
-  it("surfaces gate failures without running the AI", async () => {
+  it("re-clamps an over-limit quantity before it can reach the search form", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
+      ...serverPayload,
+      filters: { ...serverPayload.filters, quantity: 500 },
+    })));
+    const { result, error } = await interpretRequest("ws-1", "500 dentists in Austin");
+    expect(error).toBeUndefined();
+    expect(result?.filters.quantity).toBe(240);
+  });
+
+  it("surfaces gate failures precisely", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ error: "Zybble AI isn't available on your current plan.", code: "ai_not_entitled" }, 403)));
 
     const { result, error } = await interpretRequest("ws-1", "dentists in Austin");
     expect(result).toBeUndefined();
     expect(error).toBe("Zybble AI isn't available on your current plan.");
-    expect(h.interpretSearchRequest).not.toHaveBeenCalled();
     expect(h.invoke).not.toHaveBeenCalled();
   });
 
-  it("falls back to the Edge Function gate when the route is missing (404)", async () => {
+  it("surfaces a server-side interpretation failure verbatim", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
+      error: "Zybble AI couldn't identify a business category. Try rephrasing.",
+      code: "category_missing",
+    }, 502)));
+
+    const { result, error } = await interpretRequest("ws-1", "hello there");
+    expect(result).toBeUndefined();
+    expect(error).toBe("Zybble AI couldn't identify a business category. Try rephrasing.");
+    expect(h.invoke).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed payload instead of fabricating filters", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ ok: true, model: DEEPSEEK_MODEL, filters: { location: "Austin" } })));
+    const { result, error } = await interpretRequest("ws-1", "dentists in Austin");
+    expect(result).toBeUndefined();
+    expect(error).toBe("Zybble AI couldn't identify a business category. Try rephrasing.");
+  });
+
+  it("falls back to the Edge Function when the route is missing (404)", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("Not Found", { status: 404, headers: { "content-type": "text/html" } })));
-    h.invoke.mockResolvedValue({ data: { ok: true, model: "deepseek/deepseek-v3.2" }, error: null });
+    h.invoke.mockResolvedValue({ data: serverPayload, error: null });
 
     const { result, error } = await interpretRequest("ws-1", "dentists in Austin");
     expect(error).toBeUndefined();
@@ -186,16 +200,6 @@ describe("interpretRequest — gated client-side filter interpretation", () => {
       body: expect.objectContaining({ workspaceId: "ws-1", request: "dentists in Austin" }),
       headers: { Authorization: "Bearer caller-token" },
     }));
-    expect(h.interpretSearchRequest).toHaveBeenCalledWith("dentists in Austin");
-  });
-
-  it("reports a client-side interpretation failure with its message", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ ok: true, model: "deepseek/deepseek-v3.2" })));
-    h.interpretSearchRequest.mockRejectedValue(new h.PuterAIError("Zybble AI couldn't identify a business category. Try rephrasing.", "category_missing"));
-
-    const { result, error } = await interpretRequest("ws-1", "hello");
-    expect(result).toBeUndefined();
-    expect(error).toBe("Zybble AI couldn't identify a business category. Try rephrasing.");
   });
 
   it("requires a session before any request", async () => {
@@ -203,6 +207,6 @@ describe("interpretRequest — gated client-side filter interpretation", () => {
     const { result, error } = await interpretRequest("ws-1", "dentists in Austin");
     expect(result).toBeUndefined();
     expect(error).toBe("Your session expired — sign in again.");
-    expect(h.interpretSearchRequest).not.toHaveBeenCalled();
+    expect(h.invoke).not.toHaveBeenCalled();
   });
 });
