@@ -3,12 +3,17 @@
 /* No mock data, no simulated success. Reads go through RLS-guarded    */
 /* PostgREST; provider/money actions go through Edge Functions.        */
 /* ------------------------------------------------------------------ */
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabase, BACKEND_ENABLED } from "./supabase";
 import { planFromId, planLabel } from "../data/plans";
 import { mergeTags, validateTag } from "../lib/tags";
 import { formatAppDate, setRuntimePreferences, type RuntimePreferences } from "../lib/datetime";
 import { parseApiResponse } from "./api-response";
 import { readFunctionError } from "./edge-error";
+import {
+  interpretSearchRequest,
+  PuterAIError,
+} from "../../lib/puter-ai";
 import type {
   ActivityItem,
   ExportRecord,
@@ -657,6 +662,50 @@ export type Interpretation = {
   notes: string[];
 };
 
+/**
+ * Authorization + usage gate for an AI interpretation. The AI call itself
+ * runs in the browser through Puter.js (DeepSeek V3.2) — no provider key
+ * exists on either side of this flow. The gate keeps every server-side
+ * guarantee the interpretation always had: the caller's Supabase session,
+ * workspace membership, plan entitlement, and one ai_requests usage row.
+ * Returns null when interpretation may proceed.
+ */
+async function requestInterpretationGate(
+  sb: SupabaseClient,
+  workspaceId: string,
+  request: string,
+  token: string,
+): Promise<string | null> {
+  /* Prefer the same-origin server function. Non-Vercel deployments retain
+     the Supabase Edge fallback. */
+  try {
+    const response = await fetch("/api/ai-interpret", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ workspaceId, request }),
+    });
+    const parsed = await parseApiResponse<{ ok: boolean }>(response, "AI");
+    if (parsed.data?.ok) return null;
+    if (!parsed.shouldFallback) return parsed.error ?? "Zybble AI couldn't interpret that request.";
+  } catch {
+    // Same-origin route unavailable; use the deployed Edge Function below.
+  }
+
+  const { data, error } = await sb.functions.invoke("ai-interpret", {
+    body: { workspaceId, request },
+    // Do not rely on the SDK's implicit session lookup. Supplying the token
+    // explicitly makes the JWT boundary visible.
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (error) return await readFunctionError(error, "ai-interpret", "AI");
+  if (data?.error) return String(data.error);
+  if (data?.ok !== true) return "Zybble AI couldn't interpret that request.";
+  return null;
+}
+
 export async function interpretRequest(
   workspaceId: string,
   request: string
@@ -669,49 +718,28 @@ export async function interpretRequest(
   } = await sb.auth.getSession();
   if (!session) return { error: "Your session expired — sign in again." };
 
-  /* Prefer the same-origin server function, where OPENAI_API_KEY remains
-     server-only. Non-Vercel deployments retain the Supabase fallback. */
+  const gateError = await requestInterpretationGate(sb, workspaceId, request, session.access_token);
+  if (gateError) return { error: gateError };
+
+  /* Client-side interpretation through Puter.js (DeepSeek V3.2). The helper
+     validates and clamps every value before it reaches the search form. */
   try {
-    const response = await fetch("/api/ai-interpret", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`,
+    const interpretation = await interpretSearchRequest(request);
+    return {
+      result: {
+        filters: interpretation.filters,
+        summary: interpretation.summary,
+        notes: interpretation.notes,
       },
-      body: JSON.stringify({ workspaceId, request }),
-    });
-    const parsed = await parseApiResponse<Interpretation>(response, "AI");
-    if (parsed.data) return interpretationResponse(parsed.data);
-    if (!parsed.shouldFallback) return { error: parsed.error ?? "Zybble AI couldn't interpret that request." };
-  } catch {
-    // Same-origin route unavailable; use the deployed Edge Function below.
+    };
+  } catch (error) {
+    return {
+      error:
+        error instanceof PuterAIError
+          ? error.message
+          : "Zybble AI couldn't interpret that request. Please try again.",
+    };
   }
-
-  const { data, error } = await sb.functions.invoke("ai-interpret", {
-    body: { workspaceId, request },
-    headers: { Authorization: `Bearer ${session.access_token}` },
-  });
-  if (error) return { error: await readFunctionError(error, "ai-interpret", "AI") };
-  if (data?.error) return { error: String(data.error) };
-  return interpretationResponse(data);
-}
-
-function interpretationResponse(data: unknown): { result?: Interpretation; error?: string } {
-  if (!data || typeof data !== "object" || Array.isArray(data)) {
-    return { error: "Zybble AI returned incomplete filter data. Please try again." };
-  }
-  const body = data as Record<string, unknown>;
-  const filters = body.filters;
-  if (!filters || typeof filters !== "object" || Array.isArray(filters) || typeof (filters as Record<string, unknown>).category !== "string") {
-    return { error: "Zybble AI couldn't identify a business category. Try rephrasing." };
-  }
-  return {
-    result: {
-      filters: filters as Partial<SearchFilters>,
-      summary: typeof body.summary === "string" ? body.summary : "Search filters prepared.",
-      notes: Array.isArray(body.notes) ? body.notes.map(String).slice(0, 2) : [],
-    },
-  };
 }
 
 /* ------------------------------------------------------------------ */

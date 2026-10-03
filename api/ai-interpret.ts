@@ -1,21 +1,34 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
-  OpenAIError,
-  getOpenAIModel,
-  openAIJson,
-} from "./_lib/openai.js";
-import {
   createUserSupabaseClient,
   requireSupabaseServerConfig,
   SupabaseServerConfigError,
 } from "./_lib/supabase-server.js";
 
+/**
+ * Zybble AI interpretation — authorization + usage gate.
+ *
+ * The interpretation itself runs in the browser through Puter.js
+ * (deepseek/deepseek-v3.2), so this route performs no AI-provider call and
+ * needs no provider key (OPENAI_* is not read here). What it keeps is every
+ * server-side guarantee the flow always had, in the same order:
+ *
+ *   1. the caller's Supabase session,
+ *   2. workspace membership (workspace authorization),
+ *   3. plan entitlement (plans.has_ai),
+ *   4. one ai_requests usage row per interpretation.
+ *
+ * It never runs a search, consumes lead quota, or creates leads — the
+ * browser only fills the filter form, and the user presses "Find leads".
+ */
 type VercelRequest = IncomingMessage & { body?: unknown };
 type VercelResponse = ServerResponse & { status(code: number): VercelResponse; json(body: unknown): void };
-type JsonObject = Record<string, unknown>;
 
 export const maxDuration = 30;
+
+/** Model used by the client-side Puter.js interpretation; recorded with usage. */
+export const INTERPRET_MODEL = "deepseek/deepseek-v3.2";
 
 class ApiError extends Error {
   readonly status: number;
@@ -29,12 +42,12 @@ class ApiError extends Error {
   }
 }
 
-function bodyOf(req: VercelRequest): JsonObject {
-  if (req.body && typeof req.body === "object" && !Array.isArray(req.body)) return req.body as JsonObject;
+function bodyOf(req: VercelRequest): Record<string, unknown> {
+  if (req.body && typeof req.body === "object" && !Array.isArray(req.body)) return req.body as Record<string, unknown>;
   if (typeof req.body === "string") {
     try {
       const parsed = JSON.parse(req.body) as unknown;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as JsonObject;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
     } catch {
       throw new ApiError(400, "The AI request wasn't valid JSON.", "invalid_json");
     }
@@ -56,81 +69,6 @@ function userClient(token: string): SupabaseClient {
   // RLS keeps evaluating as the signed-in user.
   const config = requireSupabaseServerConfig("AI");
   return createUserSupabaseClient(config, token, { serverLabel: "AI" });
-}
-
-export const INTERPRET_RESPONSE_SCHEMA: Record<string, unknown> = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    category: { type: "string", description: "The requested business category." },
-    location: { type: ["string", "null"], description: "Only the location stated by the user, otherwise null." },
-    quantity: { type: ["integer", "null"], description: "The requested quantity, otherwise null." },
-    minRating: { type: ["string", "null"], enum: [null, "3", "3.5", "4", "4.5"] },
-    priceLevel: { type: ["string", "null"], enum: [null, "1", "2", "3", "4"] },
-    businessSize: { type: ["string", "null"], enum: [null, "small", "medium", "enterprise"] },
-    requireWebsite: { type: "boolean" },
-    requirePhone: { type: "boolean" },
-    requireEmail: { type: "boolean" },
-    openNow: { type: "boolean" },
-    summary: { type: "string" },
-    notes: { type: "array", items: { type: "string" } },
-  },
-  required: [
-    "category",
-    "location",
-    "quantity",
-    "minRating",
-    "priceLevel",
-    "businessSize",
-    "requireWebsite",
-    "requirePhone",
-    "requireEmail",
-    "openNow",
-    "summary",
-    "notes",
-  ],
-};
-
-const INTERPRET_INSTRUCTIONS = `You turn a user's lead-discovery request into search-form filters.
-You only fill the form; you do not run a search, consume quota, create leads, or claim that results were found.
-Do not invent requirements. Use null for optional values the user did not request and false for requirements the user did not state.
-Only set businessSize to small, medium, or enterprise when the user actually requests that size.
-Keep category suitable for a Google Maps business search. Keep summary and notes concise.`;
-
-function explicitlyRequestedBusinessSize(request: string, size: string) {
-  const text = request.toLowerCase();
-  if (size === "small") return /\bsmall(?:[- ](?:business(?:es)?|compan(?:y|ies)|firm(?:s)?|organization(?:s)?|sized))?\b/.test(text);
-  if (size === "medium") return /\bmedium(?:[- ](?:business(?:es)?|compan(?:y|ies)|firm(?:s)?|organization(?:s)?|sized))?\b/.test(text);
-  return /\benterprise(?:s)?\b|\blarge[- ](?:business(?:es)?|compan(?:y|ies)|firm(?:s)?|organization(?:s)?|sized)\b/.test(text);
-}
-
-export function cleanInterpretResult(raw: JsonObject, request = "") {
-  const filters: JsonObject = {};
-  if (typeof raw.category === "string" && raw.category.trim()) filters.category = raw.category.trim().slice(0, 80);
-  if (typeof raw.location === "string" && raw.location.trim()) filters.location = raw.location.trim().slice(0, 100);
-  if (typeof raw.quantity === "number" && Number.isFinite(raw.quantity)) {
-    filters.quantity = Math.max(1, Math.min(240, Math.round(raw.quantity)));
-  }
-  if (typeof raw.minRating === "string" && ["3", "3.5", "4", "4.5"].includes(raw.minRating)) filters.minRating = raw.minRating;
-  if (typeof raw.priceLevel === "string" && ["1", "2", "3", "4"].includes(raw.priceLevel)) filters.priceLevel = raw.priceLevel;
-  if (
-    typeof raw.businessSize === "string" &&
-    ["small", "medium", "enterprise"].includes(raw.businessSize) &&
-    explicitlyRequestedBusinessSize(request, raw.businessSize)
-  ) {
-    filters.businessSize = raw.businessSize;
-  }
-  for (const key of ["requireWebsite", "requirePhone", "requireEmail", "openNow"] as const) {
-    if (raw[key] === true) filters[key] = true;
-  }
-  if (!filters.category) {
-    throw new ApiError(502, "Zybble AI couldn't identify a business category. Try rephrasing.", "category_missing");
-  }
-  return {
-    filters,
-    summary: typeof raw.summary === "string" ? raw.summary.slice(0, 240) : "Search filters prepared.",
-    notes: Array.isArray(raw.notes) ? raw.notes.slice(0, 2).map((note) => String(note).slice(0, 160)) : [],
-  };
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -168,38 +106,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const { data: plan } = await sb.from("plans").select("has_ai").eq("id", planId).maybeSingle();
     if (plan?.has_ai === false) throw new ApiError(403, "Zybble AI isn't available on your current plan.", "ai_not_entitled");
 
-    const output = await openAIJson({
-      instructions: INTERPRET_INSTRUCTIONS,
-      input: `User request: ${request}`,
-      schema: INTERPRET_RESPONSE_SCHEMA,
-      schemaName: "zybble_search_filters",
-      maxOutputTokens: 2_000,
-      timeoutMs: 25_000,
-    });
-    const result = cleanInterpretResult(output, request);
+    // Usage accounting: one row per authorized interpretation, attributed to
+    // the workspace/user, tagged with the client-side model. The filter values
+    // are produced in the browser after this gate returns.
     await sb.from("ai_requests").insert({
       workspace_id: workspaceId,
       user_id: auth.user.id,
       kind: "interpret",
-      input: { request, filters: result.filters },
+      input: { request },
       status: "completed",
-      model: getOpenAIModel(),
+      model: INTERPRET_MODEL,
     }).then(() => undefined);
 
-    return res.status(200).json(result);
+    return res.status(200).json({ ok: true, model: INTERPRET_MODEL });
   } catch (error) {
     const apiError = error instanceof ApiError
       ? error
       : error instanceof SupabaseServerConfigError
         ? new ApiError(error.status, error.message, error.code)
-        : error instanceof OpenAIError
-          ? new ApiError(error.status, error.message, error.code)
-          : new ApiError(500, "The AI service couldn't complete that action. Please try again.", "unknown");
+        : new ApiError(500, "The AI service couldn't complete that action. Please try again.", "unknown");
     console.error("api request", {
       route: "/api/ai-interpret",
       status: apiError.status,
       code: apiError.code,
-      providerCategory: apiError.code.startsWith("provider_") || apiError.code.startsWith("rate_") ? apiError.code : undefined,
       durationMs: Date.now() - startedAt,
     });
     return res.status(apiError.status).json({ error: apiError.message, code: apiError.code });
