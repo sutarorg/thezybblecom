@@ -193,6 +193,9 @@ npm run dev
 1. Push the repo to GitHub.
 2. Vercel → **Add New Project → Import Git Repository**.
 3. Framework preset: **Vite** (auto-detected). Build command `npm run build`, output `dist`.
+   The six production handlers are the only deployable files at the root of `api/`.
+   API tests live in `api/_tests/`; Vercel ignores underscore-prefixed paths, so
+   those tests do not consume the Hobby plan's 12-Function deployment limit.
 4. **Environment Variables** — set for **Production, Preview, and Development**:
    - `VITE_SUPABASE_URL` — browser build value (inlined by Vite)
    - `VITE_SUPABASE_PUBLISHABLE_KEY` — browser build value (inlined by Vite)
@@ -236,8 +239,9 @@ specifier is in the source literally at cold start:
 A bad specifier throws while the function module is loading — before any handler
 code runs — so Vercel returns an opaque `500 FUNCTION_INVOCATION_FAILED` with no
 JSON body and nothing but the import error in `vercel logs`. Always write relative
-imports under `api/` with the emitted `.js` extension; `api/module-resolution.test.ts`
-enforces it, and `allowImportingTsExtensions` is deliberately `false` in `tsconfig.json`.
+imports under `api/` with the emitted `.js` extension;
+`api/_tests/module-resolution.test.ts` enforces it, and
+`allowImportingTsExtensions` is deliberately `false` in `tsconfig.json`.
 (Supabase Edge Functions in `supabase/functions/` are Deno and keep their `.ts`
 specifiers — that directory is outside the Vercel build.)
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import handler from "./search-run";
+import handler from "../search-run";
 
 /**
  * Full-flow integration test for POST /api/search-run.

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import handler from "./ai-analyze";
+import handler from "../ai-analyze";
 
 /**
  * Full-flow tests for POST /api/ai-analyze — the same-origin route the lead

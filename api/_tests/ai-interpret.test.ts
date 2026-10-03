@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import handler, { cleanInterpretResult } from "./ai-interpret";
+import handler, { cleanInterpretResult } from "../ai-interpret";
 
 const base = {
   category: "dentists",
