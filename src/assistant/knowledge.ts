@@ -2,8 +2,9 @@
  * Zybble Assistant — reviewed expert knowledge base.
  *
  * The chatbot runs on DeepSeek V3.2 through the Zybble backend (see
- * ./prompt.ts and ../lib/puter-ai.ts — the browser talks to /api/ai-chat,
- * never to Puter directly); this module is its single source of truth. Every
+ * ./prompt.ts and ../lib/openrouter-ai.ts — the browser talks to
+ * /api/ai-chat, never to the AI provider directly); this module is its
+ * single source of truth. Every
  * entry is flattened into the assistant's system prompt so answers stay
  * grounded in reviewed content.
  *

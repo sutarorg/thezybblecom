@@ -1,8 +1,8 @@
 // ============================================================================
 // search-run — the Zybble lead engine (Supabase Edge Function fallback).
 // Auth → workspace auth → entitlement → usage reservation → optional AI
-// interpretation (DeepSeek via the server-side Puter integration) → SerpApi
-// fetch → normalize → dedupe → enrich → filter → persist → accounting.
+// interpretation (DeepSeek via the server-side OpenRouter integration) →
+// SerpApi fetch → normalize → dedupe → enrich → filter → persist → accounting.
 //
 // Pipeline order (matches api/search-run.ts on Vercel):
 //   provider search → normalize → dedupe → cheap pre-checks → website
@@ -11,7 +11,7 @@
 import {
   HttpError,
   INTERPRET_SYSTEM,
-  PUTER_MODEL,
+  OPENROUTER_MODEL,
   callerFromRequest,
   corsHeaders,
   errorJson,
@@ -21,7 +21,7 @@ import {
   json,
   logActivity,
   normalizeOpenState,
-  puterChatJson,
+  openRouterChatJson,
   requireWorkspaceRole,
   reserveLeads,
   serpApiMaps,
@@ -527,9 +527,9 @@ Deno.serve(async (req) => {
       if (!query || query.length < 2) throw new HttpError(400, "Describe the businesses you need.");
       if (query.length > 400) throw new HttpError(400, "Keep the request under 400 characters.");
       try {
-        // DeepSeek V3.2 through the server-side Puter integration (formerly
-        // OpenAI's Responses API) — same plan shape, validated field-by-field.
-        const plannedText = await puterChatJson({
+        // DeepSeek V3.2 through the server-side OpenRouter integration —
+        // same plan shape, validated field-by-field.
+        const plannedText = await openRouterChatJson({
           messages: [
             {
               role: "system",
@@ -567,7 +567,7 @@ Deno.serve(async (req) => {
         kind: "interpret",
         input: { query, plan: interpretation },
         status: "completed",
-        model: PUTER_MODEL,
+        model: OPENROUTER_MODEL,
       });
       plans = [interpretation.q];
     }

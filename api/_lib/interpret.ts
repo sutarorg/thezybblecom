@@ -1,11 +1,10 @@
 // Server-side /find request interpretation contract — Vercel (Node) copy of
 // supabase/functions/_shared/interpret.ts; keep the two textually in sync.
 //
-// The interpretation used to happen in the browser via Puter.js; it now runs
-// inside the Zybble backend (DeepSeek V3.2 through Puter, PUTER_AUTH_TOKEN).
-// The contract is unchanged and mirrors src/lib/puter-ai.ts — the model only
-// fills the filter form, every value is validated and clamped here, and the
-// search itself is NEVER run.
+// The interpretation runs inside the Zybble backend (DeepSeek V3.2 through
+// OpenRouter, OPENROUTER_API_KEY). The contract is unchanged and mirrors
+// src/lib/openrouter-ai.ts — the model only fills the filter form, every
+// value is validated and clamped here, and the search itself is NEVER run.
 
 export type InterpretedSearchFilters = {
   category?: string;

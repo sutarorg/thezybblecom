@@ -4,21 +4,21 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Assistant } from "./Assistant";
 import { SUGGESTED_PROMPTS } from "./prompt";
-import type { PuterChatMessage } from "../lib/puter-ai";
+import type { AIChatMessage } from "../lib/openrouter-ai";
 
 /**
  * The landing-page assistant is a real DeepSeek V3.2 chatbot through the
- * shared Puter.js helper (mocked here). These tests pin the chat contract:
+ * shared AI helper (mocked here). These tests pin the chat contract:
  * exactly three suggested prompts that submit into the conversation, a
  * typing bar with Enter-to-send, generation locking, streamed replies, and
  * error recovery.
  */
 
-const streamPuterChat = vi.hoisted(() => vi.fn());
+const streamAIChat = vi.hoisted(() => vi.fn());
 
-vi.mock("../lib/puter-ai", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../lib/puter-ai")>();
-  return { ...original, streamPuterChat };
+vi.mock("../lib/openrouter-ai", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../lib/openrouter-ai")>();
+  return { ...original, streamAIChat };
 });
 
 let container: HTMLDivElement;
@@ -59,7 +59,7 @@ afterEach(() => {
     root = null;
   }
   container.remove();
-  streamPuterChat.mockReset();
+  streamAIChat.mockReset();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -94,7 +94,7 @@ describe("Assistant chat", () => {
   });
 
   it("submits a suggested prompt directly into the chat", async () => {
-    streamPuterChat.mockResolvedValue("Zybble finds businesses and turns them into leads.");
+    streamAIChat.mockResolvedValue("Zybble finds businesses and turns them into leads.");
     const el = await renderAssistant();
 
     await act(async () => {
@@ -106,9 +106,9 @@ describe("Assistant chat", () => {
 
     // The prompt became a user message…
     expect(el.textContent).toContain(SUGGESTED_PROMPTS[0]);
-    // …the shared Puter helper ran with system + user messages…
-    expect(streamPuterChat).toHaveBeenCalledTimes(1);
-    const messages = streamPuterChat.mock.calls[0]![0] as PuterChatMessage[];
+    // …the shared AI helper ran with system + user messages…
+    expect(streamAIChat).toHaveBeenCalledTimes(1);
+    const messages = streamAIChat.mock.calls[0]![0] as AIChatMessage[];
     expect(messages[0]!.role).toBe("system");
     expect(messages.at(-1)).toMatchObject({ role: "user", content: SUGGESTED_PROMPTS[0] });
     // …and the reply rendered.
@@ -116,7 +116,7 @@ describe("Assistant chat", () => {
   });
 
   it("sends typed input with Enter and keeps history across turns", async () => {
-    streamPuterChat.mockResolvedValue("First answer.");
+    streamAIChat.mockResolvedValue("First answer.");
     const el = await renderAssistant();
     const input = el.querySelector<HTMLTextAreaElement>("textarea")!;
 
@@ -127,14 +127,14 @@ describe("Assistant chat", () => {
       pressEnter(input);
     });
 
-    expect(streamPuterChat).toHaveBeenCalledTimes(1);
-    expect((streamPuterChat.mock.calls[0]![0] as PuterChatMessage[]).at(-1)).toMatchObject({
+    expect(streamAIChat).toHaveBeenCalledTimes(1);
+    expect((streamAIChat.mock.calls[0]![0] as AIChatMessage[]).at(-1)).toMatchObject({
       role: "user",
       content: "What is Zybble?",
     });
 
     // Second turn carries the conversation history.
-    streamPuterChat.mockResolvedValue("Second answer.");
+    streamAIChat.mockResolvedValue("Second answer.");
     await act(async () => {
       typeInto(input, "Who is it for?");
     });
@@ -142,7 +142,7 @@ describe("Assistant chat", () => {
       pressEnter(input);
     });
 
-    const messages = streamPuterChat.mock.calls[1]![0] as PuterChatMessage[];
+    const messages = streamAIChat.mock.calls[1]![0] as AIChatMessage[];
     expect(messages.map((m) => `${m.role}:${m.content}`)).toContain("user:What is Zybble?");
     expect(messages.map((m) => `${m.role}:${m.content}`)).toContain("assistant:First answer.");
     expect(messages.at(-1)).toMatchObject({ role: "user", content: "Who is it for?" });
@@ -153,8 +153,8 @@ describe("Assistant chat", () => {
     const input = el.querySelector<HTMLTextAreaElement>("textarea")!;
 
     let release: ((value: string) => void) | undefined;
-    streamPuterChat.mockImplementation(
-      (_messages: PuterChatMessage[], options?: { onDelta?: (d: string) => void }) =>
+    streamAIChat.mockImplementation(
+      (_messages: AIChatMessage[], options?: { onDelta?: (d: string) => void }) =>
         new Promise<string>((resolve) => {
           options?.onDelta?.("Zybble ");
           release = resolve;
@@ -200,8 +200,8 @@ describe("Assistant chat", () => {
     const el = await renderAssistant();
     const input = el.querySelector<HTMLTextAreaElement>("textarea")!;
 
-    streamPuterChat.mockRejectedValueOnce(new Error("boom"));
-    streamPuterChat.mockResolvedValue("Recovered answer.");
+    streamAIChat.mockRejectedValueOnce(new Error("boom"));
+    streamAIChat.mockResolvedValue("Recovered answer.");
 
     await act(async () => {
       typeInto(input, "Tell me about pricing");
@@ -219,15 +219,15 @@ describe("Assistant chat", () => {
       retry!.click();
     });
 
-    expect(streamPuterChat).toHaveBeenCalledTimes(2);
+    expect(streamAIChat).toHaveBeenCalledTimes(2);
     // Retry reuses the conversation so far — the user turn is not duplicated.
-    const messages = streamPuterChat.mock.calls[1]![0] as PuterChatMessage[];
+    const messages = streamAIChat.mock.calls[1]![0] as AIChatMessage[];
     expect(messages.filter((m) => m.role === "user")).toHaveLength(1);
     expect(el.textContent).toContain("Recovered answer.");
   });
 
   it("renders model output safely as text, never as HTML", async () => {
-    streamPuterChat.mockResolvedValue('**Bold** <img src=x onerror=alert(1)> plain');
+    streamAIChat.mockResolvedValue('**Bold** <img src=x onerror=alert(1)> plain');
     const el = await renderAssistant();
 
     await act(async () => {

@@ -1,30 +1,29 @@
 // ============================================================================
 // ai-chat — Zybble's browser-facing AI bridge (landing-page assistant).
 //
-// The assistant used to call Puter.js in the browser, which pushed visitors
-// into a puter.com sign-in (User-Pays). AI now runs server-to-server: this
-// route forwards a validated conversation to Puter's OpenAI-compatible
-// endpoint with the server-only PUTER_AUTH_TOKEN and streams the reply back
-// as server-sent events. No Puter credential, script tag, or sign-in flow
-// ever reaches the browser.
+// AI runs server-to-server: this route forwards a validated conversation to
+// OpenRouter's OpenAI-compatible endpoint (https://openrouter.ai/api/v1)
+// with the server-only OPENROUTER_API_KEY and streams the reply back as
+// server-sent events. No OpenRouter credential, no third-party AI script,
+// and no sign-in flow ever reaches the browser.
 //
 // Wire contract (response `Content-Type: text/event-stream`):
 //   data: {"text": "…delta…"}\n\n        — one per streamed token chunk
 //   data: {"error": "friendly message"}\n\n — mid-stream failure (then DONE)
 //   data: [DONE]\n\n                     — always the terminal event
 // Pre-stream failures return ordinary JSON: { error, code } with a status.
-// The upstream Puter SSE format is never exposed to the browser — every
+// The upstream OpenRouter SSE format is never exposed to the browser — every
 // event is transcoded here.
 // ============================================================================
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
-  PuterError,
+  OpenRouterError,
   completionMessageText,
-  getPuterModel,
-  puterChatStream,
+  getOpenRouterModel,
+  openRouterChatStream,
   streamChunkDelta,
-  type PuterServerMessage,
-} from "./_lib/puter.js";
+  type OpenRouterServerMessage,
+} from "./_lib/openrouter.js";
 
 type VercelRequest = IncomingMessage & { body?: unknown };
 type VercelResponse = ServerResponse & { status(code: number): VercelResponse; json(body: unknown): void };
@@ -38,14 +37,14 @@ export const maxDuration = 60;
    - hard caps on message count and characters,
    - a best-effort per-IP rate limit per warm instance,
    - the model and token budget are fixed server-side and can never be set
-     from the request body. PUTER_AUTH_TOKEN is the real credential and it
+     from the request body. OPENROUTER_API_KEY is the real credential and it
      leaves the server in no response, log line, or error message. */
 
 /** Keep in sync with assistantSystemPrompt() in src/assistant/prompt.ts. */
 export const ASSISTANT_MARKER = 'You are "Ask Zybble", the assistant on the Zybble website';
 
 const MAX_MESSAGES = 24;
-const LIMITS: Record<PuterServerMessage["role"], number> = {
+const LIMITS: Record<OpenRouterServerMessage["role"], number> = {
   system: 20_000,
   user: 4_000,
   assistant: 8_000,
@@ -97,7 +96,7 @@ function isRateLimited(ip: string) {
   return bucket.count > RATE_MAX_REQUESTS;
 }
 
-function messagesOf(req: VercelRequest): PuterServerMessage[] {
+function messagesOf(req: VercelRequest): OpenRouterServerMessage[] {
   const raw = req.body;
   let body: Record<string, unknown> | null = null;
   if (raw && typeof raw === "object" && !Array.isArray(raw)) body = raw as Record<string, unknown>;
@@ -119,7 +118,7 @@ function messagesOf(req: VercelRequest): PuterServerMessage[] {
     throw new ApiError(400, "That conversation is too long — start a new one.", "messages_too_many");
   }
 
-  const messages: PuterServerMessage[] = [];
+  const messages: OpenRouterServerMessage[] = [];
   let total = 0;
   for (const entry of list) {
     if (!entry || typeof entry !== "object") throw new ApiError(400, "The conversation was malformed.", "message_invalid");
@@ -169,7 +168,7 @@ function sseFrame(payload: Record<string, unknown> | "[DONE]") {
 }
 
 /* ------------------------------------------------------------------ */
-/* Upstream Puter SSE → Zybble SSE transcoding                          */
+/* Upstream OpenRouter SSE → Zybble SSE transcoding                     */
 /* ------------------------------------------------------------------ */
 async function pipeUpstream(upstream: Response, write: (frame: Record<string, unknown> | "[DONE]") => void) {
   const contentType = (upstream.headers.get("content-type") ?? "").toLowerCase();
@@ -188,7 +187,7 @@ async function pipeUpstream(upstream: Response, write: (frame: Record<string, un
     }
     const text = payload ? completionMessageText(payload) : "";
     if (!text.trim()) {
-      throw new PuterError(502, "Zybble AI returned an empty response. Please try again.", "empty_response");
+      throw new OpenRouterError(502, "Zybble AI returned an empty response. Please try again.", "empty_response");
     }
     write({ text });
     write("[DONE]");
@@ -196,7 +195,7 @@ async function pipeUpstream(upstream: Response, write: (frame: Record<string, un
   }
 
   if (!upstream.body) {
-    throw new PuterError(502, "Zybble AI is temporarily unavailable. Please try again shortly.", "provider_unavailable");
+    throw new OpenRouterError(502, "Zybble AI is temporarily unavailable. Please try again shortly.", "provider_unavailable");
   }
 
   const reader = upstream.body.getReader();
@@ -246,7 +245,7 @@ async function pipeUpstream(upstream: Response, write: (frame: Record<string, un
   }
 
   if (!forwardedText) {
-    throw new PuterError(502, "Zybble AI returned an empty response. Please try again.", "empty_response");
+    throw new OpenRouterError(502, "Zybble AI returned an empty response. Please try again.", "empty_response");
   }
   // The DONE sentinel terminates the browser stream even when the provider
   // closed its body without one.
@@ -271,7 +270,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Stop paying for tokens the moment the browser goes away.
     if (typeof req.on === "function") req.on("close", () => abort.abort());
 
-    const upstream = await puterChatStream({
+    const upstream = await openRouterChatStream({
       messages,
       maxOutputTokens: ASSISTANT_MAX_OUTPUT_TOKENS,
       timeoutMs: UPSTREAM_TIMEOUT_MS,
@@ -296,7 +295,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // Pre-stream provider failures already returned JSON; once headers went
       // out, the only honest signal left is an in-stream error event.
       const message =
-        error instanceof PuterError
+        error instanceof OpenRouterError
           ? error.message
           : "Zybble AI couldn't complete that request. Please try again.";
       write({ error: message });
@@ -307,14 +306,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     console.log("api request", {
       route: "/api/ai-chat",
       status: 200,
-      model: getPuterModel(),
+      model: getOpenRouterModel(),
       durationMs: Date.now() - startedAt,
     });
   } catch (error) {
     const apiError =
       error instanceof ApiError
         ? error
-        : error instanceof PuterError
+        : error instanceof OpenRouterError
           ? new ApiError(error.status, error.message, error.code)
           : new ApiError(500, "The AI service couldn't complete that action. Please try again.", "unknown");
     console.error("api request", {

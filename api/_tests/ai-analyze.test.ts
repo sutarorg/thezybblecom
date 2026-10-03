@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import handler from "../ai-analyze.js";
-import { getPuterModel } from "../_lib/puter.js";
+import { getOpenRouterModel } from "../_lib/openrouter.js";
 
 /** Minimal Vercel-shaped req/res pair (same pattern as the sibling suites). */
 function createMockReqRes(options: { method?: string; headers?: Record<string, string>; body?: unknown }) {
@@ -35,8 +35,8 @@ function createMockReqRes(options: { method?: string; headers?: Record<string, s
  * Contract tests for POST /api/ai-analyze. The route authorizes the caller,
  * reads the lead with the caller's RLS-scoped token, serves cached insights
  * when fresh, and otherwise analyzes the record through DeepSeek V3.2 via
- * Puter's server-side API (PUTER_AUTH_TOKEN — the old OpenAI Responses API
- * dependency is gone). Network activity is stubbed by the shared fixture.
+ * OpenRouter's server-side API (OPENROUTER_API_KEY). Network activity is
+ * stubbed by the shared fixture.
  */
 
 const FALLBACK_DB = {
@@ -123,14 +123,14 @@ function supabaseStub(db: DbOverrides) {
 }
 
 const savedEnv: Record<string, string | undefined> = {};
-const ENV_KEYS = ["SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "PUTER_AUTH_TOKEN", "PUTER_MODEL"] as const;
+const ENV_KEYS = ["SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODEL"] as const;
 
 beforeEach(() => {
   for (const key of ENV_KEYS) savedEnv[key] = process.env[key];
   process.env.SUPABASE_URL = "https://api.test";
   process.env.SUPABASE_PUBLISHABLE_KEY = "publishable-key";
-  process.env.PUTER_AUTH_TOKEN = "test-puter-token";
-  delete process.env.PUTER_MODEL;
+  process.env.OPENROUTER_API_KEY = "sk-or-test-openrouter-key";
+  delete process.env.OPENROUTER_MODEL;
 });
 
 afterEach(() => {
@@ -144,13 +144,13 @@ afterEach(() => {
 
 describe("POST /api/ai-analyze", () => {
   it("returns analysis, caches it under the active model, and counts usage", async () => {
-    const puterBodies: Array<Record<string, unknown>> = [];
+    const providerBodies: Array<Record<string, unknown>> = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-        if (url.includes("api.puter.com")) {
-          puterBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        if (url.includes("openrouter.ai")) {
+          providerBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
           return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(ANALYSIS) } }] }), {
             status: 200,
             headers: FALLBACK_DB.headers,
@@ -170,14 +170,14 @@ describe("POST /api/ai-analyze", () => {
     expect(getStatus()).toBe(200);
     const body = getBody() as Record<string, unknown> & { points: string[] };
     expect(body.summary).toBe(ANALYSIS.summary);
-    expect(body.model).toBe(getPuterModel());
+    expect(body.model).toBe(getOpenRouterModel());
     expect(body.cached).toBe(false);
     // The UI displays the outreach angle as the final point — preserved.
     expect(body.points[body.points.length - 1]).toBe(ANALYSIS.outreach_angle);
     expect(body.outreach_angle).toBe(ANALYSIS.outreach_angle);
-    expect(puterBodies).toHaveLength(1);
-    expect(String(puterBodies[0]!.model)).toBe(getPuterModel());
-    const messages = puterBodies[0]!.messages as Array<{ role: string; content: string }>;
+    expect(providerBodies).toHaveLength(1);
+    expect(String(providerBodies[0]!.model)).toBe(getOpenRouterModel());
+    const messages = providerBodies[0]!.messages as Array<{ role: string; content: string }>;
     expect(messages.some((m) => m.role === "user" && m.content.includes("Acme Dental"))).toBe(true);
   });
 
@@ -185,14 +185,14 @@ describe("POST /api/ai-analyze", () => {
     const cached = {
       summary: "Cached insight.",
       points: ["point one", "point two", "Angle: cached."],
-      model: getPuterModel(),
+      model: getOpenRouterModel(),
       created_at: new Date().toISOString(),
     };
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-        if (url.includes("api.puter.com")) throw new Error("provider should not be called for cached insights");
+        if (url.includes("openrouter.ai")) throw new Error("provider should not be called for cached insights");
         return supabaseStub({ cached })(input, init);
       }),
     );
@@ -209,13 +209,13 @@ describe("POST /api/ai-analyze", () => {
   });
 
   it("refuses to analyze when the plan has no AI entitlement and never calls the provider", async () => {
-    let puterCalls = 0;
+    let providerCalls = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-        if (url.includes("api.puter.com")) {
-          puterCalls += 1;
+        if (url.includes("openrouter.ai")) {
+          providerCalls += 1;
           return new Response("{}", { status: 200 });
         }
         return supabaseStub({ planHasAi: false })(input, init);
@@ -231,17 +231,17 @@ describe("POST /api/ai-analyze", () => {
 
     expect(getStatus()).toBe(403);
     expect(getBody()).toMatchObject({ code: "ai_not_entitled" });
-    expect(puterCalls).toBe(0);
+    expect(providerCalls).toBe(0);
   });
 
   it("scopes the lead lookup to the caller's workspace — a foreign lead looks missing", async () => {
-    let puterCalls = 0;
+    let providerCalls = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-        if (url.includes("api.puter.com")) {
-          puterCalls += 1;
+        if (url.includes("openrouter.ai")) {
+          providerCalls += 1;
           return new Response("{}", { status: 200 });
         }
         return supabaseStub({ lead: null })(input, init);
@@ -257,18 +257,18 @@ describe("POST /api/ai-analyze", () => {
 
     expect(getStatus()).toBe(404);
     expect(getBody()).toMatchObject({ code: "lead_not_found" });
-    expect(puterCalls).toBe(0);
+    expect(providerCalls).toBe(0);
   });
 
   it("never returns a successful response for empty AI output — it 502s after one silent retry", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
-    let puterCalls = 0;
+    let providerCalls = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-        if (url.includes("api.puter.com")) {
-          puterCalls += 1;
+        if (url.includes("openrouter.ai")) {
+          providerCalls += 1;
           return new Response(JSON.stringify({ choices: [{ message: { content: "" } }] }), {
             status: 200,
             headers: FALLBACK_DB.headers,
@@ -287,22 +287,22 @@ describe("POST /api/ai-analyze", () => {
 
     expect(getStatus()).toBe(502);
     expect(getBody()).toMatchObject({ code: "empty_response", error: expect.stringContaining("empty response") });
-    // The Puter client treats an empty completion as a hard failure — the
+    // The OpenRouter client treats an empty completion as a hard failure — the
     // route never sees a payload to retry with.
-    expect(puterCalls).toBe(1);
+    expect(providerCalls).toBe(1);
     vi.restoreAllMocks();
   });
 
   it("retries once when the first reply is not JSON, then accepts a fenced object", async () => {
-    let puterCalls = 0;
+    let providerCalls = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-        if (url.includes("api.puter.com")) {
-          puterCalls += 1;
+        if (url.includes("openrouter.ai")) {
+          providerCalls += 1;
           const content =
-            puterCalls === 1 ? "I cannot help with that." : `\`\`\`json\n${JSON.stringify(ANALYSIS)}\n\`\`\``;
+            providerCalls === 1 ? "I cannot help with that." : `\`\`\`json\n${JSON.stringify(ANALYSIS)}\n\`\`\``;
           return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
             status: 200,
             headers: FALLBACK_DB.headers,
@@ -321,18 +321,18 @@ describe("POST /api/ai-analyze", () => {
 
     expect(getStatus()).toBe(200);
     expect(getBody()).toMatchObject({ summary: ANALYSIS.summary });
-    expect(puterCalls).toBe(2);
+    expect(providerCalls).toBe(2);
   });
 
   it("keeps returning 429 rate_limited while the provider throttles, without fabricating analysis", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
-    let puterCalls = 0;
+    let providerCalls = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-        if (url.includes("api.puter.com")) {
-          puterCalls += 1;
+        if (url.includes("openrouter.ai")) {
+          providerCalls += 1;
           return new Response(JSON.stringify({ error: { message: "Slow down" } }), {
             status: 429,
             headers: FALLBACK_DB.headers,
@@ -351,9 +351,9 @@ describe("POST /api/ai-analyze", () => {
 
     expect(getStatus()).toBe(429);
     expect(getBody()).toMatchObject({ code: "rate_limited" });
-    // Genuine rate limits are transient: the Puter client retries within its
+    // Genuine rate limits are transient: the OpenRouter client retries within its
     // attempt budget, then surfaces the curated 429 — never fabricated data.
-    expect(puterCalls).toBe(3);
+    expect(providerCalls).toBe(3);
     vi.restoreAllMocks();
   });
 
@@ -363,7 +363,7 @@ describe("POST /api/ai-analyze", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-        if (url.includes("api.puter.com")) {
+        if (url.includes("openrouter.ai")) {
           return new Response(JSON.stringify({ error: { message: "Insufficient balance" } }), {
             status: 402,
             headers: FALLBACK_DB.headers,
@@ -385,8 +385,8 @@ describe("POST /api/ai-analyze", () => {
     vi.restoreAllMocks();
   });
 
-  it("returns a clearly labeled configuration error when PUTER_AUTH_TOKEN is missing", async () => {
-    delete process.env.PUTER_AUTH_TOKEN;
+  it("returns a clearly labeled configuration error when OPENROUTER_API_KEY is missing", async () => {
+    delete process.env.OPENROUTER_API_KEY;
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => supabaseStub({})(input, init)));
 
@@ -400,7 +400,7 @@ describe("POST /api/ai-analyze", () => {
     expect(getStatus()).toBe(500);
     expect(getBody()).toMatchObject({ code: "missing_key" });
     const body = getBody() as Record<string, unknown>;
-    expect(String(body.error)).toContain("PUTER_AUTH_TOKEN");
+    expect(String(body.error)).toContain("OPENROUTER_API_KEY");
     expect(String(body.error)).not.toContain("OPENAI");
     vi.restoreAllMocks();
   });

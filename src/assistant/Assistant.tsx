@@ -16,10 +16,10 @@ import {
 import { cn } from "../utils/cn";
 import { ZybbleMark } from "../components/primitives";
 import {
-  PuterAIError,
-  streamPuterChat,
-  type PuterChatMessage,
-} from "../lib/puter-ai";
+  ZybbleAIError,
+  streamAIChat,
+  type AIChatMessage,
+} from "../lib/openrouter-ai";
 import { SUGGESTED_PROMPTS, assistantSystemPrompt } from "./prompt";
 
 const DESKTOP_QUERY = "(min-width: 1024px)";
@@ -144,8 +144,8 @@ function MessageShell({
 }
 
 /** Map the visible conversation to model messages (system prompt + turns). */
-function toChatMessages(messages: Message[]): PuterChatMessage[] {
-  const turns: PuterChatMessage[] = [];
+function toChatMessages(messages: Message[]): AIChatMessage[] {
+  const turns: AIChatMessage[] = [];
   for (const message of messages) {
     if (message.kind === "user") turns.push({ role: "user", content: message.text });
     else if (message.kind === "assistant") turns.push({ role: "assistant", content: message.text });
@@ -313,14 +313,14 @@ export function Assistant() {
   };
 
   /* Run one AI turn over the given (already current) history. */
-  const runTurn = async (history: PuterChatMessage[]) => {
+  const runTurn = async (history: AIChatMessage[]) => {
     setStreaming("");
     try {
-      const full = await streamPuterChat(history, { onDelta: queueDelta });
+      const full = await streamAIChat(history, { onDelta: queueDelta });
       commit((m) => [...m, { kind: "assistant", text: full }]);
     } catch (error) {
       const text =
-        error instanceof PuterAIError
+        error instanceof ZybbleAIError
           ? error.message
           : "Something went wrong reaching Zybble AI. Please try again.";
       commit((m) => [...m, { kind: "error", text }]);

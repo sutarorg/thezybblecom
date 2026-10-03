@@ -5,7 +5,7 @@ import {
   cleanInterpretResult,
   extractJsonObject,
 } from "./_lib/interpret.js";
-import { PuterError, getPuterModel, puterChatJson } from "./_lib/puter.js";
+import { OpenRouterError, getOpenRouterModel, openRouterChatJson } from "./_lib/openrouter.js";
 import {
   createUserSupabaseClient,
   requireSupabaseServerConfig,
@@ -16,9 +16,8 @@ import {
  * Zybble AI interpretation — authorization, usage accounting, and the
  * DeepSeek V3.2 interpretation itself, all server-side.
  *
- * The interpretation used to run in the browser through Puter.js after this
- * route authorized it, which pushed users into a puter.com sign-in. It now
- * runs here through Puter's server-side API (PUTER_AUTH_TOKEN), keeping every
+ * The interpretation runs here through OpenRouter's server-side API
+ * (OPENROUTER_API_KEY, OpenAI-compatible chat completions), keeping every
  * guarantee the gate always had, in the same order:
  *
  *   1. the caller's Supabase session,
@@ -77,9 +76,10 @@ function userClient(token: string): SupabaseClient {
 }
 
 /**
- * DeepSeek V3.2 (via the server-side Puter integration) turns the request
- * into filters. One silent retry when the reply isn't usable JSON; the
- * result is fully validated and clamped before it ever reaches the client.
+ * DeepSeek V3.2 (via the server-side OpenRouter integration) turns the
+ * request into filters. One silent retry when the reply isn't usable JSON;
+ * the result is fully validated and clamped before it ever reaches the
+ * client.
  */
 async function interpretWithAi(request: string) {
   let sawCategoryMissing = false;
@@ -88,7 +88,7 @@ async function interpretWithAi(request: string) {
       attempt === 0
         ? INTERPRET_SYSTEM_PROMPT
         : `${INTERPRET_SYSTEM_PROMPT}\nYour previous reply was not usable. Respond with the JSON object only, and always include a non-empty "category".`;
-    const text = await puterChatJson({
+    const text = await openRouterChatJson({
       messages: [
         { role: "system", content: system },
         { role: "user", content: `User request: ${request}` },
@@ -146,10 +146,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const { data: plan } = await sb.from("plans").select("has_ai").eq("id", planId).maybeSingle();
     if (plan?.has_ai === false) throw new ApiError(403, "Zybble AI isn't available on your current plan.", "ai_not_entitled");
 
-    // The interpretation itself — server-side, so the browser never touches a
-    // Puter credential or sign-in flow.
+    // The interpretation itself — server-side, so the browser never touches an
+    // OpenRouter credential or third-party sign-in flow.
     const interpretation = await interpretWithAi(request);
-    const model = getPuterModel();
+    const model = getOpenRouterModel();
 
     // Usage accounting: one row per completed interpretation, attributed to
     // the workspace/user, tagged with the model that produced it.
@@ -168,7 +168,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       ? error
       : error instanceof SupabaseServerConfigError
         ? new ApiError(error.status, error.message, error.code)
-        : error instanceof PuterError
+        : error instanceof OpenRouterError
           ? new ApiError(error.status, error.message, error.code)
           : new ApiError(500, "The AI service couldn't complete that action. Please try again.", "unknown");
     console.error("api request", {

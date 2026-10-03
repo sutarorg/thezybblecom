@@ -9,7 +9,7 @@ import { mergeTags, validateTag } from "../lib/tags";
 import { formatAppDate, setRuntimePreferences, type RuntimePreferences } from "../lib/datetime";
 import { parseApiResponse } from "./api-response";
 import { readFunctionError } from "./edge-error";
-import { cleanServerInterpretation } from "../../lib/puter-ai";
+import { cleanServerInterpretation } from "../../lib/openrouter-ai";
 import type {
   ActivityItem,
   ExportRecord,
@@ -695,9 +695,9 @@ export async function interpretRequest(
 
   /* Prefer the same-origin server function, which authorizes (session →
      workspace membership → plan entitlement) and then runs the DeepSeek V3.2
-     interpretation itself through the server-side Puter integration
-     (PUTER_AUTH_TOKEN) — the browser never sees a Puter credential or a
-     puter.com sign-in. Non-Vercel deployments retain the Supabase Edge
+     interpretation itself through the server-side OpenRouter integration
+     (OPENROUTER_API_KEY) — the browser never sees an AI credential or a
+     third-party sign-in. Non-Vercel deployments retain the Supabase Edge
      fallback with the same contract. */
   try {
     const response = await fetch("/api/ai-interpret", {
@@ -1207,7 +1207,7 @@ export async function analyzeLead(leadId: string, workspaceId: string, refresh =
   } = await sb.auth.getSession();
   if (!session) return { error: "Your session expired — sign in again." };
 
-  /* Prefer the same-origin server function, where PUTER_AUTH_TOKEN remains
+  /* Prefer the same-origin server function, where OPENROUTER_API_KEY remains
      server-only. Non-Vercel deployments retain the Supabase Edge fallback. */
   try {
     const response = await fetch("/api/ai-analyze", {
