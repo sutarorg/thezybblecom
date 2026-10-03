@@ -1,61 +1,27 @@
 // ============================================================================
-// ai-interpret — turns a plain-language request into SEARCH FILTERS ONLY.
+// ai-interpret — authorization + usage gate for Zybble AI interpretation.
+//
+// The interpretation itself runs in the browser through Puter.js
+// (deepseek/deepseek-v3.2), so this function performs no AI-provider call
+// and reads no provider key. It keeps the server-side guarantees the flow
+// always had, in the same order: the caller's session, workspace
+// membership, plan entitlement, and one ai_requests usage row.
 // It never calls SerpApi, writes leads, or consumes lead quota.
 // ============================================================================
 import {
   HttpError,
-  OPENAI_MODEL,
   callerFromRequest,
   corsHeaders,
   errorJson,
   getEntitlements,
   handleError,
   json,
-  openAIJson,
   requireWorkspaceRole,
   serviceClient,
 } from "../_shared/index.ts";
 
-const MAX_LEADS = 240;
-
-const RESPONSE_SCHEMA: Record<string, unknown> = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    category: { type: "string" },
-    location: { type: ["string", "null"] },
-    quantity: { type: ["integer", "null"] },
-    minRating: { type: ["string", "null"], enum: [null, "3", "3.5", "4", "4.5"] },
-    priceLevel: { type: ["string", "null"], enum: [null, "1", "2", "3", "4"] },
-    businessSize: { type: ["string", "null"], enum: [null, "small", "medium", "enterprise"] },
-    requireWebsite: { type: "boolean" },
-    requirePhone: { type: "boolean" },
-    requireEmail: { type: "boolean" },
-    openNow: { type: "boolean" },
-    summary: { type: "string" },
-    notes: { type: "array", items: { type: "string" } },
-  },
-  required: [
-    "category", "location", "quantity", "minRating", "priceLevel", "businessSize",
-    "requireWebsite", "requirePhone", "requireEmail", "openNow", "summary", "notes",
-  ],
-};
-
-function explicitlyRequestedBusinessSize(request: string, size: string) {
-  const text = request.toLowerCase();
-  if (size === "small") return /\bsmall(?:[- ](?:business(?:es)?|compan(?:y|ies)|firm(?:s)?|organization(?:s)?|sized))?\b/.test(text);
-  if (size === "medium") return /\bmedium(?:[- ](?:business(?:es)?|compan(?:y|ies)|firm(?:s)?|organization(?:s)?|sized))?\b/.test(text);
-  return /\benterprise(?:s)?\b|\blarge[- ](?:business(?:es)?|compan(?:y|ies)|firm(?:s)?|organization(?:s)?|sized)\b/.test(text);
-}
-
-const INTERPRET_SYSTEM = `You are Zybble's search interpreter for a B2B lead-discovery tool.
-Never invent businesses, facts, or requirements. You only structure the user's request into search filters.`;
-
-const INSTRUCTIONS = `${INTERPRET_SYSTEM}
-You are filling in a search form, not running a search.
-Use null for optional values the user did not request and false for requirements the user did not state.
-Only set businessSize when the user actually asks for small, medium, or enterprise businesses.
-summary is one short sentence. notes contains at most two short caveats or suggestions.`;
+/** Model used by the client-side Puter.js interpretation; recorded with usage. */
+const INTERPRET_MODEL = "deepseek/deepseek-v3.2";
 
 Deno.serve(async (req) => {
   const startedAt = Date.now();
@@ -80,51 +46,19 @@ Deno.serve(async (req) => {
       throw new HttpError(403, "Zybble AI isn't available on your current plan.", "ai_not_entitled");
     }
 
-    const out = await openAIJson({
-      instructions: INSTRUCTIONS,
-      input: `User request: ${request}`,
-      schema: RESPONSE_SCHEMA,
-      schemaName: "zybble_search_filters",
-      maxOutputTokens: 2_000,
-      timeoutMs: 25_000,
-    });
-
-    // Validate and clamp every model-produced value before it reaches the UI.
-    const filters: Record<string, unknown> = {};
-    if (typeof out.category === "string" && out.category.trim()) filters.category = out.category.trim().slice(0, 80);
-    if (typeof out.location === "string" && out.location.trim()) filters.location = out.location.trim().slice(0, 80);
-    if (typeof out.quantity === "number" && Number.isFinite(out.quantity)) {
-      filters.quantity = Math.max(1, Math.min(MAX_LEADS, Math.round(out.quantity)));
-    }
-    if (typeof out.minRating === "string" && ["3", "3.5", "4", "4.5"].includes(out.minRating)) filters.minRating = out.minRating;
-    if (typeof out.priceLevel === "string" && ["1", "2", "3", "4"].includes(out.priceLevel)) filters.priceLevel = out.priceLevel;
-    if (
-      typeof out.businessSize === "string" &&
-      ["small", "medium", "enterprise"].includes(out.businessSize) &&
-      explicitlyRequestedBusinessSize(request, out.businessSize)
-    ) {
-      filters.businessSize = out.businessSize;
-    }
-    if (out.requireWebsite === true) filters.requireWebsite = true;
-    if (out.requirePhone === true) filters.requirePhone = true;
-    if (out.requireEmail === true) filters.requireEmail = true;
-    if (out.openNow === true) filters.openNow = true;
-    if (!filters.category) throw new HttpError(502, "Zybble AI couldn't identify a business category. Try rephrasing.", "category_missing");
-
+    // Usage accounting: one row per authorized interpretation, attributed to
+    // the workspace/user, tagged with the client-side model. The filter
+    // values are produced in the browser after this gate returns.
     await sb.from("ai_requests").insert({
       workspace_id: workspaceId,
       user_id: user.id,
       kind: "interpret",
-      input: { request, filters },
+      input: { request },
       status: "completed",
-      model: OPENAI_MODEL,
+      model: INTERPRET_MODEL,
     });
 
-    return json({
-      filters,
-      summary: typeof out.summary === "string" ? out.summary.slice(0, 240) : "Search filters prepared.",
-      notes: Array.isArray(out.notes) ? out.notes.slice(0, 2).map((n) => String(n).slice(0, 160)) : [],
-    });
+    return json({ ok: true, model: INTERPRET_MODEL });
   } catch (e) {
     return handleError(e, { functionName: "ai-interpret", startedAt });
   }

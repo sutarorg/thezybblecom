@@ -5,6 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * same-origin /api route first, fall back to the deployed Edge Function only
  * when that route is unavailable, and never turn a malformed/empty payload
  * into a fake success.
+ *
+ * Interpretation is now client-side: the route is an authorization + usage
+ * gate, and the DeepSeek V3.2 interpretation itself runs through the shared
+ * Puter.js helper (mocked here).
  */
 
 const h = vi.hoisted(() => {
@@ -13,13 +17,32 @@ const h = vi.hoisted(() => {
   const getSession = vi.fn();
   const invoke = vi.fn();
   const client = { auth: { getSession }, functions: { invoke } };
-  return { client, getSession, invoke };
+  // Stand-in for the client-side Puter AI helper.
+  const interpretSearchRequest = vi.fn();
+  const PuterAIError = class extends Error {
+    code: string;
+    constructor(message: string, code: string) {
+      super(message);
+      this.name = "PuterAIError";
+      this.code = code;
+    }
+  };
+  return { client, getSession, invoke, interpretSearchRequest, PuterAIError };
 });
 
 vi.mock("./supabase", () => ({
   getSupabase: () => h.client,
   BACKEND_ENABLED: true,
 }));
+
+vi.mock("../../lib/puter-ai", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../lib/puter-ai")>();
+  return {
+    ...original,
+    interpretSearchRequest: h.interpretSearchRequest,
+    PuterAIError: h.PuterAIError,
+  };
+});
 
 import { analyzeLead, interpretRequest } from "./api";
 
@@ -112,33 +135,74 @@ describe("analyzeLead — same-origin route first, Edge fallback second", () => 
   });
 });
 
-describe("interpretRequest — filter-form interpretation", () => {
-  it("parses a successful /api/ai-interpret response", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
+describe("interpretRequest — gated client-side filter interpretation", () => {
+  beforeEach(() => {
+    h.interpretSearchRequest.mockReset().mockResolvedValue({
       filters: { category: "dentists", location: "Austin, TX", requireEmail: true },
       summary: "Austin dentists with public emails.",
       notes: [],
-    })));
+    });
+  });
+
+  it("runs the client-side interpretation after the gate authorizes it", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true, model: "deepseek/deepseek-v3.2" }));
+    vi.stubGlobal("fetch", fetchMock);
 
     const { result, error } = await interpretRequest("ws-1", "dentists in Austin with emails");
     expect(error).toBeUndefined();
     expect(result?.filters.category).toBe("dentists");
     expect(result?.filters.requireEmail).toBe(true);
     expect(result?.summary).toContain("Austin dentists");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe("/api/ai-interpret");
+    expect((init as RequestInit).headers).toMatchObject({ Authorization: "Bearer caller-token" });
+    expect(JSON.parse(String((init as RequestInit).body))).toMatchObject({
+      workspaceId: "ws-1",
+      request: "dentists in Austin with emails",
+    });
+    expect(h.interpretSearchRequest).toHaveBeenCalledWith("dentists in Austin with emails");
+    expect(h.invoke).not.toHaveBeenCalled();
   });
 
-  it("rejects a payload without a usable category", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ filters: {}, summary: "", notes: [] })));
+  it("surfaces gate failures without running the AI", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ error: "Zybble AI isn't available on your current plan.", code: "ai_not_entitled" }, 403)));
+
+    const { result, error } = await interpretRequest("ws-1", "dentists in Austin");
+    expect(result).toBeUndefined();
+    expect(error).toBe("Zybble AI isn't available on your current plan.");
+    expect(h.interpretSearchRequest).not.toHaveBeenCalled();
+    expect(h.invoke).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the Edge Function gate when the route is missing (404)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("Not Found", { status: 404, headers: { "content-type": "text/html" } })));
+    h.invoke.mockResolvedValue({ data: { ok: true, model: "deepseek/deepseek-v3.2" }, error: null });
+
+    const { result, error } = await interpretRequest("ws-1", "dentists in Austin");
+    expect(error).toBeUndefined();
+    expect(result?.filters.category).toBe("dentists");
+    expect(h.invoke).toHaveBeenCalledWith("ai-interpret", expect.objectContaining({
+      body: expect.objectContaining({ workspaceId: "ws-1", request: "dentists in Austin" }),
+      headers: { Authorization: "Bearer caller-token" },
+    }));
+    expect(h.interpretSearchRequest).toHaveBeenCalledWith("dentists in Austin");
+  });
+
+  it("reports a client-side interpretation failure with its message", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ ok: true, model: "deepseek/deepseek-v3.2" })));
+    h.interpretSearchRequest.mockRejectedValue(new h.PuterAIError("Zybble AI couldn't identify a business category. Try rephrasing.", "category_missing"));
+
     const { result, error } = await interpretRequest("ws-1", "hello");
     expect(result).toBeUndefined();
     expect(error).toBe("Zybble AI couldn't identify a business category. Try rephrasing.");
   });
 
-  it("surfaces provider rate-limit errors instead of empty filters", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ error: "Zybble AI is rate-limited. Please try again shortly.", code: "rate_limited" }, 429)));
+  it("requires a session before any request", async () => {
+    h.getSession.mockResolvedValue({ data: { session: null } });
     const { result, error } = await interpretRequest("ws-1", "dentists in Austin");
     expect(result).toBeUndefined();
-    expect(error).toBe("Zybble AI is rate-limited. Please try again shortly.");
-    expect(h.invoke).not.toHaveBeenCalled();
+    expect(error).toBe("Your session expired — sign in again.");
+    expect(h.interpretSearchRequest).not.toHaveBeenCalled();
   });
 });

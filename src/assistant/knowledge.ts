@@ -1,11 +1,10 @@
 /**
- * Zybble Assistant — local expert knowledge base.
+ * Zybble Assistant — reviewed expert knowledge base.
  *
- * Entirely deterministic and offline. Every suggestion maps to an intent
- * (an entry id); every entry knows its answer, its natural follow-ups, and
- * an optional contextual CTA. The engine in Assistant.tsx manages
- * conversation state (current topic, answered intents, suggestion
- * prioritization) and walks this graph.
+ * The chatbot runs on DeepSeek V3.2 through Puter.js (see ./prompt.ts and
+ * ../lib/puter-ai.ts); this module is its single source of truth. Every
+ * entry is flattened into the assistant's system prompt so answers stay
+ * grounded in reviewed content.
  *
  * CONTENT RULE: answers only state facts that appear elsewhere on the
  * public site. No invented features, numbers, or guarantees.
@@ -776,34 +775,8 @@ const CORE_INTENTS: Record<string, Intent> = {
 /* ------------------------------------------------------------------ */
 /* Suggestion sources                                                  */
 /* ------------------------------------------------------------------ */
-export const INITIAL_SUGGESTIONS = [
-  "how-find",
-  "find-for-me",
-  "lead-info",
-  "how-ai",
-  "pricing-work",
-  "csv-export",
-];
-
-/**
- * Fallback recommendation order when follow-ups are exhausted.
- * Ordered to rotate across categories so the tray keeps variety.
- */
-export const GLOBAL_NEXT = [
-  "how-find",
-  "lead-info",
-  "csv-export",
-  "how-ai",
-  "pricing-work",
-  "which-plan",
-  "lead-lists",
-  "team-use",
-  "limits",
-  "contact",
-];
-
-export const FALLBACK_TEXT =
-  "I can help with Zybble's lead discovery, lead data, Zybble AI, lists, CSV export, pricing, teams, workspaces, billing, and data handling. Pick a topic to explore.";
+/* The chat UI surfaces exactly three suggested prompts (see ./prompt.ts);
+ * they submit straight into the DeepSeek conversation. */
 
 /* ------------------------------------------------------------------ */
 /* Registry — core entries + authored packs                            */
@@ -817,52 +790,4 @@ for (const entry of [
   ...PACK_EXTRA,
 ]) {
   if (!INTENTS[entry.id]) INTENTS[entry.id] = expand(entry);
-}
-
-/* ------------------------------------------------------------------ */
-/* Topic browsing — lets users reach the full knowledge base           */
-/* ------------------------------------------------------------------ */
-export const TOPIC_ORDER: { id: string; label: string }[] = [
-  { id: "product", label: "Product basics" },
-  { id: "discovery", label: "Finding leads" },
-  { id: "data", label: "Lead data" },
-  { id: "ai", label: "Zybble AI" },
-  { id: "lists", label: "Lead lists" },
-  { id: "export", label: "Exporting" },
-  { id: "pricing", label: "Pricing" },
-  { id: "usage", label: "Limits" },
-  { id: "team", label: "Teams" },
-  { id: "workspaces", label: "Workspaces" },
-  { id: "billing", label: "Billing" },
-  { id: "security", label: "Privacy & terms" },
-  { id: "support", label: "Support" },
-];
-
-/** Questions in a category, unanswered ones first. */
-export function getByCategory(category: string, asked: Set<string>): string[] {
-  const all = Object.values(INTENTS)
-    .filter((i) => i.category === category)
-    .map((i) => i.id);
-  const fresh = all.filter((id) => !asked.has(id));
-  return (fresh.length ? fresh : all).slice(0, 6);
-}
-
-export function getIntent(id: string): Intent | undefined {
-  return INTENTS[id];
-}
-
-export function getSuggestions(lastId: string | null, asked: Set<string>): string[] {
-  const prioritized: string[] = [];
-  const push = (id: string) => {
-    if (!asked.has(id) && INTENTS[id] && !prioritized.includes(id)) {
-      prioritized.push(id);
-    }
-  };
-
-  if (lastId && INTENTS[lastId]) {
-    INTENTS[lastId].follow.forEach(push);
-  }
-  GLOBAL_NEXT.forEach(push);
-
-  return prioritized.slice(0, 5);
 }
