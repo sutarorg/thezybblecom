@@ -1,6 +1,6 @@
 # Zybble
 
-Zybble is a production SaaS application for **AI-powered business lead discovery**: describe the businesses you need in plain language, DeepSeek V3.2 (via Puter's server-side API, through Zybble's own backend) structures the request, SerpApi collects public business data from Google Maps, Zybble normalizes, deduplicates, and organizes it into exportable lead lists — behind real auth, plan entitlements, team workspaces, and Razorpay-billed subscriptions.
+Zybble is a production SaaS application for **AI-powered business lead discovery**: describe the businesses you need in plain language, DeepSeek V3.2 (via OpenRouter's API, through Zybble's own backend) structures the request, SerpApi collects public business data from Google Maps, Zybble normalizes, deduplicates, and organizes it into exportable lead lists — behind real auth, plan entitlements, team workspaces, and Razorpay-billed subscriptions.
 
 ```
 Browser (Vite + React SPA, clean URLs via BrowserRouter)
@@ -14,11 +14,11 @@ Browser (Vite + React SPA, clean URLs via BrowserRouter)
    │
    ├── Vercel Function /api/ai-interpret
    │     └── authorization + usage gate (session, workspace, plan, ai_requests)
-   │         + DeepSeek V3.2 interpretation via server-side Puter →
+   │         + DeepSeek V3.2 interpretation via server-side OpenRouter →
    │         validated, clamped filters — never a search
    │
    ├── Vercel Function /api/ai-analyze
-   │     └── DeepSeek V3.2 lead intelligence via server-side Puter,
+   │     └── DeepSeek V3.2 lead intelligence via server-side OpenRouter,
    │         cached per lead (Edge Function fallback)
    │
    ├── Vercel Function /api/ai-chat
@@ -37,9 +37,9 @@ Browser (Vite + React SPA, clean URLs via BrowserRouter)
          ├── billing          → Razorpay checkout / sync / cancel
          └── razorpay-webhook → HMAC-verified, idempotent subscription sync
 
-   └── No browser AI runtime: the browser never loads Puter.js and never
-       holds an AI credential — every AI call is proxied by the same-origin
-       backend (src/lib/puter-ai.ts is a thin SSE/HTTP client of /api/ai-chat),
+   └── No browser AI runtime: the browser never holds an AI credential —
+       every AI call is proxied by the same-origin backend
+       (src/lib/openrouter-ai.ts is a thin SSE/HTTP client of /api/ai-chat),
        so visitors are never shown a third-party sign-in.
 ```
                 ▼
@@ -84,7 +84,7 @@ Create accounts/tools before configuring anything:
 | Node.js 20+ | `npm` (repo uses npm lockfile) |
 | Supabase | 1 project (free tier is fine) |
 | SerpApi | 1 **freshly rotated** API key |
-| Puter | 1 **API token** (puter.com → Dashboard → API token → Create token) — powers all AI surfaces server-side (DeepSeek V3.2): interpretation, per-lead analysis, and the Ask Zybble assistant |
+| OpenRouter | 1 **API key** (openrouter.ai → Keys → Create key) — powers all AI surfaces server-side (DeepSeek V3.2): interpretation, per-lead analysis, and the Ask Zybble assistant |
 | Razorpay | Account with international/USD + subscriptions enabled |
 | Resend | 1 verified sending domain |
 | Vercel | Optional — any static host works |
@@ -121,8 +121,8 @@ supabase link --project-ref YOUR_PROJECT_REF
 # Provider secrets — server-side only, never in git
 supabase secrets set \
   SERPAPI_API_KEY=your_rotated_key \
-  PUTER_AUTH_TOKEN=your_puter_api_token \
-  PUTER_MODEL=deepseek/deepseek-v3.2 \
+  OPENROUTER_API_KEY=sk-or-your_openrouter_api_key \
+  OPENROUTER_MODEL=deepseek/deepseek-v3.2 \
   RAZORPAY_KEY_ID=rzp_live_xxx \
   RAZORPAY_KEY_SECRET=xxx \
   RAZORPAY_WEBHOOK_SECRET=xxx \
@@ -159,13 +159,32 @@ supabase functions deploy search-run ai-interpret ai-analyze export-run team-inv
 
 ## 3 · AI setup
 
-Two AI paths ship in the repo:
+Every AI surface runs server-side through one provider: **OpenRouter**
+(OpenAI-compatible `https://openrouter.ai/api/v1`) with the model
+`deepseek/deepseek-v3.2`.
 
-1. **Client-side (no setup): request interpretation + landing-page assistant.** Both run in the browser through [Puter.js](https://developer.puter.com) (`<script src="https://js.puter.com/v2/">`, already in `index.html`) with the model `deepseek/deepseek-v3.2`, streamed. Puter's **User-Pays** model means there is no API key to configure — each visitor's AI usage runs under their own Puter account. The shared helper lives in `src/lib/puter-ai.ts`; `/find` still calls `/api/ai-interpret` first, which authorizes the request (session → workspace membership → plan entitlement) and records it in `ai_requests` before the browser runs the model.
-2. **Server-side (key required): per-lead analysis** on `/leads/:id`.
-   1. Create a server API key in the **OpenAI platform** with access to the Responses API.
-   2. Copy the key to the server/Edge secret `OPENAI_API_KEY`. Optional override `OPENAI_MODEL` defaults to `o4-mini`; optional `OPENAI_BASE_URL` routes requests to an OpenAI-compatible endpoint (defaults to `https://api.openai.com/v1`).
-   3. Never prefix any of these with `VITE_`; all are server-only. AI requests use strict Structured Outputs through `POST /v1/responses`, with retries for transient provider failures (rate limits, timeouts, 5xx) and clear, secret-free errors otherwise.
+1. Create an account at **openrouter.ai**, add credits, then go to
+   **Keys → Create key**.
+2. Copy the key to the server-only secret `OPENROUTER_API_KEY`
+   (`sk-or-…`). Set it in Vercel for the `/api/*` routes **and** as a
+   Supabase Edge Function secret for the non-Vercel fallback.
+3. Optional overrides, both server-only: `OPENROUTER_MODEL`
+   (defaults to `deepseek/deepseek-v3.2`), `OPENROUTER_HTTP_REFERER`
+   (defaults to `https://zybble.com`) and `OPENROUTER_X_TITLE`
+   (defaults to `Zybble`) — the last two are the attribution headers
+   OpenRouter reports back to model providers.
+4. Never prefix any of these with `VITE_`; all are server-only. Requests use
+   the OpenAI-compatible chat-completions format, with retries for transient
+   provider failures (genuine rate limits, timeouts, 5xx) and clear,
+   secret-free errors otherwise — credit exhaustion (402) and authentication
+   failures fail fast and are never mislabeled as rate limits.
+
+The three AI surfaces: `/api/ai-interpret` (request → filters on `/find`,
+authorized session → workspace → plan before the model runs),
+`/api/ai-analyze` (per-lead analysis on `/leads/:id`, cached per lead), and
+`/api/ai-chat` (streamed Ask Zybble landing-page assistant). The browser
+helper `src/lib/openrouter-ai.ts` only talks to the same-origin
+`/api/ai-chat` — it holds no key and never calls OpenRouter directly.
 
 ## 4 · Razorpay setup
 
@@ -220,7 +239,7 @@ npm run dev
    - `SUPABASE_URL` — **server-side** copy of the project URL used by the Vercel Functions in `api/`
    - `SUPABASE_PUBLISHABLE_KEY` — **server-side** publishable key used by the Vercel Functions (`SUPABASE_ANON_KEY` works as a legacy fallback). Never a service-role/secret key — the API routes reject those so RLS is never bypassed.
    - `SERPAPI_API_KEY` — server-only; used by `/api/search-run` and never included in the Vite bundle
-   - `OPENAI_API_KEY` and optional `OPENAI_MODEL` / `OPENAI_BASE_URL` — server-only; used by `/api/ai-analyze` (per-lead analysis) only. Also set these as Supabase Edge Function secrets when using the non-Vercel fallback. `/api/ai-interpret` needs no AI key — interpretation runs client-side via Puter.js (DeepSeek V3.2).
+   - `OPENROUTER_API_KEY` and optional `OPENROUTER_MODEL` (default `deepseek/deepseek-v3.2`), `OPENROUTER_HTTP_REFERER`, `OPENROUTER_X_TITLE` — server-only; used by `/api/ai-chat`, `/api/ai-interpret`, and `/api/ai-analyze`. Also set the key and model as Supabase Edge Function secrets when using the non-Vercel fallback. Never prefix with `VITE_`.
    - `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `APP_URL` — server-only; used by `/api/team-invite` (emails/links).
    - Razorpay keys remain Supabase Edge Function secrets and must not be added to the browser bundle.
 
@@ -273,8 +292,8 @@ Never commit: `.env`, `.env.local`, any key material. `.gitignore` already exclu
 
 ## Architecture notes
 
-- **Secrets**: only `VITE_SUPABASE_URL` + `VITE_SUPABASE_PUBLISHABLE_KEY` reach the browser; the publishable key is safe because every table is RLS-guarded. `SUPABASE_URL` + `SUPABASE_PUBLISHABLE_KEY` (server-side runtime config), `SERPAPI_API_KEY`, `OPENAI_API_KEY`, `RESEND_API_KEY`, and `APP_URL` are read only by server functions (Vercel and the Edge fallback) via `api/_lib/supabase-server.ts` and never inlined into the Vite bundle. Razorpay keys and the Supabase service-role/secret keys remain Supabase Edge Function secrets — the Vercel routes deliberately reject secret keys so requests always run with the caller's JWT under RLS. The client-side AI (Puter.js → DeepSeek V3.2) uses no API key at all — no AI provider credential exists in the interpret/assistant paths.
-- **AI flow**: `/find` interpretation is authorized server-side (session → workspace → plan → `ai_requests` usage row) and then interpreted in the browser by `src/lib/puter-ai.ts` — the same module powers the landing-page assistant. Interpretation only fills the filter form; it never runs a search. The landing-page assistant answers from the reviewed knowledge base in `src/assistant/` (flattened into its system prompt), with streamed replies and conversation history.
+- **Secrets**: only `VITE_SUPABASE_URL` + `VITE_SUPABASE_PUBLISHABLE_KEY` reach the browser; the publishable key is safe because every table is RLS-guarded. `SUPABASE_URL` + `SUPABASE_PUBLISHABLE_KEY` (server-side runtime config), `SERPAPI_API_KEY`, `OPENROUTER_API_KEY`, `RESEND_API_KEY`, and `APP_URL` are read only by server functions (Vercel and the Edge fallback) via `api/_lib/supabase-server.ts` and `api/_lib/openrouter.ts`, and never inlined into the Vite bundle. Razorpay keys and the Supabase service-role/secret keys remain Supabase Edge Function secrets — the Vercel routes deliberately reject secret keys so requests always run with the caller's JWT under RLS. All AI runs server-side through OpenRouter (DeepSeek V3.2) — no AI provider credential exists in the browser.
+- **AI flow**: `/find` interpretation is authorized and interpreted server-side (session → workspace → plan → `ai_requests` usage row) by `/api/ai-interpret` (Edge fallback twin with the same contract). Interpretation only fills the filter form; it never runs a search. The landing-page assistant streams through `/api/ai-chat` via the shared browser helper `src/lib/openrouter-ai.ts` and answers from the reviewed knowledge base in `src/assistant/` (flattened into its system prompt), with streamed replies and conversation history. Per-lead analysis runs through `/api/ai-analyze` and is cached in `ai_insights`.
 - **Usage enforcement**: `reserve_leads()` is a security-definer RPC doing an atomic check-and-increment — concurrent searches can't overrun an allowance; unused reservations are refunded after each run.
 - **Limits**: one-list (Free), seat counts, and client-workspace gating are enforced by **database triggers**, not the UI.
 - **Idempotency**: `webhook_events` stores provider event IDs; duplicates return `200` without re-processing.
@@ -296,10 +315,10 @@ users see an actionable error, never fictional leads or fake workspaces.
 - [ ] RLS verified (Table Editor shows RLS on every table)
 - [ ] Auth tested (signup, email confirm, login, reset flow)
 - [ ] Edge Functions deployed
-- [ ] Edge secrets configured (SerpApi, OpenAI, Razorpay, Resend)
+- [ ] Edge secrets configured (SerpApi, OpenRouter, Razorpay, Resend)
 - [ ] SerpApi configured (rotated key, quota visible)
-- [ ] OpenAI configured (per-lead analysis only — interpretation and the assistant need no key)
-- [ ] Puter.js loads in production (`<script src="https://js.puter.com/v2/">` in the deployed HTML)
+- [ ] OpenRouter configured (credits funded, key set on Vercel and as an Edge secret)
+- [ ] Ask Zybble assistant streams in production (server-side OpenRouter key working)
 - [ ] Razorpay configured (international/USD eligible, plans created)
 - [ ] Razorpay webhook configured + signature verified
 - [ ] Resend configured

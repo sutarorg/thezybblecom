@@ -8,9 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  *
  * Interpretation now runs fully server-side: the route both authorizes the
  * caller (session → membership → plan) and runs the DeepSeek V3.2
- * interpretation through the server-side Puter integration, returning
- * ready-to-apply filters. The browser never loads Puter.js, never sees a
- * Puter credential, and never triggers a puter.com sign-in.
+ * interpretation through the server-side OpenRouter integration, returning
+ * ready-to-apply filters. The browser never sees an AI credential and never
+ * triggers a third-party sign-in.
  */
 
 const h = vi.hoisted(() => {

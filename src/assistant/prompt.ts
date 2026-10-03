@@ -2,8 +2,8 @@
  * Zybble Assistant — DeepSeek chatbot grounding.
  *
  * The chatbot answers through the Zybble backend (/api/ai-chat — DeepSeek
- * V3.2 on Puter's server-side API; no Puter.js in the browser, no puter.com
- * sign-in), but its knowledge is still the reviewed knowledge base in
+ * V3.2 on OpenRouter's server-side API; no AI credential in the browser, no
+ * third-party sign-in), but its knowledge is still the reviewed knowledge base in
  * ./knowledge.ts: every intent is flattened into a fact sheet that becomes
  * the system prompt. That keeps the CONTENT RULE the static assistant had —
  * answers only state facts that appear elsewhere on the public site; nothing

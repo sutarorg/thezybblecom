@@ -3,18 +3,16 @@
 // interpretation itself, all server-side (Supabase Edge twin of
 // /api/ai-interpret, sharing the same response contract).
 //
-// The interpretation used to run in the browser through Puter.js after this
-// function authorized it, which pushed users into a puter.com sign-in. It now
-// runs here through Puter's server-side API (PUTER_AUTH_TOKEN), keeping every
-// guarantee the gate always had, in the same order: the caller's session,
-// workspace membership, plan entitlement, the (validated, clamped)
-// interpretation, and one ai_requests usage row.
+// The interpretation runs here through OpenRouter's server-side API
+// (OPENROUTER_API_KEY), keeping every guarantee the gate always had, in the
+// same order: the caller's session, workspace membership, plan entitlement,
+// the (validated, clamped) interpretation, and one ai_requests usage row.
 // It never calls SerpApi, writes leads, or consumes lead quota.
 // ============================================================================
 import {
   HttpError,
   INTERPRET_SYSTEM_PROMPT,
-  PUTER_MODEL,
+  OPENROUTER_MODEL,
   callerFromRequest,
   cleanInterpretResult,
   corsHeaders,
@@ -23,15 +21,16 @@ import {
   getEntitlements,
   handleError,
   json,
-  puterChatJson,
+  openRouterChatJson,
   requireWorkspaceRole,
   serviceClient,
 } from "../_shared/index.ts";
 
 /**
- * DeepSeek V3.2 (via the server-side Puter integration) turns the request
- * into filters. One silent retry when the reply isn't usable JSON; the
- * result is fully validated and clamped before it ever reaches the client.
+ * DeepSeek V3.2 (via the server-side OpenRouter integration) turns the
+ * request into filters. One silent retry when the reply isn't usable JSON;
+ * the result is fully validated and clamped before it ever reaches the
+ * client.
  */
 async function interpretWithAi(request: string) {
   let sawCategoryMissing = false;
@@ -40,7 +39,7 @@ async function interpretWithAi(request: string) {
       attempt === 0
         ? INTERPRET_SYSTEM_PROMPT
         : `${INTERPRET_SYSTEM_PROMPT}\nYour previous reply was not usable. Respond with the JSON object only, and always include a non-empty "category".`;
-    const text = await puterChatJson({
+    const text = await openRouterChatJson({
       messages: [
         { role: "system", content: system },
         { role: "user", content: `User request: ${request}` },
@@ -86,8 +85,8 @@ Deno.serve(async (req) => {
       throw new HttpError(403, "Zybble AI isn't available on your current plan.", "ai_not_entitled");
     }
 
-    // The interpretation itself — server-side, so the browser never touches a
-    // Puter credential or sign-in flow.
+    // The interpretation itself — server-side, so the browser never touches an
+    // OpenRouter credential or third-party sign-in flow.
     const interpretation = await interpretWithAi(request);
 
     // Usage accounting: one row per completed interpretation, attributed to
@@ -98,10 +97,10 @@ Deno.serve(async (req) => {
       kind: "interpret",
       input: { request },
       status: "completed",
-      model: PUTER_MODEL,
+      model: OPENROUTER_MODEL,
     });
 
-    return json({ ok: true, model: PUTER_MODEL, ...interpretation });
+    return json({ ok: true, model: OPENROUTER_MODEL, ...interpretation });
   } catch (e) {
     return handleError(e, { functionName: "ai-interpret", startedAt });
   }

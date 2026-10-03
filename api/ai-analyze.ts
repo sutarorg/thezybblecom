@@ -3,17 +3,16 @@
 // Vercel twin of the Supabase Edge Function supabase/functions/ai-analyze:
 // same request/response contract, running on the same-origin /api route.
 //
-// The analysis used to call OpenAI's Responses API (OPENAI_API_KEY), whose
-// exhausted quota surfaced as the "ran out of usage quota" error. It now runs
-// on the same provider as every other Zybble AI surface — DeepSeek V3.2
-// through Puter's server-side API (PUTER_AUTH_TOKEN) — so there is no
-// OpenAI dependency left in this path. All database access runs with the
-// caller's bearer token so RLS stays the security boundary.
+// The analysis runs on the same provider as every other Zybble AI surface —
+// DeepSeek V3.2 through OpenRouter's server-side API (OPENROUTER_API_KEY,
+// OpenAI-compatible chat completions at https://openrouter.ai/api/v1) — so
+// there is no other AI dependency in this path. All database access runs
+// with the caller's bearer token so RLS stays the security boundary.
 // ============================================================================
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { extractJsonObject } from "./_lib/interpret.js";
-import { PuterError, getPuterModel, puterChatJson } from "./_lib/puter.js";
+import { OpenRouterError, getOpenRouterModel, openRouterChatJson } from "./_lib/openrouter.js";
 import {
   createUserSupabaseClient,
   requireSupabaseServerConfig,
@@ -76,9 +75,10 @@ function userClient(token: string): SupabaseClient {
 }
 
 /**
- * DeepSeek V3.2 (via the server-side Puter integration) analyzes the record.
- * One silent retry when the reply isn't usable JSON; whatever the provider
- * returned is validated field-by-field before it can reach the response.
+ * DeepSeek V3.2 (via the server-side OpenRouter integration) analyzes the
+ * record. One silent retry when the reply isn't usable JSON; whatever the
+ * provider returned is validated field-by-field before it can reach the
+ * response.
  */
 async function analyzeWithAi(lead: unknown): Promise<{ summary: string; observations: string[]; outreachAngle: string }> {
   let sawMalformed = false;
@@ -87,7 +87,7 @@ async function analyzeWithAi(lead: unknown): Promise<{ summary: string; observat
       attempt === 0
         ? ANALYZE_SYSTEM
         : `${ANALYZE_SYSTEM}\nYour previous reply was not usable. Respond with the JSON object only, with a non-empty "summary", 3-5 "points", and a non-empty "outreach_angle".`;
-    const text = await puterChatJson({
+    const text = await openRouterChatJson({
       messages: [
         { role: "system", content: system },
         { role: "user", content: `Analyze this public business record:\n${JSON.stringify(lead, null, 2)}` },
@@ -164,7 +164,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       .maybeSingle();
     if (leadError || !lead) throw new ApiError(404, "This lead doesn't exist.", "lead_not_found");
 
-    const model = getPuterModel();
+    const model = getOpenRouterModel();
     const { data: cached } = await sb
       .from("ai_insights")
       .select("summary, points, model, created_at")
@@ -216,7 +216,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       ? error
       : error instanceof SupabaseServerConfigError
         ? new ApiError(error.status, error.message, error.code)
-        : error instanceof PuterError
+        : error instanceof OpenRouterError
           ? new ApiError(error.status, error.message, error.code)
           : new ApiError(500, "The AI service couldn't complete that action. Please try again.", "unknown");
     console.error("api request", {

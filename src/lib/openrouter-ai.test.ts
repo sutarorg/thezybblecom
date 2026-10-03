@@ -6,16 +6,16 @@ import {
   cleanServerInterpretation,
   extractJsonObject,
   sanitizeStreamText,
-  streamPuterChat,
-} from "./puter-ai";
+  streamAIChat,
+} from "./openrouter-ai";
 
 /**
- * The shared client-side AI helper. The browser no longer loads Puter.js or
- * contacts Puter at all: conversations POST to the same-origin Zybble backend
- * (/api/ai-chat — DeepSeek V3.2 on Puter's server-side API) and stream back
- * as server-sent events. These tests pin the SSE contract both AI surfaces
- * rely on, the friendly-error mapping, and the interpret-response validation
- * the search form depends on.
+ * The shared client-side AI helper. The browser never contacts the AI
+ * provider directly: conversations POST to the same-origin Zybble backend
+ * (/api/ai-chat — DeepSeek V3.2 on OpenRouter's server-side API) and stream
+ * back as server-sent events. These tests pin the SSE contract both AI
+ * surfaces rely on, the friendly-error mapping, and the interpret-response
+ * validation the search form depends on.
  */
 
 function sseResponse(frames: Array<Record<string, unknown> | "[DONE]">, status = 200) {
@@ -47,7 +47,7 @@ describe("sanitizeStreamText", () => {
   });
 });
 
-describe("streamPuterChat — Zybble backend transport", () => {
+describe("streamAIChat — Zybble backend transport", () => {
   it("POSTs the conversation to the same-origin /api/ai-chat route and streams text deltas", async () => {
     const fetchMock = vi
       .fn()
@@ -55,7 +55,7 @@ describe("streamPuterChat — Zybble backend transport", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const deltas: string[] = [];
-    const full = await streamPuterChat([{ role: "user", content: "hi" }], {
+    const full = await streamAIChat([{ role: "user", content: "hi" }], {
       onDelta: (delta) => deltas.push(delta),
     });
 
@@ -67,8 +67,10 @@ describe("streamPuterChat — Zybble backend transport", () => {
     expect(JSON.parse(String(init.body))).toEqual({
       messages: [{ role: "user", content: "hi" }],
     });
-    // No Puter script, key, or origin appears anywhere in the request.
-    expect(JSON.stringify(init.headers ?? {})).not.toContain("puter.com");
+    // No OpenRouter key, origin, or Authorization header appears anywhere in
+    // the request — the browser only ever talks to the same-origin backend.
+    expect(JSON.stringify(init.headers ?? {})).not.toContain("openrouter.ai");
+    expect(init.headers).not.toHaveProperty("Authorization");
   });
 
   it("resolves from a single-frame reply and tolerates frames split across chunks", async () => {
@@ -85,7 +87,7 @@ describe("streamPuterChat — Zybble backend transport", () => {
       "fetch",
       vi.fn().mockResolvedValue(new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } })),
     );
-    await expect(streamPuterChat([{ role: "user", content: "hi" }])).resolves.toBe("one and two three");
+    await expect(streamAIChat([{ role: "user", content: "hi" }])).resolves.toBe("one and two three");
   });
 
   it("rejects with the curated server message on pre-stream errors", async () => {
@@ -93,8 +95,8 @@ describe("streamPuterChat — Zybble backend transport", () => {
       "fetch",
       vi.fn().mockResolvedValue(jsonErrorResponse({ error: "Zybble AI is busy right now. Please try again shortly.", code: "rate_limited" }, 429)),
     );
-    await expect(streamPuterChat([{ role: "user", content: "hi" }])).rejects.toMatchObject({
-      name: "PuterAIError",
+    await expect(streamAIChat([{ role: "user", content: "hi" }])).rejects.toMatchObject({
+      name: "ZybbleAIError",
       message: "Zybble AI is busy right now. Please try again shortly.",
       code: "provider_error",
     });
@@ -103,9 +105,9 @@ describe("streamPuterChat — Zybble backend transport", () => {
   it("never surfaces internal URLs or markup from server errors", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(jsonErrorResponse({ error: "stack at https://api.puter.com/internal\nat x.js:1" }, 500)),
+      vi.fn().mockResolvedValue(jsonErrorResponse({ error: "stack at https://openrouter.ai/internal\nat x.js:1" }, 500)),
     );
-    await expect(streamPuterChat([{ role: "user", content: "hi" }])).rejects.toMatchObject({
+    await expect(streamAIChat([{ role: "user", content: "hi" }])).rejects.toMatchObject({
       message: "Zybble AI couldn't complete that request. Please try again.",
     });
   });
@@ -115,14 +117,14 @@ describe("streamPuterChat — Zybble backend transport", () => {
       "fetch",
       vi.fn().mockResolvedValue(sseResponse([{ text: "partial" }, { error: "Zybble AI couldn't complete that request. Please try again." }, "[DONE]"])),
     );
-    await expect(streamPuterChat([{ role: "user", content: "hi" }])).rejects.toMatchObject({
+    await expect(streamAIChat([{ role: "user", content: "hi" }])).rejects.toMatchObject({
       code: "provider_error",
     });
   });
 
   it("rejects on an empty stream", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(sseResponse(["[DONE]"])));
-    await expect(streamPuterChat([{ role: "user", content: "hi" }])).rejects.toThrow(/empty response/i);
+    await expect(streamAIChat([{ role: "user", content: "hi" }])).rejects.toThrow(/empty response/i);
   });
 
   it("rejects on malformed stream frames", async () => {
@@ -132,12 +134,12 @@ describe("streamPuterChat — Zybble backend transport", () => {
         new Response("data: not-json\n\n", { status: 200, headers: { "content-type": "text/event-stream" } }),
       ),
     );
-    await expect(streamPuterChat([{ role: "user", content: "hi" }])).rejects.toThrow(/malformed/i);
+    await expect(streamAIChat([{ role: "user", content: "hi" }])).rejects.toThrow(/malformed/i);
   });
 
   it("maps a dropped network call to an availability error", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
-    await expect(streamPuterChat([{ role: "user", content: "hi" }])).rejects.toMatchObject({
+    await expect(streamAIChat([{ role: "user", content: "hi" }])).rejects.toMatchObject({
       code: "ai_unavailable",
     });
   });
@@ -254,14 +256,17 @@ describe("extractJsonObject", () => {
   });
 });
 
-describe("no browser Puter dependency", () => {
-  it("the module never references the Puter.js script or sign-in", async () => {
+describe("no browser OpenRouter dependency", () => {
+  it("the module never reads a provider key or calls OpenRouter directly", async () => {
     const { readFileSync } = await import("node:fs");
     const { resolve } = await import("node:path");
-    const source = readFileSync(resolve(process.cwd(), "src", "lib", "puter-ai.ts"), "utf8");
-    expect(source).not.toContain("js.puter.com");
-    expect(source).not.toContain("puter.auth");
-    expect(source).not.toContain("window.puter");
-    expect(source).not.toContain("signIn");
+    const source = readFileSync(resolve(process.cwd(), "src", "lib", "openrouter-ai.ts"), "utf8");
+    // No environment access of any kind — the key can never be read here.
+    expect(source).not.toContain("import.meta.env");
+    expect(source).not.toContain("process.env");
+    // No direct provider endpoint or credential header — only /api/ai-chat.
+    expect(source).not.toContain("https://openrouter.ai");
+    expect(source).not.toContain("Authorization");
+    expect(source).not.toContain("Bearer");
   });
 });

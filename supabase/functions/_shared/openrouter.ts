@@ -1,34 +1,35 @@
-// Shared server-side Puter AI client — Supabase Edge (Deno) copy of
-// api/_lib/puter.ts; keep the two textually in sync. This module is
-// deliberately web-standard and server-only: the auth token is read
-// exclusively from the server runtime environment (PUTER_AUTH_TOKEN) — it is
-// never imported by browser code, never logged, and never interpolated into
-// an error message.
+// Shared server-side OpenRouter AI client — Supabase Edge (Deno) copy of
+// api/_lib/openrouter.ts; keep the two textually in sync. This module is
+// deliberately web-standard and server-only: the API key is read
+// exclusively from the server runtime environment (OPENROUTER_API_KEY) — it
+// is never imported by browser code, never logged, and never interpolated
+// into an error message.
 //
-// Zybble's AI features previously ran in the browser through Puter.js
-// ("User-Pays"), which pushed every visitor into a puter.com sign-in. They
-// now run server-to-server through Puter's OpenAI-compatible endpoint
-// (https://api.puter.com/puterai/openai/v1) authenticated once with the
-// workspace owner's PUTER_AUTH_TOKEN, so Zybble users never see a Puter
-// popup. The model stays DeepSeek V3.2 — the same integration, moved
-// behind the Zybble backend.
+// Every Zybble AI surface (the Ask Zybble landing-page assistant, /find
+// request interpretation, and per-lead analysis) runs server-to-server
+// through OpenRouter's OpenAI-compatible endpoint
+// (https://openrouter.ai/api/v1/chat/completions) authenticated once with
+// the workspace owner's OPENROUTER_API_KEY. The model is DeepSeek V3.2
+// (OPENROUTER_MODEL). Zybble users never see a third-party AI sign-in and
+// no AI credential ever reaches the browser.
 //
-// Robustness contract (mirrors api/_lib/puter.test.ts):
+// Robustness contract (mirrors api/_lib/openrouter.test.ts):
 // - errors are classified by the provider's status AND error.code/error.type,
 //   never by status alone. Notably a 429 is a transient rate limit ONLY when
 //   the provider reports a rate-limit condition; the same status carrying
-//   insufficient_quota / billing markers is an account-balance failure that
-//   no amount of retrying will fix;
+//   insufficient_quota / insufficient_credits / billing markers is an
+//   account-balance failure (OpenRouter answers it with 402) that no amount
+//   of retrying will fix;
 // - transient conditions (genuine 429s, 408, 5xx/503 overload, network and
 //   timeout failures) are retried with exponential backoff plus jitter inside
 //   the caller's time budget, honoring Retry-After as a minimum delay (and
 //   refusing to retry sooner than the provider asked);
 // - authentication, quota, malformed-request and malformed-response failures
-//   fail fast with precise, secret-free PuterError codes, each with its own
-//   user-friendly message;
+//   fail fast with precise, secret-free OpenRouterError codes, each with its
+//   own user-friendly message;
 // - malformed/empty/incomplete provider output is never passed through.
 
-export type PuterErrorCode =
+export type OpenRouterErrorCode =
   | "missing_key"
   | "provider_auth"
   | "provider_quota"
@@ -42,18 +43,18 @@ export type PuterErrorCode =
   | "empty_response"
   | "malformed_response";
 
-export class PuterError extends Error {
+export class OpenRouterError extends Error {
   constructor(
     readonly status: number,
     message: string,
-    readonly code: PuterErrorCode,
+    readonly code: OpenRouterErrorCode,
   ) {
     super(message);
-    this.name = "PuterError";
+    this.name = "OpenRouterError";
   }
 }
 
-export type PuterServerMessage = {
+export type OpenRouterServerMessage = {
   role: "system" | "user" | "assistant";
   content: string;
 };
@@ -76,40 +77,44 @@ function runtimeConfigHint(variableName: string) {
     : `Add ${variableName} in Vercel → Project → Settings → Environment Variables, then redeploy.`;
 }
 
-/** The model all Zybble's server-side AI surfaces use (DeepSeek via Puter). */
-export function getPuterModel() {
-  return serverEnv("PUTER_MODEL") || "deepseek/deepseek-v3.2";
+/** The model all Zybble's server-side AI surfaces use (DeepSeek via OpenRouter). */
+export function getOpenRouterModel() {
+  return serverEnv("OPENROUTER_MODEL") || "deepseek/deepseek-v3.2";
 }
 
-/** Puter's OpenAI-compatible endpoint; override only for testing/proxying. */
-export function getPuterBaseUrl() {
-  const base = serverEnv("PUTER_API_BASE_URL") || "https://api.puter.com/puterai/openai/v1";
+/** OpenRouter's OpenAI-compatible endpoint; override only for testing/proxying. */
+export function getOpenRouterBaseUrl() {
+  const base = serverEnv("OPENROUTER_API_BASE_URL") || "https://openrouter.ai/api/v1";
   return base.replace(/\/+$/, "");
 }
 
 /**
- * Resolve PUTER_AUTH_TOKEN or fail with an actionable, secret-free error.
- * The token authorizes server-to-server calls against the site owner's Puter
- * account; it must exist nowhere else (never a VITE_* variable).
+ * Resolve OPENROUTER_API_KEY or fail with an actionable, secret-free error.
+ * The key authorizes server-to-server calls against the site owner's
+ * OpenRouter account; it must exist nowhere else (never a VITE_* variable).
  */
-export function requirePuterToken(): string {
-  const token = serverEnv("PUTER_AUTH_TOKEN");
-  if (!token) {
-    throw new PuterError(
+export function requireOpenRouterApiKey(): string {
+  const apiKey = serverEnv("OPENROUTER_API_KEY");
+  if (!apiKey) {
+    throw new OpenRouterError(
       500,
-      `Zybble AI isn't configured on the server. Missing server environment variable: PUTER_AUTH_TOKEN. ${runtimeConfigHint("PUTER_AUTH_TOKEN")} Create the token in your Puter dashboard (puter.com → API token) and never expose it in frontend code.`,
+      `Zybble AI isn't configured on the server. Missing server environment variable: OPENROUTER_API_KEY. ${runtimeConfigHint("OPENROUTER_API_KEY")} Create the key in your OpenRouter dashboard (openrouter.ai → Keys → Create key) and never expose it in frontend code.`,
       "missing_key",
     );
   }
-  return token;
+  return apiKey;
 }
 
 /** True when the provider body's error object looks like an account-balance failure. */
-export function isPuterQuotaError(info: ProviderErrorInfo | null) {
+export function isOpenRouterQuotaError(info: ProviderErrorInfo | null) {
   if (!info) return false;
-  if (info.code.includes("insufficient_quota") || info.code.includes("spend_limit_exceeded")) return true;
+  if (
+    info.code.includes("insufficient_quota") ||
+    info.code.includes("insufficient_credits") ||
+    info.code.includes("spend_limit_exceeded")
+  ) return true;
   if (info.type.includes("insufficient_quota") || info.type.includes("billing")) return true;
-  return /exceeded (your )?current quota|insufficient (credit|fund|balance)/.test(info.message);
+  return /exceeded (your )?current quota|insufficient (credits?|funds?|balance)/.test(info.message);
 }
 
 /* ------------------------------------------------------------------ */
@@ -134,50 +139,50 @@ function providerErrorInfo(payload: Record<string, unknown>): ProviderErrorInfo 
 /** True only for failures a retry can plausibly fix. */
 function isTransientFailure(status: number, info: ProviderErrorInfo | null) {
   if (status === 408 || status >= 500) return true; // timeout / outage / 503 overload
-  if (status === 429) return !isPuterQuotaError(info); // genuine rate limit only
+  if (status === 429) return !isOpenRouterQuotaError(info); // genuine rate limit only
   return false;
 }
 
 /** Classify a failing provider response by status + error body; secret-free. */
-function failureFromResponse(status: number, payload: Record<string, unknown>, model: string): PuterError {
+function failureFromResponse(status: number, payload: Record<string, unknown>, model: string): OpenRouterError {
   const info = providerErrorInfo(payload);
   const message = info?.message ?? "";
   const errorCode = info?.code ?? "";
 
-  // 401/403 — the server-side PUTER_AUTH_TOKEN is rejected; users cannot fix
-  // this by retrying or rephrasing.
+  // 401/403 — the server-side OPENROUTER_API_KEY is rejected; users cannot
+  // fix this by retrying or rephrasing.
   if (status === 401 || status === 403) {
-    return new PuterError(502, "The AI provider rejected the server credentials.", "provider_auth");
+    return new OpenRouterError(502, "The AI provider rejected the server credentials.", "provider_auth");
   }
   if (
     (status === 404 || status === 400) &&
     (errorCode.includes("model") || message.includes("model") || message.includes("does not exist"))
   ) {
-    return new PuterError(
+    return new OpenRouterError(
       502,
-      `The configured AI model “${model}” isn't available from the AI provider. Check the PUTER_MODEL server configuration${serverEnv("PUTER_API_BASE_URL") ? " and PUTER_API_BASE_URL" : ""}, then redeploy.`,
+      `The configured AI model “${model}” isn't available from the AI provider. Check the OPENROUTER_MODEL server configuration${serverEnv("OPENROUTER_API_BASE_URL") ? " and OPENROUTER_API_BASE_URL" : ""}, then redeploy.`,
       "model_invalid",
     );
   }
   // 402 Payment Required or any explicit quota marker — an account-balance
   // failure no amount of retrying will fix. The message is actionable for
   // the site owner and never blames the visitor.
-  if (status === 402 || isPuterQuotaError(info)) {
-    return new PuterError(
+  if (status === 402 || isOpenRouterQuotaError(info)) {
+    return new OpenRouterError(
       502,
-      "Zybble AI ran out of usage quota on its server account. An administrator needs to review the Puter account balance before AI features work again.",
+      "Zybble AI ran out of usage quota on its server account. An administrator needs to review the OpenRouter account credits before AI features work again.",
       "provider_quota",
     );
   }
   if (status === 429) {
-    return new PuterError(429, "Zybble AI is rate-limited. Please try again shortly.", "rate_limited");
+    return new OpenRouterError(429, "Zybble AI is rate-limited. Please try again shortly.", "rate_limited");
   }
   if (status >= 500 || status === 408) {
-    return new PuterError(502, "Zybble AI is temporarily unavailable. Please try again shortly.", "provider_unavailable");
+    return new OpenRouterError(502, "Zybble AI is temporarily unavailable. Please try again shortly.", "provider_unavailable");
   }
   // 4xx without a more specific meaning: our request was malformed for the
   // provider. Never retried, never labeled a rate limit.
-  return new PuterError(502, "Zybble AI couldn't process that request. Please try rephrasing it.", "provider_request_invalid");
+  return new OpenRouterError(502, "Zybble AI couldn't process that request. Please try rephrasing it.", "provider_request_invalid");
 }
 
 /**
@@ -189,18 +194,18 @@ function failureFromResponse(status: number, payload: Record<string, unknown>, m
 function statusFromErrorPayload(payload: Record<string, unknown>): number {
   const info = providerErrorInfo(payload);
   if (!info) return 502;
-  if (isPuterQuotaError(info)) return 429; // the 429 branch reclassifies it as quota
+  if (isOpenRouterQuotaError(info)) return 429; // the 429 branch reclassifies it as quota
   const haystack = `${info.code} ${info.type} ${info.message}`;
-  if (/invalid_api_key|invalid_token|unauthorized|forbidden|authentication/.test(haystack)) return 401;
+  if (/invalid_api_key|api_key_incorrect|invalid_token|unauthorized|forbidden|authentication/.test(haystack)) return 401;
   if (/model/.test(haystack) || /does not exist/.test(haystack)) return 404;
   if (/rate.?limit|too many|throttl/.test(haystack)) return 429;
   return 502;
 }
 
 /** Log-safe category for metrics; mirrors failureFromResponse without bodies. */
-function failureCategory(status: number, info: ProviderErrorInfo | null): PuterErrorCode {
+function failureCategory(status: number, info: ProviderErrorInfo | null): OpenRouterErrorCode {
   if (status === 401 || status === 403) return "provider_auth";
-  if (status === 429) return isPuterQuotaError(info) ? "provider_quota" : "rate_limited";
+  if (status === 429) return isOpenRouterQuotaError(info) ? "provider_quota" : "rate_limited";
   if (status >= 500 || status === 408) return "provider_unavailable";
   return "provider_request_invalid";
 }
@@ -247,10 +252,10 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-type AttemptFailure = { error: PuterError; response: Response | null };
+type AttemptFailure = { error: OpenRouterError; response: Response | null };
 
-function timeoutFailure(timedOut: boolean): PuterError {
-  return new PuterError(
+function timeoutFailure(timedOut: boolean): OpenRouterError {
+  return new OpenRouterError(
     timedOut ? 504 : 502,
     timedOut
       ? "Zybble AI took too long to respond. Please try again."
@@ -298,7 +303,7 @@ export function streamChunkDelta(payload: Record<string, unknown>): string {
     // Mid-stream provider failures surface as a 200-body error event. Details
     // must never reach the browser (they may echo internals) — use a safe,
     // generic message.
-    throw new PuterError(
+    throw new OpenRouterError(
       502,
       "Zybble AI couldn't complete that request. Please try again.",
       "provider_unavailable",
@@ -319,16 +324,16 @@ export function streamChunkDelta(payload: Record<string, unknown>): string {
 /* ------------------------------------------------------------------ */
 /* The one provider call (chat.completions, streaming or buffered)     */
 /* ------------------------------------------------------------------ */
-async function puterChatCompletions(options: {
-  messages: PuterServerMessage[];
+async function openRouterChatCompletions(options: {
+  messages: OpenRouterServerMessage[];
   stream: boolean;
   maxOutputTokens?: number;
   timeoutMs?: number;
   signal?: AbortSignal;
 }): Promise<Response> {
-  const token = requirePuterToken();
-  const model = getPuterModel();
-  const baseUrl = getPuterBaseUrl();
+  const apiKey = requireOpenRouterApiKey();
+  const model = getOpenRouterModel();
+  const baseUrl = getOpenRouterBaseUrl();
   const perAttemptTimeout = options.timeoutMs ?? 25_000;
 
   const overallDeadline = Date.now() + perAttemptTimeout + RETRY_SLACK_MS;
@@ -343,10 +348,7 @@ async function puterChatCompletions(options: {
       const timeoutMs = Math.max(1_000, Math.min(perAttemptTimeout, overallDeadline - Date.now()));
       response = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+        headers: openRouterHeaders(apiKey),
         signal: options.signal
           ? // Overall attempt timeout still applies; a caller-provided abort
             // (e.g. client disconnect) wins too.
@@ -372,7 +374,7 @@ async function puterChatCompletions(options: {
           continue;
         }
       }
-      throw lastFailure?.error ?? new PuterError(
+      throw lastFailure?.error ?? new OpenRouterError(
         502,
         "Zybble AI couldn't be reached. Please try again shortly.",
         "provider_unreachable",
@@ -404,13 +406,13 @@ async function puterChatCompletions(options: {
       response.status === 401 || response.status === 403 ||
       response.status === 429 || response.status === 408 || response.status >= 500;
     if (!knownStatus && !parsedOk && raw.trim()) {
-      console.warn("puter malformed error response", { status: response.status, model, bodyLength: raw.length });
+      console.warn("openrouter malformed error response", { status: response.status, model, bodyLength: raw.length });
       lastFailure = {
-        error: new PuterError(502, "Zybble AI returned malformed data. Please try again.", "malformed_response"),
+        error: new OpenRouterError(502, "Zybble AI returned malformed data. Please try again.", "malformed_response"),
         response,
       };
     } else {
-      console.warn("puter request failed", {
+      console.warn("openrouter request failed", {
         status: response.status,
         model,
         attempt,
@@ -437,25 +439,43 @@ async function puterChatCompletions(options: {
     throw lastFailure.error;
   }
 
-  throw lastFailure?.error ?? new PuterError(502, "Zybble AI couldn't be reached. Please try again shortly.", "provider_unreachable");
+  throw lastFailure?.error ?? new OpenRouterError(502, "Zybble AI couldn't be reached. Please try again shortly.", "provider_unreachable");
+}
+
+/**
+ * Request headers for OpenRouter: the OpenAI-compatible auth header plus the
+ * optional attribution headers (HTTP-Referer / X-Title), configurable through
+ * OPENROUTER_HTTP_REFERER / OPENROUTER_X_TITLE. The API key never leaves the
+ * Authorization header — it is not logged and never appears in an error.
+ */
+function openRouterHeaders(apiKey: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${apiKey}`,
+  };
+  const referer = serverEnv("OPENROUTER_HTTP_REFERER") || "https://zybble.com";
+  if (referer) headers["HTTP-Referer"] = referer;
+  const title = serverEnv("OPENROUTER_X_TITLE") || "Zybble";
+  if (title) headers["X-Title"] = title;
+  return headers;
 }
 
 /**
  * Buffered completion: resolves with the full assistant text. Never returns
  * an empty string — blank, truncated and non-JSON completions throw.
  */
-export async function puterChatJson(options: {
-  messages: PuterServerMessage[];
+export async function openRouterChatJson(options: {
+  messages: OpenRouterServerMessage[];
   maxOutputTokens?: number;
   timeoutMs?: number;
   signal?: AbortSignal;
 }): Promise<string> {
-  const response = await puterChatCompletions({ ...options, stream: false });
+  const response = await openRouterChatCompletions({ ...options, stream: false });
 
   const raw = await response.text().catch(() => "");
   if (!raw.trim()) {
-    console.warn("puter empty response", { model: getPuterModel() });
-    throw new PuterError(502, "Zybble AI returned an empty response. Please try again.", "empty_response");
+    console.warn("openrouter empty response", { model: getOpenRouterModel() });
+    throw new OpenRouterError(502, "Zybble AI returned an empty response. Please try again.", "empty_response");
   }
 
   let payload: Record<string, unknown>;
@@ -464,23 +484,23 @@ export async function puterChatJson(options: {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
     payload = parsed as Record<string, unknown>;
   } catch {
-    console.warn("puter malformed response", { model: getPuterModel(), bodyLength: raw.length });
-    throw new PuterError(502, "Zybble AI returned malformed data. Please try again.", "malformed_response");
+    console.warn("openrouter malformed response", { model: getOpenRouterModel(), bodyLength: raw.length });
+    throw new OpenRouterError(502, "Zybble AI returned malformed data. Please try again.", "malformed_response");
   }
 
   // Some gateways return 200 with an error body — classify it by the error
   // content exactly like the matching HTTP status (quota/auth still fail
   // fast and keep their precise codes).
   if (payload.error && typeof payload.error === "object") {
-    const failure = failureFromResponse(statusFromErrorPayload(payload), payload, getPuterModel());
-    console.warn("puter error payload with 200 status", { model: getPuterModel(), code: failure.code });
+    const failure = failureFromResponse(statusFromErrorPayload(payload), payload, getOpenRouterModel());
+    console.warn("openrouter error payload with 200 status", { model: getOpenRouterModel(), code: failure.code });
     throw failure;
   }
 
   const text = completionMessageText(payload).trim();
   if (!text) {
-    console.warn("puter empty completion", { model: getPuterModel() });
-    throw new PuterError(502, "Zybble AI returned an empty response. Please try again.", "empty_response");
+    console.warn("openrouter empty completion", { model: getOpenRouterModel() });
+    throw new OpenRouterError(502, "Zybble AI returned an empty response. Please try again.", "empty_response");
   }
   return text;
 }
@@ -492,11 +512,11 @@ export async function puterChatJson(options: {
  * streaming starts throw (and may have been retried); once bytes flow the
  * caller owns the stream.
  */
-export async function puterChatStream(options: {
-  messages: PuterServerMessage[];
+export async function openRouterChatStream(options: {
+  messages: OpenRouterServerMessage[];
   maxOutputTokens?: number;
   timeoutMs?: number;
   signal?: AbortSignal;
 }): Promise<Response> {
-  return puterChatCompletions({ ...options, stream: true });
+  return openRouterChatCompletions({ ...options, stream: true });
 }

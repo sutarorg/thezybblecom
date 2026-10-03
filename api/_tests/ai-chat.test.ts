@@ -8,28 +8,28 @@ import handler, { ASSISTANT_MARKER } from "../ai-chat";
  * Full-flow tests for POST /api/ai-chat — the server-side AI bridge the
  * landing-page assistant streams through. The browser sends only the
  * conversation; the route pins the shape to the product assistant, fixes the
- * model and token budget server-side, calls Puter with PUTER_AUTH_TOKEN, and
+ * model and token budget server-side, calls OpenRouter with OPENROUTER_API_KEY, and
  * transcodes upstream SSE into the browser's own event contract.
  */
 
-const PUTER_TOKEN = "stub-puter-auth-token";
-const PUTER_CHAT_URL = "https://api.puter.com/puterai/openai/v1/chat/completions";
-const PUTER_MODEL = "deepseek/deepseek-v3.2";
+const OPENROUTER_API_KEY = "sk-or-stub-openrouter-key";
+const OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
+const OPENROUTER_MODEL = "deepseek/deepseek-v3.2";
 
-const PUTER_VARS = ["PUTER_AUTH_TOKEN", "PUTER_MODEL", "PUTER_API_BASE_URL"] as const;
+const OPENROUTER_VARS = ["OPENROUTER_API_KEY", "OPENROUTER_MODEL", "OPENROUTER_API_BASE_URL"] as const;
 const saved = new Map<string, string | undefined>();
 
 beforeEach(() => {
-  for (const name of PUTER_VARS) saved.set(name, process.env[name]);
-  for (const name of PUTER_VARS) delete process.env[name];
-  process.env.PUTER_AUTH_TOKEN = PUTER_TOKEN;
+  for (const name of OPENROUTER_VARS) saved.set(name, process.env[name]);
+  for (const name of OPENROUTER_VARS) delete process.env[name];
+  process.env.OPENROUTER_API_KEY = OPENROUTER_API_KEY;
   vi.spyOn(console, "log").mockImplementation(() => undefined);
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
   vi.spyOn(console, "error").mockImplementation(() => undefined);
 });
 
 afterEach(() => {
-  for (const name of PUTER_VARS) {
+  for (const name of OPENROUTER_VARS) {
     const value = saved.get(name);
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
@@ -56,25 +56,25 @@ function sseBody(chunks: string[]) {
   });
 }
 
-function puterStreamSse(events: string[], status = 200) {
+function openRouterStreamSse(events: string[], status = 200) {
   return new Response(sseBody(events), {
     status,
     headers: { "content-type": "text/event-stream" },
   });
 }
 
-type PuterBehavior = Response | ((call: { model: unknown; body: Record<string, unknown> }) => Response);
+type OpenRouterBehavior = Response | ((call: { model: unknown; body: Record<string, unknown> }) => Response);
 
-function installPuterStub(behavior: PuterBehavior) {
+function installOpenRouterStub(behavior: OpenRouterBehavior) {
   const seen: Array<Record<string, unknown>> = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
       const url = String(input);
-      expect(url).toBe(PUTER_CHAT_URL);
-      expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${PUTER_TOKEN}`);
+      expect(url).toBe(OPENROUTER_CHAT_URL);
+      expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${OPENROUTER_API_KEY}`);
       const body = JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>;
-      expect(body.model).toBe(PUTER_MODEL);
+      expect(body.model).toBe(OPENROUTER_MODEL);
       seen.push(body);
       return typeof behavior === "function" ? behavior({ model: body.model, body }) : behavior;
     }),
@@ -163,8 +163,8 @@ function framesOf(sse: string): Array<Record<string, unknown> | "[DONE]"> {
 
 describe("POST /api/ai-chat — streaming contract", () => {
   it("streams a transcoded DeepSeek reply as {text} frames terminated by [DONE]", async () => {
-    installPuterStub(
-      puterStreamSse([
+    installOpenRouterStub(
+      openRouterStreamSse([
         'data: {"id":"c1","choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n',
         'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"Zybble finds businesses"}}]}\n\n',
         'data: {"id":"c1","choices":[{"index":0,"delta":{"content":" and turns them into leads."}}]}\n\n',
@@ -185,15 +185,15 @@ describe("POST /api/ai-chat — streaming contract", () => {
       .map((f) => String(f.text ?? ""))
       .join("");
     expect(text).toBe("Zybble finds businesses and turns them into leads.");
-    // The Puter wire format (ids, roles, finish reasons) never leaks through.
+    // The OpenRouter wire format (ids, roles, finish reasons) never leaks through.
     expect(getWritten()).not.toContain("finish_reason");
     expect(getWritten()).not.toContain("chatcmpl");
-    expect(getWritten()).not.toContain(PUTER_TOKEN);
+    expect(getWritten()).not.toContain(OPENROUTER_API_KEY);
   });
 
   it("handles SSE frames split across network chunks", async () => {
-    installPuterStub(
-      puterStreamSse([
+    installOpenRouterStub(
+      openRouterStreamSse([
         'data: {"choices":[{"delta":{"content":"Hel',
         'lo, "}}]}\n\ndata: {"choices":[{"delta":{"content":"world"}}]}\n',
         "\ndata: [DONE]\n\n",
@@ -210,7 +210,7 @@ describe("POST /api/ai-chat — streaming contract", () => {
   });
 
   it("emits a buffered JSON completion as a single text frame when the gateway ignores stream", async () => {
-    installPuterStub(
+    installOpenRouterStub(
       new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "One-shot answer." } }] }), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -224,8 +224,8 @@ describe("POST /api/ai-chat — streaming contract", () => {
   });
 
   it("surfaces a mid-stream provider error as an error frame, then DONE", async () => {
-    installPuterStub(
-      puterStreamSse([
+    installOpenRouterStub(
+      openRouterStreamSse([
         'data: {"choices":[{"delta":{"content":"Partial"}}]}\n\n',
         'data: {"error":{"message":"model overloaded with internal detail"}}\n\n',
         "data: [DONE]\n\n",
@@ -242,7 +242,7 @@ describe("POST /api/ai-chat — streaming contract", () => {
   });
 
   it("reports an upstream stream with no text as an empty response", async () => {
-    installPuterStub(puterStreamSse(['data: {"choices":[{"delta":{}}]}\n\n', "data: [DONE]\n\n"]));
+    installOpenRouterStub(openRouterStreamSse(['data: {"choices":[{"delta":{}}]}\n\n', "data: [DONE]\n\n"]));
     const { req, res, getWritten } = createMockReqRes({ body: conversation() });
     await handler(req, res);
     const frames = framesOf(getWritten());
@@ -251,29 +251,29 @@ describe("POST /api/ai-chat — streaming contract", () => {
   });
 
   it("maps pre-stream provider failures to JSON errors with safe statuses", async () => {
-    installPuterStub(new Response("unauthorized", { status: 401 }));
+    installOpenRouterStub(new Response("unauthorized", { status: 401 }));
     const { req, res, getStatus, getJson } = createMockReqRes({ body: conversation() });
     await handler(req, res);
     expect(getStatus()).toBe(502);
     expect(getJson()).toMatchObject({ code: "provider_auth" });
   });
 
-  it("reports missing PUTER_AUTH_TOKEN as an actionable 500 without any secret", async () => {
-    delete process.env.PUTER_AUTH_TOKEN;
-    installPuterStub(new Response("unused", { status: 200 }));
+  it("reports missing OPENROUTER_API_KEY as an actionable 500 without any secret", async () => {
+    delete process.env.OPENROUTER_API_KEY;
+    installOpenRouterStub(new Response("unused", { status: 200 }));
     const { req, res, getStatus, getJson } = createMockReqRes({ body: conversation() });
     await handler(req, res);
     expect(getStatus()).toBe(500);
     const body = getJson() as { error: string; code: string };
     expect(body.code).toBe("missing_key");
-    expect(body.error).toContain("PUTER_AUTH_TOKEN");
-    expect(body.error).not.toContain(PUTER_TOKEN);
+    expect(body.error).toContain("OPENROUTER_API_KEY");
+    expect(body.error).not.toContain(OPENROUTER_API_KEY);
   });
 });
 
 describe("POST /api/ai-chat — request policy", () => {
   beforeEach(() => {
-    installPuterStub(puterStreamSse(['data: {"choices":[{"delta":{"content":"ok"}}]}\n\n', "data: [DONE]\n\n"]));
+    installOpenRouterStub(openRouterStreamSse(['data: {"choices":[{"delta":{"content":"ok"}}]}\n\n', "data: [DONE]\n\n"]));
   });
 
   it("rejects non-POST requests", async () => {
@@ -329,13 +329,13 @@ describe("POST /api/ai-chat — request policy", () => {
   });
 
   it("never forwards client-supplied model or tuning parameters to the provider", async () => {
-    const seen = installPuterStub(puterStreamSse(['data: {"choices":[{"delta":{"content":"ok"}}]}\n\n', "data: [DONE]\n\n"]));
+    const seen = installOpenRouterStub(openRouterStreamSse(['data: {"choices":[{"delta":{"content":"ok"}}]}\n\n', "data: [DONE]\n\n"]));
     const { req, res } = createMockReqRes({
       body: { ...conversation(), model: "gpt-5", temperature: 0, max_tokens: 999_999 },
     });
     await handler(req, res);
     expect(seen).toHaveLength(1);
-    expect(seen[0]!.model).toBe(PUTER_MODEL);
+    expect(seen[0]!.model).toBe(OPENROUTER_MODEL);
     expect(seen[0]!).not.toHaveProperty("temperature");
     expect(seen[0]!.max_tokens).toBe(1_200); // fixed server-side budget
   });

@@ -4,11 +4,10 @@
 /* One implementation shared by every AI surface in the browser: the   */
 /* /find request interpreter (through services/api) and the landing-   */
 /* page assistant. All calls go to the same-origin Zybble backend      */
-/* (/api/ai-chat), which runs DeepSeek V3.2 through Puter's server     */
-/* API with a server-only PUTER_AUTH_TOKEN. The browser never loads    */
-/* Puter.js, never holds a Puter credential, and is never sent to a    */
-/* puter.com sign-in — the redirect users used to hit is gone by       */
-/* construction, not by suppression.                                   */
+/* (/api/ai-chat), which runs DeepSeek V3.2 through OpenRouter's       */
+/* server-side API with a server-only OPENROUTER_API_KEY. The browser  */
+/* never holds an AI credential and is never sent to a third-party     */
+/* sign-in.                                                            */
 /*                                                                     */
 /* The route streams server-sent events of the form                    */
 /*   data: {"text": "…"} / data: {"error": "…"} / data: [DONE]         */
@@ -20,13 +19,13 @@
 /** Same-origin backend route that streams the assistant reply. */
 export const AI_CHAT_ROUTE = "/api/ai-chat";
 
-export type PuterChatMessage = {
+export type AIChatMessage = {
   role: "system" | "user" | "assistant";
   content: string;
 };
 
 /** Friendly, secret-free failure surfaced to the UI. */
-export class PuterAIError extends Error {
+export class ZybbleAIError extends Error {
   constructor(
     message: string,
     readonly code:
@@ -38,7 +37,7 @@ export class PuterAIError extends Error {
       | "provider_error",
   ) {
     super(message);
-    this.name = "PuterAIError";
+    this.name = "ZybbleAIError";
   }
 }
 
@@ -69,7 +68,7 @@ async function readWithTimeout(
         timer = setTimeout(
           () =>
             reject(
-              new PuterAIError(
+              new ZybbleAIError(
                 "Zybble AI took too long to respond. Please try again.",
                 "ai_timeout",
               ),
@@ -94,22 +93,22 @@ function serverErrorMessage(value: unknown): string {
 }
 
 /** Map a fetch-level failure to a safe, friendly message. */
-function toPuterAIError(error: unknown): PuterAIError {
-  if (error instanceof PuterAIError) return error;
+function toZybbleAIError(error: unknown): ZybbleAIError {
+  if (error instanceof ZybbleAIError) return error;
   if (error instanceof Error && error.name === "AbortError") {
-    return new PuterAIError(
+    return new ZybbleAIError(
       "Zybble AI took too long to respond. Please try again.",
       "ai_timeout",
     );
   }
   // TypeError from fetch = network/DNS/CORS — the service is unreachable.
-  return new PuterAIError(
+  return new ZybbleAIError(
     "Zybble AI couldn't be reached. Check your connection and try again.",
     "ai_unavailable",
   );
 }
 
-export type StreamPuterChatOptions = {
+export type StreamAIChatOptions = {
   /** Called for every streamed text delta, already sanitized. */
   onDelta?: (delta: string) => void;
   /** Per-chunk inactivity timeout in milliseconds. */
@@ -123,9 +122,9 @@ export type StreamPuterChatOptions = {
  * complete text. An {"error": …} frame, a truncated stream, or an empty
  * completion rejects — partial text is never presented as a result.
  */
-export async function streamPuterChat(
-  messages: PuterChatMessage[],
-  options?: StreamPuterChatOptions,
+export async function streamAIChat(
+  messages: AIChatMessage[],
+  options?: StreamAIChatOptions,
 ): Promise<string> {
   const timeoutMs = options?.timeoutMs ?? STREAM_TIMEOUT_MS;
   const controller = new AbortController();
@@ -139,7 +138,7 @@ export async function streamPuterChat(
       signal: controller.signal,
     });
   } catch (error) {
-    throw toPuterAIError(error);
+    throw toZybbleAIError(error);
   }
 
   if (!response.ok) {
@@ -152,16 +151,16 @@ export async function streamPuterChat(
       message = undefined;
     }
     if (response.status === 429) {
-      throw new PuterAIError(
+      throw new ZybbleAIError(
         message ?? "Zybble AI is busy right now. Please try again shortly.",
         "provider_error",
       );
     }
-    throw new PuterAIError(serverErrorMessage(message), "provider_error");
+    throw new ZybbleAIError(serverErrorMessage(message), "provider_error");
   }
 
   if (!response.body) {
-    throw new PuterAIError(
+    throw new ZybbleAIError(
       "Zybble AI couldn't load in this browser. Please try again.",
       "ai_unavailable",
     );
@@ -184,10 +183,10 @@ export async function streamPuterChat(
     try {
       frame = JSON.parse(data) as Record<string, unknown>;
     } catch {
-      throw new PuterAIError("Zybble AI returned malformed data. Please try again.", "malformed_response");
+      throw new ZybbleAIError("Zybble AI returned malformed data. Please try again.", "malformed_response");
     }
     if (typeof frame.error === "string") {
-      throw new PuterAIError(serverErrorMessage(frame.error), "provider_error");
+      throw new ZybbleAIError(serverErrorMessage(frame.error), "provider_error");
     }
     if (typeof frame.text === "string" && frame.text) {
       const delta = sanitizeStreamText(frame.text);
@@ -201,7 +200,7 @@ export async function streamPuterChat(
   try {
     for (;;) {
       const { done, value } = await readWithTimeout(reader, timeoutMs).catch((error) => {
-        throw toPuterAIError(error);
+        throw toZybbleAIError(error);
       });
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
@@ -215,7 +214,7 @@ export async function streamPuterChat(
     if (buffer.trim()) handleEvent(buffer);
   } catch (error) {
     controller.abort();
-    throw toPuterAIError(error);
+    throw toZybbleAIError(error);
   } finally {
     try {
       reader.releaseLock();
@@ -225,7 +224,7 @@ export async function streamPuterChat(
   }
 
   if (!full.trim()) {
-    throw new PuterAIError("Zybble AI returned an empty response. Please try again.", "empty_response");
+    throw new ZybbleAIError("Zybble AI returned an empty response. Please try again.", "empty_response");
   }
   return full;
 }

@@ -3,7 +3,7 @@
 // Secrets live only here (Deno.env), never in the browser bundle.
 // ============================================================================
 import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.0";
-import { PuterError, getPuterModel, puterChatJson } from "./puter.ts";
+import { OpenRouterError, getOpenRouterModel, openRouterChatJson } from "./openrouter.ts";
 import { INTERPRET_SYSTEM_PROMPT, cleanInterpretResult, extractJsonObject } from "./interpret.ts";
 import { normalizeOpenState, type OpenState } from "./open-state.ts";
 
@@ -88,7 +88,7 @@ export function handleError(
   e: unknown,
   meta?: { functionName: string; startedAt: number },
 ) {
-  const apiError = e instanceof HttpError || e instanceof PuterError ? e : null;
+  const apiError = e instanceof HttpError || e instanceof OpenRouterError ? e : null;
   const status = apiError?.status ?? 500;
   const code = apiError?.code ?? "unknown";
   console.error("edge request", {
@@ -313,10 +313,10 @@ export function serpApiLl(page: Record<string, any>, results: Record<string, any
 }
 
 /* ------------------------------------------------------------------ */
-/* Server-side Puter AI (DeepSeek), OpenAI-compatible chat completions  */
+/* Server-side OpenRouter AI (DeepSeek), OpenAI-compatible completions  */
 /* ------------------------------------------------------------------ */
-export { puterChatJson, extractJsonObject, cleanInterpretResult, INTERPRET_SYSTEM_PROMPT };
-export const PUTER_MODEL = getPuterModel();
+export { openRouterChatJson, extractJsonObject, cleanInterpretResult, INTERPRET_SYSTEM_PROMPT };
+export const OPENROUTER_MODEL = getOpenRouterModel();
 
 /* ------------------------------------------------------------------ */
 /* Razorpay REST client (server-side only)                             */

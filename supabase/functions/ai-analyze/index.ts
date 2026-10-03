@@ -2,16 +2,15 @@
 // ai-analyze — DeepSeek-powered lead intelligence (cached per lead).
 // Supabase Edge twin of /api/ai-analyze: same request/response contract.
 //
-// The analysis used to call OpenAI's Responses API (OPENAI_API_KEY), whose
-// exhausted quota surfaced as the "ran out of usage quota" error. It now runs
-// on the same provider as every other Zybble AI surface — DeepSeek V3.2
-// through Puter's server-side API (PUTER_AUTH_TOKEN, mirrored in
-// _shared/puter.ts) — so no OpenAI dependency remains in this path.
+// The analysis runs on the same provider as every other Zybble AI surface —
+// DeepSeek V3.2 through OpenRouter's server-side API (OPENROUTER_API_KEY,
+// mirrored in _shared/openrouter.ts) — so no other AI dependency remains in
+// this path.
 // ============================================================================
 import {
   ANALYZE_SYSTEM,
   HttpError,
-  PUTER_MODEL,
+  OPENROUTER_MODEL,
   callerFromRequest,
   corsHeaders,
   errorJson,
@@ -19,15 +18,15 @@ import {
   getEntitlements,
   handleError,
   json,
-  puterChatJson,
+  openRouterChatJson,
   requireWorkspaceRole,
   serviceClient,
 } from "../_shared/index.ts";
 
 /**
- * DeepSeek V3.2 (via the server-side Puter integration) analyzes the record.
- * One silent retry when the reply isn't usable JSON; the provider's output is
- * validated field-by-field before it can reach the response.
+ * DeepSeek V3.2 (via the server-side OpenRouter integration) analyzes the
+ * record. One silent retry when the reply isn't usable JSON; the provider's
+ * output is validated field-by-field before it can reach the response.
  */
 async function analyzeWithAi(lead: unknown): Promise<{ summary: string; observations: string[]; outreachAngle: string }> {
   let sawMalformed = false;
@@ -36,7 +35,7 @@ async function analyzeWithAi(lead: unknown): Promise<{ summary: string; observat
       attempt === 0
         ? ANALYZE_SYSTEM
         : `${ANALYZE_SYSTEM}\nYour previous reply was not usable. Respond with the JSON object only, with a non-empty "summary", 3-5 "points", and a non-empty "outreach_angle".`;
-    const text = await puterChatJson({
+    const text = await openRouterChatJson({
       messages: [
         { role: "system", content: system },
         { role: "user", content: `Analyze this public business record:\n${JSON.stringify(lead, null, 2)}` },
@@ -100,7 +99,7 @@ Deno.serve(async (req) => {
       .select("summary, points, model, created_at")
       .eq("lead_id", leadId)
       .maybeSingle();
-    if (cached && cached.model === PUTER_MODEL && !body.refresh) {
+    if (cached && cached.model === OPENROUTER_MODEL && !body.refresh) {
       const cachedPoints = Array.isArray(cached.points) ? cached.points : [];
       return json({
         ...cached,
@@ -119,7 +118,7 @@ Deno.serve(async (req) => {
         user_id: user.id,
         summary,
         points,
-        model: PUTER_MODEL,
+        model: OPENROUTER_MODEL,
       },
       { onConflict: "lead_id" }
     );
@@ -130,7 +129,7 @@ Deno.serve(async (req) => {
       kind: "analyze",
       input: { lead_id: leadId },
       status: "completed",
-      model: PUTER_MODEL,
+      model: OPENROUTER_MODEL,
     });
 
     // Preserve the existing monthly AI usage counter behavior.
@@ -154,7 +153,7 @@ Deno.serve(async (req) => {
       .eq("workspace_id", workspaceId)
       .eq("period_start", period.toISOString().slice(0, 10));
 
-    return json({ summary, points, outreach_angle: outreachAngle, model: PUTER_MODEL, cached: false });
+    return json({ summary, points, outreach_angle: outreachAngle, model: OPENROUTER_MODEL, cached: false });
   } catch (e) {
     return handleError(e, { functionName: "ai-analyze", startedAt });
   }
