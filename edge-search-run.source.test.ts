@@ -49,4 +49,13 @@ describe("Edge Function search-run source guarantees", () => {
     expect(source).toContain("searchPlans(");
     expect(source).toContain("serpapi_pagination");
   });
+
+  it("interprets through the server-side Puter integration — never OpenAI", () => {
+    expect(source).toContain("puterChatJson");
+    expect(source).toContain("PUTER_MODEL");
+    expect(source).not.toContain("openAIJson");
+    expect(source).not.toContain("OPENAI_MODEL");
+    expect(source).not.toContain("OPENAI_API_KEY");
+    expect(source).not.toMatch(/_shared\/openai/);
+  });
 });

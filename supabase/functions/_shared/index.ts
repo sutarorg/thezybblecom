@@ -3,7 +3,8 @@
 // Secrets live only here (Deno.env), never in the browser bundle.
 // ============================================================================
 import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.0";
-import { OpenAIError, getOpenAIModel, openAIJson } from "./openai.ts";
+import { PuterError, getPuterModel, puterChatJson } from "./puter.ts";
+import { INTERPRET_SYSTEM_PROMPT, cleanInterpretResult, extractJsonObject } from "./interpret.ts";
 import { normalizeOpenState, type OpenState } from "./open-state.ts";
 
 export { normalizeOpenState };
@@ -87,7 +88,7 @@ export function handleError(
   e: unknown,
   meta?: { functionName: string; startedAt: number },
 ) {
-  const apiError = e instanceof HttpError || e instanceof OpenAIError ? e : null;
+  const apiError = e instanceof HttpError || e instanceof PuterError ? e : null;
   const status = apiError?.status ?? 500;
   const code = apiError?.code ?? "unknown";
   console.error("edge request", {
@@ -312,10 +313,10 @@ export function serpApiLl(page: Record<string, any>, results: Record<string, any
 }
 
 /* ------------------------------------------------------------------ */
-/* OpenAI Responses API                                                */
+/* Server-side Puter AI (DeepSeek), OpenAI-compatible chat completions  */
 /* ------------------------------------------------------------------ */
-export { openAIJson };
-export const OPENAI_MODEL = getOpenAIModel();
+export { puterChatJson, extractJsonObject, cleanInterpretResult, INTERPRET_SYSTEM_PROMPT };
+export const PUTER_MODEL = getPuterModel();
 
 /* ------------------------------------------------------------------ */
 /* Razorpay REST client (server-side only)                             */
@@ -436,10 +437,14 @@ Rules:
 - location is the place text the user gave (city/region/country), or null.
 - requested_count is an integer between 1 and 500; default 50 when not stated.
 - filters: require_website, min_rating, price_level, and business_size only when the user asks for them, else null.
-- business_size can be small, medium, or enterprise; unknown is never a requested filter.`;
+- business_size can be small, medium, or enterprise; unknown is never a requested filter.
+Respond with ONLY a JSON object (no markdown, no code fences) using exactly this shape:
+{"q": "the Google Maps search phrase", "category": "string or null", "location": "string or null", "requested_count": 50, "filters": {"require_website": false, "min_rating": null, "price_level": null, "business_size": null}}`;
 
 export const ANALYZE_SYSTEM = `You are Zybble's lead analyst. You interpret ONLY the structured public business data you're given and write plain, useful, honest observations for a salesperson.
 Rules:
 - Never invent facts. When information is missing (e.g. no email), say it's unavailable.
 - 3-5 short observations: local presence, review activity, contactability, and one honest outreach angle.
-- Be concrete but skeptical. Mark uncertainty.`;
+- Be concrete but skeptical. Mark uncertainty.
+Respond with ONLY a JSON object (no markdown, no code fences) using exactly this shape:
+{"summary": "one concise sentence about this lead", "points": ["3 to 5 honest observations grounded only in the supplied business record"], "outreach_angle": "one cautious, data-grounded outreach angle"}`;

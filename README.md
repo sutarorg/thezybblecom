@@ -1,6 +1,6 @@
 # Zybble
 
-Zybble is a production SaaS application for **AI-powered business lead discovery**: describe the businesses you need in plain language, DeepSeek V3.2 (through Puter.js, in the browser) structures the request, SerpApi collects public business data from Google Maps, Zybble normalizes, deduplicates, and organizes it into exportable lead lists — behind real auth, plan entitlements, team workspaces, and Razorpay-billed subscriptions.
+Zybble is a production SaaS application for **AI-powered business lead discovery**: describe the businesses you need in plain language, DeepSeek V3.2 (via Puter's server-side API, through Zybble's own backend) structures the request, SerpApi collects public business data from Google Maps, Zybble normalizes, deduplicates, and organizes it into exportable lead lists — behind real auth, plan entitlements, team workspaces, and Razorpay-billed subscriptions.
 
 ```
 Browser (Vite + React SPA, clean URLs via BrowserRouter)
@@ -13,29 +13,34 @@ Browser (Vite + React SPA, clean URLs via BrowserRouter)
    │         (user JWT + RLS + atomic quota reservation on every run)
    │
    ├── Vercel Function /api/ai-interpret
-   │     └── authorization + usage gate (session, workspace, plan, ai_requests);
-   │         the interpretation itself runs client-side via Puter.js
-   │         (deepseek/deepseek-v3.2) → validated, clamped filters — never a search
+   │     └── authorization + usage gate (session, workspace, plan, ai_requests)
+   │         + DeepSeek V3.2 interpretation via server-side Puter →
+   │         validated, clamped filters — never a search
    │
    ├── Vercel Function /api/ai-analyze
-   │     └── OpenAI lead intelligence, cached per lead (Edge Function fallback)
+   │     └── DeepSeek V3.2 lead intelligence via server-side Puter,
+   │         cached per lead (Edge Function fallback)
+   │
+   ├── Vercel Function /api/ai-chat
+   │     └── streamed DeepSeek V3.2 chat for the Ask Zybble landing-page
+   │         assistant, grounded in src/assistant/knowledge.ts
+   │         (anonymous-friendly: per-IP rate limit, capped conversations)
    │
    └── Vercel Function /api/health (liveness probe for uptime monitors)
 
    └── Supabase Edge Functions
          ├── search-run       → fallback for local/non-Vercel deployments
-         ├── ai-interpret     → same gate as /api/ai-interpret (never runs a search)
-         ├── ai-analyze       → OpenAI o4-mini lead intelligence
+         ├── ai-interpret     → same gate + interpretation (never runs a search)
+         ├── ai-analyze       → DeepSeek V3.2 lead intelligence
          ├── export-run       → server-side CSV generation
          ├── team-invite      → seats + Resend invitations
          ├── billing          → Razorpay checkout / sync / cancel
          └── razorpay-webhook → HMAC-verified, idempotent subscription sync
 
-   └── Browser AI (Puter.js — <script src="https://js.puter.com/v2/">, no API key)
-         ├── /find request interpretation  → DeepSeek V3.2 fills the search form
-         │     (src/lib/puter-ai.ts, after the server gate authorizes it)
-         └── Landing-page assistant        → DeepSeek V3.2 chat grounded in
-               src/assistant/knowledge.ts (streamed replies, conversation history)
+   └── No browser AI runtime: the browser never loads Puter.js and never
+       holds an AI credential — every AI call is proxied by the same-origin
+       backend (src/lib/puter-ai.ts is a thin SSE/HTTP client of /api/ai-chat),
+       so visitors are never shown a third-party sign-in.
 ```
                 ▼
          Supabase PostgreSQL (RLS, triggers, atomic usage reservation)
@@ -79,8 +84,7 @@ Create accounts/tools before configuring anything:
 | Node.js 20+ | `npm` (repo uses npm lockfile) |
 | Supabase | 1 project (free tier is fine) |
 | SerpApi | 1 **freshly rotated** API key |
-| OpenAI | 1 API key with Responses API access — **only for per-lead AI analysis** |
-| Puter.js | Nothing to sign up for — loaded from `https://js.puter.com/v2/`; interpretation and the assistant run under each visitor's own Puter account (User-Pays) |
+| Puter | 1 **API token** (puter.com → Dashboard → API token → Create token) — powers all AI surfaces server-side (DeepSeek V3.2): interpretation, per-lead analysis, and the Ask Zybble assistant |
 | Razorpay | Account with international/USD + subscriptions enabled |
 | Resend | 1 verified sending domain |
 | Vercel | Optional — any static host works |
@@ -117,8 +121,8 @@ supabase link --project-ref YOUR_PROJECT_REF
 # Provider secrets — server-side only, never in git
 supabase secrets set \
   SERPAPI_API_KEY=your_rotated_key \
-  OPENAI_API_KEY=your_openai_key \
-  OPENAI_MODEL=o4-mini \
+  PUTER_AUTH_TOKEN=your_puter_api_token \
+  PUTER_MODEL=deepseek/deepseek-v3.2 \
   RAZORPAY_KEY_ID=rzp_live_xxx \
   RAZORPAY_KEY_SECRET=xxx \
   RAZORPAY_WEBHOOK_SECRET=xxx \

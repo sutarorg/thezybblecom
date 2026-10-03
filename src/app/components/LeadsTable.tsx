@@ -377,20 +377,28 @@ export function LeadsTable({
                         />
                       </td>
                     ) : null}
-                    <td className="py-2 pr-3">
-                      <span className="flex min-w-0 items-center gap-2.5">
+                    <td className="max-w-[260px] py-2 pr-3">
+                      {/* Business identity: the avatar owns a fixed 24px
+                          track (size-6 + shrink-0) followed by a consistent
+                          gap-2.5, and the name track is a shrinkable
+                          (min-w-0, flex-1) column whose overflow is clipped.
+                          Long names truncate with
+                          overflow:hidden + text-overflow:ellipsis +
+                          white-space:nowrap (Tailwind `truncate`), so the
+                          name can never overlap the icon or push the cell. */}
+                      <span className="flex min-w-0 items-center gap-2.5 overflow-hidden">
                         <LeadAvatar lead={lead} />
-                        <span className="min-w-0">
+                        <span className="min-w-0 flex-1 overflow-hidden">
                           {/* 26-char cut + CSS truncate: the label always ends
                               in "..." when long; the title keeps the complete
                               name one hover away inside the fixed-width cell. */}
                           <span
-                            className="block max-w-[220px] truncate whitespace-nowrap text-xs font-medium text-ink"
+                            className="block max-w-full truncate whitespace-nowrap text-xs font-medium text-ink"
                             title={lead.name}
                           >
                             {truncateBusinessName(lead.name)}
                           </span>
-                          <span className="block max-w-[220px] truncate text-[11px] text-ink-mute">
+                          <span className="block max-w-full truncate whitespace-nowrap text-[11px] text-ink-mute">
                             {lead.email ?? lead.website_domain ?? "—"}
                           </span>
                         </span>
@@ -611,7 +619,11 @@ export function LeadsTableSkeleton({
   );
 }
 
-/* Small deterministic business avatar */
+/* Small deterministic business avatar.
+   The footprint is FIXED — 24×24 (size-6 ≈ explicit w-6 h-6), never
+   shrinking (shrink-0/flex-none) and clipped (overflow-hidden) — so the
+   icon keeps a constant width next to the business name on every
+   breakpoint and the two can never overlap. */
 export function LeadAvatar({ lead, className }: { lead: Lead; className?: string }) {
   const initials = lead.name
     .split(/\s+/)
@@ -631,7 +643,7 @@ export function LeadAvatar({ lead, className }: { lead: Lead; className?: string
   for (const ch of lead.name) h = (h * 31 + ch.charCodeAt(0)) % 977;
   return (
     <span
-      className={cn("grid size-6 shrink-0 place-items-center rounded-md text-[8.5px] font-bold", tints[h % tints.length], className)}
+      className={cn("grid size-6 flex-none shrink-0 place-items-center overflow-hidden rounded-md text-[8.5px] font-bold", tints[h % tints.length], className)}
       aria-hidden="true"
     >
       {initials}
