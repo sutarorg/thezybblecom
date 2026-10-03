@@ -5,6 +5,7 @@ import {
   canonicalDedupeKey,
   domainOf,
   normalizeAddressFromProvider,
+  normalizeOpenState,
   normalizePopularTimes,
   objectValue,
   publicEmailCandidates,
@@ -40,7 +41,10 @@ const MAX_PROVIDER_PAGES_TOTAL = 30;
 const EXECUTION_BUDGET_MS = 46_000;
 const COLLECTION_BUDGET_MS = 38_000;
 const PROVIDER_TIMEOUT_MS = 8_000;
-const ENRICHMENT_TIMEOUT_MS = 3_500;
+const ENRICHMENT_TIMEOUT_MS = 3_000;
+// Rows are enriched in concurrent waves so a page of results never serializes
+// 20 × 3s website visits; the wave is small enough to stay polite to sites.
+const ENRICHMENT_WAVE = 8;
 
 type SearchFilters = {
   category: string;
@@ -370,8 +374,7 @@ function baseNormalize(result: ProviderResult, meta: { query: string; location: 
   const dataCid = result.data_cid != null ? String(result.data_cid) : null;
   const type = stringValue(result.type);
   const categories = stringArray(result.types).length ? stringArray(result.types) : type ? [type] : [];
-  const openText = stringValue(result.open_state).toLowerCase();
-  const openState = openText ? (openText.includes("open") && !openText.includes("close") ? "open" : "closed") : "unknown";
+  const openState = normalizeOpenState(result.open_state ?? result.open_state_text ?? result.operating_hours_state);
   const providerEmails = publicEmailCandidates(result);
   const providerSize = businessSizeFromProvider(result);
   const mapsLink = stringValue(links.place_results_search);
@@ -442,9 +445,36 @@ function baseNormalize(result: ProviderResult, meta: { query: string; location: 
   };
 }
 
+/**
+ * Cheap refinements that never change during enrichment (website, phone,
+ * open-now, rating, price) are checked BEFORE website enrichment so the
+ * time budget is spent only on candidates that can still match. Refinements
+ * enrichment can discover (public email, business size) are evaluated after.
+ */
+function matchesPreEnrichmentFilters(row: LeadRow, filters: SearchFilters) {
+  if (filters.requireWebsite && !row.website) return false;
+  if (filters.requirePhone && !row.phone) return false;
+  if (filters.openNow && row.open_state !== "open") return false;
+  if (filters.minRating && Number(row.rating ?? 0) < Number(filters.minRating)) return false;
+  if (filters.priceLevel && row.price_level != null && Number(row.price_level) !== Number(filters.priceLevel)) return false;
+  // Without a website the only possible public email is the provider's own,
+  // which is already present at this point — such a row can never match.
+  if (filters.requireEmail && !row.website && !row.emails?.length) return false;
+  // Business size can only come from the provider or its website.
+  if (filters.businessSize && row.business_size === "unknown" && !row.website) return false;
+  return true;
+}
+
+/** True when website enrichment could still change this row's filter outcome. */
+function needsEnrichment(row: LeadRow, filters: SearchFilters) {
+  if (!row.website) return false;
+  if (filters.requireEmail && !row.emails?.length) return true;
+  if (filters.businessSize && row.business_size === "unknown") return true;
+  return false;
+}
+
 async function enrichRow(row: LeadRow, filters: SearchFilters, collectionDeadline: number): Promise<LeadRow> {
-  const needsWebsiteFetch = Boolean(row.website && ((filters.requireEmail && !(row.emails as string[])?.length) || filters.businessSize));
-  if (!needsWebsiteFetch || Date.now() >= collectionDeadline) return row;
+  if (!needsEnrichment(row, filters) || Date.now() >= collectionDeadline) return row;
   const enrichmentDeadline = Math.min(collectionDeadline, Date.now() + ENRICHMENT_TIMEOUT_MS);
   const enrichment = await enrichPublicWebsite(row.website as string | null, {
     deadlineAt: enrichmentDeadline,
@@ -469,6 +499,7 @@ async function enrichRow(row: LeadRow, filters: SearchFilters, collectionDeadlin
   };
 }
 
+/** Final AND of every selected refinement — runs AFTER enrichment. */
 function matchesFilters(row: LeadRow, filters: SearchFilters) {
   if (filters.requireWebsite && !row.website) return false;
   if (filters.requirePhone && !row.phone) return false;
@@ -643,19 +674,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           normalizedBatch.push(base);
         }
         const existing = await existingKeys(sb, workspaceId, normalizedBatch.map((r) => r.dedupe_key));
-        const unseenBases = normalizedBatch.filter((base) => !existing.has(base.dedupe_key));
-        for (let i = 0; i < unseenBases.length && candidates.length < filters.quantity; i += 5) {
+        // Pipeline order per batch: normalize → dedupe (provider + workspace) →
+        // cheap pre-checks → website enrichment → ALL selected refinements.
+        // Rows that fail a refinement enrichment cannot influence are skipped
+        // up front; rows that need email/size discovery keep their turn.
+        const pending = normalizedBatch.filter(
+          (base) => !existing.has(base.dedupe_key) && matchesPreEnrichmentFilters(base, filters)
+        );
+        for (let i = 0; i < pending.length && candidates.length < filters.quantity; i += ENRICHMENT_WAVE) {
           if (Date.now() >= collectionDeadline) {
             deadlineReached = true;
             break;
           }
-          const enrichedRows = await Promise.all(
-            unseenBases.slice(i, i + 5).map((base) => enrichRow(base, filters, collectionDeadline))
+          const wave = pending.slice(i, i + ENRICHMENT_WAVE);
+          const processed = await Promise.all(
+            wave.map((base) => enrichRow(base, filters, collectionDeadline))
           );
-          for (const enriched of enrichedRows) {
-            if (!matchesFilters(enriched, filters)) continue;
-            candidates.push(enriched);
+          for (const row of processed) {
             if (candidates.length >= filters.quantity) break;
+            if (!matchesFilters(row, filters)) continue;
+            candidates.push(row);
           }
         }
         if (deadlineReached) break searchLoop;
@@ -671,7 +709,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (providerError && candidates.length === 0) throw providerError;
     if (deadlineReached && candidates.length === 0) {
-      throw new ApiError(504, "The search timed out before any matching leads were collected. Please try again.", "search_timeout");
+      throw new ApiError(
+        504,
+        "The search ran out of time before any business matched every selected refinement. Try removing a refinement, broadening the location, or requesting fewer leads — then run it again.",
+        "search_timeout",
+      );
     }
     sortRows(candidates, filters.sort);
 
@@ -748,6 +790,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         ? `Search partially completed — ${saved} new lead${saved === 1 ? "" : "s"} collected`
         : "Search completed — no new matching leads were available";
 
+    const insights = [
+      `Searched “${filters.category}”${filters.location ? ` around ${filters.location}` : ""}${pagesTried > 1 ? ` across ${pagesTried} provider pages` : ""}.`,
+      message,
+    ];
+    if (filters.requireEmail && saved < filters.quantity) {
+      insights.push("Only businesses with a publicly listed email — from the provider or their own website — were included. Emails are never guessed.");
+    }
+    if (filters.businessSize && saved < filters.quantity) {
+      insights.push("Business size was kept only when the provider or the business website stated employee counts.");
+    }
+
     return res.status(200).json({
       searchId,
       leads,
@@ -759,11 +812,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         status,
         reason,
         message,
+        pagesSearched: pagesTried,
         interpretation,
-        insights: [
-          `Searched “${filters.category}”${filters.location ? ` around ${filters.location}` : ""}.`,
-          message,
-        ],
+        insights,
       },
     });
   } catch (error) {

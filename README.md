@@ -8,8 +8,15 @@ Browser (Vite + React SPA, clean URLs via BrowserRouter)
    ├── Supabase Auth (email/password, sessions, reset)
    ├── Supabase PostgREST (RLS-guarded reads/writes)
    ├── Vercel Function /api/search-run
-   │     └── validated filters → SerpApi → normalize → dedupe → persist
+   │     └── validated filters → SerpApi → normalize → dedupe → enrich →
+   │         apply refinements → persist
    │         (user JWT + RLS + atomic quota reservation on every run)
+   │
+   ├── Vercel Function /api/ai-interpret
+   │     └── OpenAI structures plain-language requests into validated filters
+   │
+   ├── Vercel Function /api/ai-analyze
+   │     └── OpenAI lead intelligence, cached per lead (Edge Function fallback)
    │
    └── Vercel Function /api/health (liveness probe for uptime monitors)
 
@@ -139,8 +146,8 @@ supabase functions deploy search-run ai-interpret ai-analyze export-run team-inv
 ## 3 · OpenAI setup
 
 1. Create a server API key in the **OpenAI platform** with access to the Responses API.
-2. Copy the key to the server/Edge secret `OPENAI_API_KEY`. Optional override `OPENAI_MODEL` defaults to `o4-mini`.
-3. Never prefix either value with `VITE_`; both values are server-only. AI interpretation uses strict Structured Outputs through `POST /v1/responses`.
+2. Copy the key to the server/Edge secret `OPENAI_API_KEY`. Optional override `OPENAI_MODEL` defaults to `o4-mini`; optional `OPENAI_BASE_URL` routes requests to an OpenAI-compatible endpoint (defaults to `https://api.openai.com/v1`).
+3. Never prefix any of these with `VITE_`; all are server-only. AI requests use strict Structured Outputs through `POST /v1/responses`, with retries for transient provider failures (rate limits, timeouts, 5xx) and clear, secret-free errors otherwise.
 
 ## 4 · Razorpay setup
 
@@ -192,7 +199,7 @@ npm run dev
    - `SUPABASE_URL` — **server-side** copy of the project URL used by the Vercel Functions in `api/`
    - `SUPABASE_PUBLISHABLE_KEY` — **server-side** publishable key used by the Vercel Functions (`SUPABASE_ANON_KEY` works as a legacy fallback). Never a service-role/secret key — the API routes reject those so RLS is never bypassed.
    - `SERPAPI_API_KEY` — server-only; used by `/api/search-run` and never included in the Vite bundle
-   - `OPENAI_API_KEY` and optional `OPENAI_MODEL` — server-only; used by `/api/ai-interpret`. Also set these as Supabase Edge Function secrets when using the non-Vercel fallback.
+   - `OPENAI_API_KEY` and optional `OPENAI_MODEL` / `OPENAI_BASE_URL` — server-only; used by `/api/ai-interpret` and `/api/ai-analyze`. Also set these as Supabase Edge Function secrets when using the non-Vercel fallback.
    - `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `APP_URL` — server-only; used by `/api/team-invite` (emails/links).
    - Razorpay keys remain Supabase Edge Function secrets and must not be added to the browser bundle.
 
