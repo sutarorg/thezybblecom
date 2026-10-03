@@ -211,9 +211,17 @@ describe("/find Recent Leads card", () => {
       expect(bounded.length).toBeGreaterThan(1);
     }
 
-    // The longest name renders inside the truncating block.
-    const firstTextBlock = rows[0]!.querySelector(".min-w-0.flex-1")!;
-    expect(firstTextBlock.querySelector(".truncate")!.textContent).toContain(longName);
+    // The longest name is cut at 26 characters with an appended ellipsis.
+    const firstRow = rows[0]!;
+    const firstTextBlock = firstRow.querySelector(".min-w-0.flex-1")!;
+    const nameLabel = firstTextBlock.querySelector(".truncate")!;
+    expect(nameLabel.textContent).toMatch(/\.\.\.$/);
+    expect(nameLabel.textContent!.length).toBeLessThanOrEqual(29); // 26 + "..."
+    // The complete name stays accessible: hover/focus tooltip and the
+    // row's accessible name both expose every character.
+    const firstAnchor = firstRow.querySelector("a")!;
+    expect(firstAnchor.getAttribute("title")).toBe(longName);
+    expect(firstAnchor.getAttribute("aria-label")).toBe(`View ${longName}`);
 
     // No negative margins, negative positioning, or fixed minimum widths —
     // the classes that cause left-side overlap and horizontal page scroll.
@@ -226,12 +234,35 @@ describe("/find Recent Leads card", () => {
     }
   });
 
-  it("preserves long content in the DOM (CSS truncation, never dropped data)", async () => {
+  it("truncates only long names — short names render in full", async () => {
     await render(<RecentLeadsCard leads={longLeads} loading={false} total={42} />);
     const card = container.firstElementChild as HTMLElement;
-    // The full name and email exist in the document; truncation is purely visual.
-    expect(card.textContent).toContain(longName);
+    // "Short Cafe" (10 chars) renders whole — no ellipsis is ever added.
+    expect(card.textContent).toContain("Short Cafe");
+    expect(card.textContent).not.toContain("Short Cafe...");
+    // A 26-character name is the edge case that still renders in full.
+    const exactName = "A".repeat(26);
+    await render(
+      <RecentLeadsCard leads={[makeLead({ id: "lead-26", name: exactName })]} loading={false} total={1} />,
+    );
+    expect(container.firstElementChild!.textContent).toContain(exactName);
+    expect(container.firstElementChild!.textContent).not.toContain(`${exactName}...`);
+    // One character longer and the ellipsis appears in the visible label.
+    const overName = `${"A".repeat(26)}Z`;
+    await render(
+      <RecentLeadsCard leads={[makeLead({ id: "lead-27", name: overName })]} loading={false} total={1} />,
+    );
+    expect(container.firstElementChild!.textContent).toContain(`${exactName}...`);
+  });
+
+  it("keeps long emails in the DOM with CSS truncation only", async () => {
+    await render(<RecentLeadsCard leads={longLeads} loading={false} total={42} />);
+    const card = container.firstElementChild as HTMLElement;
+    // Emails are not cut in the source order; they truncate purely via CSS.
     expect(card.textContent).toContain(longEmail);
+    // But the business name is — its full value lives on the row tooltip.
+    expect(card.textContent).not.toContain(longName);
+    expect(card.querySelector(`[title="${longName}"]`)).not.toBeNull();
   });
 
   it("shows email or phone without letting them push content outside the card", async () => {
@@ -262,5 +293,26 @@ describe("/find Recent Leads card", () => {
     expect(avatar.getAttribute("class")).toMatch(/shrink-0/);
     act(() => root2.unmount());
     span.remove();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Vercel Analytics — installed once, rendered once at the app root    */
+/* ------------------------------------------------------------------ */
+describe("Vercel Analytics", () => {
+  const appSource = readFileSync(`${projectRoot}/src/App.tsx`, "utf8");
+
+  it("ships the dependency and uses the React entry point for this Vite SPA", () => {
+    const pkg = JSON.parse(readFileSync(`${projectRoot}/package.json`, "utf8")) as {
+      dependencies?: Record<string, string>;
+    };
+    expect(pkg.dependencies?.["@vercel/analytics"]).toBeTruthy();
+    expect(appSource).toContain('from "@vercel/analytics/react"');
+    // /next imports next/navigation, which cannot build outside Next.js.
+    expect(appSource).not.toContain("@vercel/analytics/next");
+  });
+
+  it("renders <Analytics /> exactly once, at the application root", () => {
+    expect(appSource.match(/<Analytics\s*\/>/g)?.length).toBe(1);
   });
 });

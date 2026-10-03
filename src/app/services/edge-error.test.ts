@@ -15,6 +15,7 @@ describe("Edge Function error parser", () => {
 
   it.each([
     [401, "Your session expired — sign in again."],
+    [402, "The search service ran out of usage quota. An administrator must review the provider plan and billing before it works again."],
     [403, "You don't have access to complete that action."],
     [429, "The search service is busy or rate-limited. Please try again shortly."],
   ])("maps HTTP %s to a safe message", async (status, message) => {

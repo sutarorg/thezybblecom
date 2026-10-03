@@ -37,6 +37,7 @@ import {
 } from "./ui";
 import { navigate } from "../hooks";
 import { copyText } from "../lib/clipboard";
+import { truncateBusinessName } from "../lib/text";
 
 type SortKey = "name" | "rating" | "reviews" | "updated";
 export type LeadColumnId = "category" | "rating" | "phone" | "website" | "location" | "status" | "list";
@@ -378,8 +379,14 @@ export function LeadsTable({
                       <span className="flex min-w-0 items-center gap-2.5">
                         <LeadAvatar lead={lead} />
                         <span className="min-w-0">
-                          <span className="block max-w-[220px] truncate text-xs font-medium text-ink">
-                            {lead.name}
+                          {/* 26-char cut + CSS truncate: the label always ends
+                              in "..." when long; the title keeps the complete
+                              name one hover away inside the fixed-width cell. */}
+                          <span
+                            className="block max-w-[220px] truncate whitespace-nowrap text-xs font-medium text-ink"
+                            title={lead.name}
+                          >
+                            {truncateBusinessName(lead.name)}
                           </span>
                           <span className="block max-w-[220px] truncate text-[11px] text-ink-mute">
                             {lead.email ?? lead.website_domain ?? "—"}

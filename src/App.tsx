@@ -8,6 +8,12 @@ import {
   useNavigate,
   useParams,
 } from "react-router-dom";
+/* Vercel Web Analytics — this app is a Vite + react-router SPA (not
+   Next.js), so the React entry point is the correct official integration:
+   the /next entry imports next/navigation and cannot build here. Rendered
+   exactly once at the application root; on Vercel it auto-reports page
+   views (incl. client-side route changes) and Web Vitals. */
+import { Analytics } from "@vercel/analytics/react";
 
 /* marketing */
 import { Navbar } from "./sections/Navbar";
@@ -278,6 +284,8 @@ export default function App() {
     <ErrorBoundary>
       <BrowserRouter>
         <RoutedApp />
+        {/* Vercel Analytics — mounted once for the whole application. */}
+        <Analytics />
       </BrowserRouter>
     </ErrorBoundary>
   );
