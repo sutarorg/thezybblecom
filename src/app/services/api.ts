@@ -1187,7 +1187,7 @@ export async function getUsage(workspaceId: string, planId: string): Promise<Usa
 /* ------------------------------------------------------------------ */
 /* AI                                                                  */
 /* ------------------------------------------------------------------ */
-export async function analyzeLead(leadId: string, workspaceId: string) {
+export async function analyzeLead(leadId: string, workspaceId: string, refresh = false) {
   const sb = getSupabase();
   if (!sb) return { error: CONFIG_ERROR };
   const {
@@ -1195,16 +1195,64 @@ export async function analyzeLead(leadId: string, workspaceId: string) {
   } = await sb.auth.getSession();
   if (!session) return { error: "Your session expired — sign in again." };
 
+  /* Prefer the same-origin server function, where OPENAI_API_KEY remains
+     server-only. Non-Vercel deployments retain the Supabase Edge fallback. */
+  try {
+    const response = await fetch("/api/ai-analyze", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ leadId, workspaceId, refresh }),
+    });
+    const parsed = await parseApiResponse<AnalyzeResult>(response, "AI");
+    if (parsed.data) return analyzeResponse(parsed.data);
+    if (!parsed.shouldFallback) return { error: parsed.error ?? "Zybble AI couldn't analyze that lead." };
+  } catch {
+    // Same-origin route unavailable; fall back to the deployed Edge Function.
+  }
+
   const { data, error } = await sb.functions.invoke("ai-analyze", {
-    body: { leadId, workspaceId },
+    body: { leadId, workspaceId, refresh },
     headers: { Authorization: `Bearer ${session.access_token}` },
   });
   if (error) return { error: await readFunctionError(error, "ai-analyze", "AI") };
   if (data?.error) return { error: String(data.error) };
-  if (!data || typeof data !== "object" || typeof data.summary !== "string" || !Array.isArray(data.points)) {
+  return analyzeResponse(data);
+}
+
+export type AnalyzeResult = {
+  summary: string;
+  points: string[];
+  outreach_angle?: string;
+  model: string;
+  cached?: boolean;
+};
+
+/**
+ * A successful analysis must always carry real content — a blank "success"
+ * payload is reported as an error instead of rendering an empty AI state.
+ */
+function analyzeResponse(data: unknown): { result?: AnalyzeResult; error?: string } {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
     return { error: "Zybble AI returned incomplete analysis. Please try again." };
   }
-  return { result: data as { summary: string; points: string[]; outreach_angle?: string; model: string } };
+  const body = data as Record<string, unknown>;
+  const points = body.points;
+  const validPoints = Array.isArray(points) && points.length > 0 && points.every((p) => typeof p === "string" && p.trim().length > 0);
+  if (typeof body.summary !== "string" || !body.summary.trim() || !validPoints) {
+    return { error: "Zybble AI returned incomplete analysis. Please try again." };
+  }
+  return {
+    result: {
+      summary: body.summary,
+      points: points.map(String),
+      outreach_angle: typeof body.outreach_angle === "string" ? body.outreach_angle : undefined,
+      model: typeof body.model === "string" ? body.model : "",
+      cached: body.cached === true,
+    },
+  };
 }
 
 export async function getLeadInsight(
@@ -1233,12 +1281,11 @@ export async function getUserPreferences(): Promise<UserPreferences> {
   if (!session) throw new Error("Your session expired — sign in again.");
   const { data, error } = await sb
     .from("user_preferences")
-    .select("appearance, timezone, language, date_format")
+    .select("timezone, language, date_format")
     .eq("user_id", session.user.id)
     .maybeSingle();
   if (error) throw new Error(readableError(error.message));
   const prefs = {
-    appearance: data?.appearance ?? "system",
     timezone: data?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC",
     language: data?.language ?? "en",
     date_format: data?.date_format ?? "MMM D, YYYY",
