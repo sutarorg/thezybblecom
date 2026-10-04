@@ -7,6 +7,7 @@ import { getSupabase, BACKEND_ENABLED } from "./supabase";
 import { planFromId, planLabel } from "../data/plans";
 import { mergeTags, validateTag } from "../lib/tags";
 import { formatAppDate, setRuntimePreferences, type RuntimePreferences } from "../lib/datetime";
+import { BILLING_CURRENCY, formatMoney } from "../lib/money";
 import { parseApiResponse } from "./api-response";
 import { readBillingError, readFunctionError } from "./edge-error";
 import { cleanServerInterpretation } from "../../lib/openrouter-ai";
@@ -56,6 +57,14 @@ export function getSelectedWorkspaceId(): string | null {
 export function setSelectedWorkspaceId(id: string) {
   try {
     localStorage.setItem(WS_KEY, id);
+  } catch {
+    /* storage unavailable */
+  }
+}
+/** Forget a stale selection so a deleted/unauthorized id can't wedge the app. */
+export function clearSelectedWorkspaceId() {
+  try {
+    localStorage.removeItem(WS_KEY);
   } catch {
     /* storage unavailable */
   }
@@ -198,13 +207,21 @@ function mapExport(row: any): ExportRecord {
   };
 }
 
+/**
+ * Rows come from the `list_user_workspaces()` / `get_user_workspace()` RPCs,
+ * which already resolve the owner name, the effective plan of the workspace
+ * owner, the member count and the current period's usage. The legacy
+ * PostgREST embed shape (`workspace_members(count)`) is still tolerated so a
+ * deployment that has not applied migration 0006 yet degrades instead of
+ * crashing.
+ */
 function mapWorkspace(row: any): Workspace {
   return {
     id: row.id,
     name: row.name,
     owner: row.owner_name ?? "",
     plan: planLabel(row.plan_id),
-    members: row.workspace_members?.[0]?.count ?? 1,
+    members: row.member_count ?? row.workspace_members?.[0]?.count ?? 1,
     leads_used: row.leads_used ?? 0,
     leads_limit: planFromId(row.plan_id).leadAllowance,
     searches: row.searches ?? 0,
@@ -213,6 +230,39 @@ function mapWorkspace(row: any): Workspace {
   };
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
+
+/* ------------------------------------------------------------------ */
+/* Entitlement                                                         */
+/* ------------------------------------------------------------------ */
+export type SubscriptionRow = {
+  plan_id?: string | null;
+  status?: string | null;
+  current_period_end?: string | null;
+};
+
+/**
+ * The plan a subscription actually entitles, mirroring the SQL function
+ * `effective_plan_for_user()` exactly (migration 0006):
+ *  • active / trialing            → the subscribed plan
+ *  • cancelled or completed, but the paid period has not ended yet
+ *                                 → still the subscribed plan
+ *  • anything else                → free
+ * A Razorpay subscription that has merely been *created* (checkout prepared,
+ * nothing paid) never appears in `subscriptions`, so it can never entitle.
+ */
+export function effectivePlanId(sub: SubscriptionRow | null | undefined): string {
+  if (!sub?.plan_id) return "free";
+  const status = String(sub.status ?? "");
+  if (status === "active" || status === "trialing") return sub.plan_id;
+  if (
+    (status === "cancelled" || status === "completed") &&
+    sub.current_period_end &&
+    new Date(sub.current_period_end).getTime() > Date.now()
+  ) {
+    return sub.plan_id;
+  }
+  return "free";
+}
 
 /* ------------------------------------------------------------------ */
 /* Session / profile                                                   */
@@ -266,7 +316,11 @@ export async function getCurrentUser(): Promise<AppUser | null> {
         { data: null } as any
       ),
       withTimeout(
-        sb.from("subscriptions").select("plan_id, status").eq("user_id", session.user.id).maybeSingle(),
+        sb
+          .from("subscriptions")
+          .select("plan_id, status, current_period_end")
+          .eq("user_id", session.user.id)
+          .maybeSingle(),
         6000,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         { data: null } as any
@@ -284,7 +338,7 @@ export async function getCurrentUser(): Promise<AppUser | null> {
       .map((s: string) => s[0]!.toUpperCase())
       .join("");
 
-    const planId = sub && ["active", "trialing"].includes(sub.status) ? sub.plan_id : "free";
+    const planId = effectivePlanId(sub);
 
     return {
       id: session.user.id,
@@ -379,15 +433,23 @@ function friendlyAuthError(message: string) {
 /* ------------------------------------------------------------------ */
 /* Workspaces                                                          */
 /* ------------------------------------------------------------------ */
+/**
+ * Every workspace the signed-in user may use.
+ *
+ * This goes through the `list_user_workspaces()` RPC instead of a direct
+ * PostgREST read. The RPC resolves ownership OR membership for `auth.uid()`
+ * server-side — it is not a way around RLS, it is the same rule expressed
+ * once, and it also returns the member count / usage without an embedded
+ * aggregate that silently fails when the caller cannot read the child table.
+ * Owners whose `workspace_members` row was missing (the cause of the
+ * "You don't have access to that resource." page) are included again.
+ */
 export async function listWorkspaces(): Promise<Workspace[]> {
   const sb = getSupabase();
   if (!sb) return [];
-  const { data, error } = await sb
-    .from("workspaces")
-    .select("*, workspace_members(count)")
-    .order("created_at", { ascending: true });
+  const { data, error } = await sb.rpc("list_user_workspaces");
   if (error) throw new Error(readableError(error.message));
-  return (data ?? []).map(mapWorkspace);
+  return ((data as unknown[]) ?? []).map(mapWorkspace);
 }
 
 /**
@@ -417,44 +479,56 @@ export async function listWorkspacesWithRecovery(): Promise<Workspace[]> {
   return all;
 }
 
+/**
+ * A single workspace, or null when the caller has no access to it. Returning
+ * null (rather than throwing) is what lets the workspace context recover from
+ * a stale or unauthorized id in localStorage instead of dead-ending the app.
+ */
 export async function getWorkspace(id: string): Promise<Workspace | null> {
   const sb = getSupabase();
   if (!sb) return null;
-  const { data, error } = await sb
-    .from("workspaces")
-    .select("*, workspace_members(count)")
-    .eq("id", id)
-    .maybeSingle();
+  const { data, error } = await sb.rpc("get_user_workspace", { ws: id });
   if (error) throw new Error(readableError(error.message));
-  return data ? mapWorkspace(data) : null;
+  const rows = (data as unknown[]) ?? [];
+  return rows.length ? mapWorkspace(rows[0]) : null;
 }
 
+/**
+ * Client workspaces (Agency/Scale). The RPC performs the entitlement check,
+ * creates the workspace and the owner membership row in ONE transaction, and
+ * is idempotent per (owner, name) so a double submit cannot create duplicates.
+ * The old two-step insert could leave a workspace with no membership row —
+ * which is exactly what made it unreadable afterwards.
+ */
 export async function createWorkspace(name: string): Promise<Workspace> {
   const sb = requireClient();
   const {
     data: { session },
   } = await sb.auth.getSession();
   if (!session) throw new Error("Your session expired — sign in again.");
-  const { data, error } = await sb
-    .from("workspaces")
-    .insert({ name, owner_id: session.user.id, is_client: true })
-    .select("*, workspace_members(count)")
-    .single();
+
+  const { data, error } = await sb.rpc("create_client_workspace", { ws_name: name });
   if (error) throw new Error(readableError(error.message));
-  await sb
-    .from("workspace_members")
-    .insert({ workspace_id: data.id, user_id: session.user.id, role: "owner" });
-  return mapWorkspace(data);
+  const id = typeof data === "string" ? data : null;
+  if (!id) throw new Error("The workspace couldn't be created. Please try again.");
+
+  const workspace = await getWorkspace(id);
+  if (!workspace) throw new Error("The workspace was created but couldn't be loaded. Refresh to continue.");
+  return workspace;
 }
 
 export async function getDefaultWorkspace(): Promise<Workspace | null> {
   const all = await listWorkspacesWithRecovery();
-  if (!all.length) return null;
+  if (!all.length) {
+    clearSelectedWorkspaceId();
+    return null;
+  }
   const selected = getSelectedWorkspaceId();
   const workspace = all.find((w) => w.id === selected) ?? all[0];
-  /* Drop a stale selection (deleted workspace / different account on this
-     browser) so the next load starts from a valid pointer. */
-  if (selected && workspace.id !== selected) setSelectedWorkspaceId(workspace.id);
+  /* Drop a stale or unauthorized selection (deleted workspace, a workspace
+     the user was removed from, or a different account on this browser) so the
+     next load starts from a valid pointer instead of an access error. */
+  if (workspace.id !== selected) setSelectedWorkspaceId(workspace.id);
   return workspace;
 }
 
@@ -1043,42 +1117,64 @@ export async function downloadExport(
 /* ------------------------------------------------------------------ */
 /* Team                                                                */
 /* ------------------------------------------------------------------ */
+/**
+ * Team roster for a workspace.
+ *
+ * The previous implementation asked PostgREST to embed `profiles` through
+ * `workspace_members.user_id`, which produced:
+ *   "Could not find a relationship between 'workspace_members' and 'user_id'
+ *    in the schema cache"
+ * There is no such foreign key, and there must not be one: membership points
+ * at `auth.users`, and `profiles` points at `auth.users` too — a shared
+ * parent, not a parent/child pair. The join now happens inside the
+ * `list_workspace_team()` SECURITY DEFINER RPC, which authorizes the caller
+ * against the very same ownership/membership rule the RLS policies use and
+ * can therefore also return the member's email (auth.users is never
+ * client-readable). No other workspace's data is reachable through it.
+ */
 export async function getTeam(workspaceId: string): Promise<TeamMember[]> {
   const sb = getSupabase();
   if (!sb) return [];
 
-  const [{ data: members, error }, { data: invites }] = await Promise.all([
-    sb
-      .from("workspace_members")
-      .select("user_id, role, created_at, profiles:user_id(name, avatar_url)")
-      .eq("workspace_id", workspaceId),
+  const [{ data: members, error }, { data: invites, error: inviteError }] = await Promise.all([
+    sb.rpc("list_workspace_team", { ws: workspaceId }),
     sb
       .from("workspace_invitations")
       .select("id, email, role, status, created_at")
       .eq("workspace_id", workspaceId)
-      .eq("status", "pending"),
+      .eq("status", "pending")
+      .order("created_at", { ascending: true }),
   ]);
   if (error) throw new Error(readableError(error.message));
+  if (inviteError && !/permission|row-level security/i.test(inviteError.message)) {
+    throw new Error(readableError(inviteError.message));
+  }
 
   const wsName = (await getWorkspace(workspaceId))?.name ?? "";
 
   /* eslint-disable @typescript-eslint/no-explicit-any */
-  const active: TeamMember[] = (members ?? []).map((m: any) => {
-    const name = m.profiles?.name ?? "Member";
+  const active: TeamMember[] = ((members as any[]) ?? []).map((m: any) => {
+    const name: string = m.name || m.email?.split("@")[0] || "Member";
     return {
       id: m.user_id,
       name,
-      email: "",
-      role: m.role as Role,
+      email: m.email ?? "",
+      role: (m.is_owner ? "owner" : m.role) as Role,
       workspace: wsName,
       status: "active",
-      joined_at: m.created_at,
-      initials: name.split(/\s+/).slice(0, 2).map((p: string) => p[0]?.toUpperCase() ?? "").join(""),
+      joined_at: m.joined_at,
+      initials:
+        name
+          .split(/\s+/)
+          .filter(Boolean)
+          .slice(0, 2)
+          .map((p: string) => p[0]?.toUpperCase() ?? "")
+          .join("") || "M",
       tint: tintFor(m.user_id),
     };
   });
 
-  const pending: TeamMember[] = (invites ?? []).map((i: any) => ({
+  const pending: TeamMember[] = ((invites as any[]) ?? []).map((i: any) => ({
     id: i.id,
     name: i.email.split("@")[0],
     email: i.email,
@@ -1092,6 +1188,40 @@ export async function getTeam(workspaceId: string): Promise<TeamMember[]> {
   /* eslint-enable @typescript-eslint/no-explicit-any */
 
   return [...active, ...pending];
+}
+
+export type SeatUsage = {
+  planId: string;
+  maxUsers: number;
+  activeMembers: number;
+  pendingInvites: number;
+};
+
+/**
+ * Seat accounting straight from the database: the plan that governs seats is
+ * the WORKSPACE OWNER's effective plan (the same rule the seat-limit trigger
+ * and the invite endpoints enforce), and a pending invitation already holds a
+ * seat. Falls back to the plan catalog if the RPC isn't deployed yet.
+ */
+export async function getSeatUsage(workspaceId: string, planId: string): Promise<SeatUsage> {
+  const sb = getSupabase();
+  const fallback: SeatUsage = {
+    planId,
+    maxUsers: planFromId(planId).maxUsers,
+    activeMembers: 1,
+    pendingInvites: 0,
+  };
+  if (!sb) return fallback;
+  const { data, error } = await sb.rpc("workspace_seat_usage", { ws: workspaceId });
+  if (error) return fallback;
+  const row = ((data as Record<string, unknown>[]) ?? [])[0];
+  if (!row) return fallback;
+  return {
+    planId: String(row.plan_id ?? planId),
+    maxUsers: Number(row.max_users ?? fallback.maxUsers),
+    activeMembers: Number(row.active_members ?? 0),
+    pendingInvites: Number(row.pending_invites ?? 0),
+  };
 }
 
 export async function inviteMember(workspaceId: string, email: string, role: "admin" | "member") {
@@ -1396,6 +1526,7 @@ export type BillingState = {
   plan: string;
   status: string;
   renewalDate: string | null;
+  cancelAtCycleEnd: boolean;
   invoices: Invoice[];
   seats: { used: number; limit: number };
   paymentMethodLast4: string | null;
@@ -1406,41 +1537,46 @@ export async function getBilling(workspaceId: string): Promise<BillingState> {
   const user = await getCurrentUser();
   if (!user) throw new Error("Your session expired — sign in again.");
 
-  const [{ data: sub }, { data: invoices }, { count: memberCount }] = await Promise.all([
+  const [{ data: sub }, { data: invoices }, seats] = await Promise.all([
     sb.from("subscriptions").select("*").eq("user_id", user.id).maybeSingle(),
     sb.from("invoices").select("*").eq("user_id", user.id).order("issued_at", { ascending: false }).limit(12),
-    sb.from("workspace_members").select("user_id", { count: "exact", head: true }).eq("workspace_id", workspaceId),
+    getSeatUsage(workspaceId, user.planId),
   ]);
 
-  const planId = sub && ["active", "trialing"].includes(sub.status) ? sub.plan_id : "free";
+  const planId = effectivePlanId(sub);
 
   return {
     planId,
     plan: planLabel(planId),
-    status: sub?.status ?? "active",
+    status: sub?.status ?? (planId === "free" ? "free" : "active"),
     renewalDate: sub?.current_period_end
-      ? new Date(sub.current_period_end).toLocaleDateString("en-US", {
-          month: "short",
-          day: "numeric",
-          year: "numeric",
-        })
+      ? formatAppDate(sub.current_period_end)
       : null,
+    cancelAtCycleEnd: Boolean(sub?.cancel_at_cycle_end),
+    /* Razorpay reports money in the smallest unit of the subscription
+       currency. Zybble bills in INR only, so `amount_cents` is paise. */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     invoices: (invoices ?? []).map((i: any) => ({
       id: i.number,
       date: i.issued_at,
       description: i.description,
-      amount: `$${(i.amount_cents / 100).toFixed(2)}`,
+      amount: formatMoney(Number(i.amount_cents ?? 0), i.currency ?? BILLING_CURRENCY),
       status: i.status,
     })),
-    seats: { used: memberCount ?? 1, limit: planFromId(planId).maxUsers },
+    seats: { used: seats.activeMembers + seats.pendingInvites, limit: seats.maxUsers },
     paymentMethodLast4: null,
   };
 }
 
-type BillingAction = "checkout" | "sync" | "cancel";
+type BillingAction = "checkout" | "verify" | "sync" | "cancel";
 type BillingActionBody =
   | { action: "checkout"; plan: "growth" | "agency" | "scale" }
+  | {
+      action: "verify";
+      razorpay_payment_id: string;
+      razorpay_subscription_id: string;
+      razorpay_signature: string;
+    }
   | { action: "sync" }
   | { action: "cancel" };
 
@@ -1507,7 +1643,61 @@ async function billingRequest(
  * Supabase Edge Function with the same request contract. Both paths keep
  * Razorpay keys and Supabase write credentials server-side only.
  */
-export async function startCheckout(planId: "growth" | "agency" | "scale") {
+
+/**
+ * Everything the browser needs to open Razorpay Standard Checkout ON the
+ * Zybble page. Deliberately contains NO hosted-page URL: the server never
+ * returns `short_url` / `auth_link` / `/v1/l/...`, so there is nothing to
+ * redirect to even by accident. `keyId` is the PUBLIC Razorpay key id — the
+ * key secret never leaves the server.
+ */
+export type CheckoutSession = {
+  keyId: string;
+  subscriptionId: string;
+  planId: "growth" | "agency" | "scale";
+  planLabel: string;
+  amount: number; // paise, display only — Razorpay charges the plan amount
+  currency: string;
+  name: string;
+  description: string;
+  prefill: { name?: string; email?: string; contact?: string };
+  /** Payment methods the merchant account actually allows for this flow. */
+  method: Record<string, boolean>;
+  notes: Record<string, string>;
+  themeColor: string;
+};
+
+function asCheckoutSession(data: Record<string, unknown>): CheckoutSession | null {
+  const keyId = typeof data.keyId === "string" ? data.keyId : "";
+  const subscriptionId = typeof data.subscriptionId === "string" ? data.subscriptionId : "";
+  const planId = String(data.planId ?? "");
+  if (!keyId || !subscriptionId) return null;
+  if (planId !== "growth" && planId !== "agency" && planId !== "scale") return null;
+  return {
+    keyId,
+    subscriptionId,
+    planId,
+    planLabel: String(data.planLabel ?? planLabel(planId)),
+    amount: Number(data.amount ?? 0),
+    currency: String(data.currency ?? BILLING_CURRENCY),
+    name: String(data.name ?? "Zybble"),
+    description: String(data.description ?? `${planLabel(planId)} plan · monthly`),
+    prefill: (data.prefill as CheckoutSession["prefill"]) ?? {},
+    method: (data.method as Record<string, boolean>) ?? {},
+    notes: (data.notes as Record<string, string>) ?? {},
+    themeColor: String(data.themeColor ?? "#0e7a52"),
+  };
+}
+
+/**
+ * Prepare an on-site checkout. The server authenticates the caller, creates
+ * (or reuses) the Razorpay subscription with the server-only key secret, and
+ * returns only browser-safe data. NOTHING about the user's plan changes here:
+ * entitlement is granted later, from a verified payment or a signed webhook.
+ */
+export async function startCheckout(
+  planId: "growth" | "agency" | "scale",
+): Promise<{ session?: CheckoutSession; error?: string }> {
   const sb = getSupabase();
   if (!sb) return { error: CONFIG_ERROR };
   const {
@@ -1517,8 +1707,42 @@ export async function startCheckout(planId: "growth" | "agency" | "scale") {
 
   const { data, error } = await billingRequest(sb, session.access_token, { action: "checkout", plan: planId });
   if (error) return { error };
-  if (!data?.url) return { error: "The payment provider didn't return a checkout link. Please try again." };
-  return { url: data.url as string };
+  const checkout = data ? asCheckoutSession(data) : null;
+  if (!checkout) {
+    return { error: "The payment provider didn't return a usable checkout. Please try again." };
+  }
+  return { session: checkout };
+}
+
+/**
+ * Hand the Razorpay success callback back to the server for verification.
+ * The server re-computes the HMAC signature with the key secret AND re-reads
+ * the subscription/payment from Razorpay before any entitlement is written —
+ * a forged callback from the browser can never upgrade an account.
+ */
+export async function verifyCheckout(result: {
+  razorpay_payment_id: string;
+  razorpay_subscription_id: string;
+  razorpay_signature: string;
+}): Promise<{ planId?: string; status?: string; error?: string }> {
+  const sb = getSupabase();
+  if (!sb) return { error: CONFIG_ERROR };
+  const {
+    data: { session },
+  } = await sb.auth.getSession();
+  if (!session) return { error: "Your session expired — sign in again." };
+
+  const { data, error } = await billingRequest(sb, session.access_token, {
+    action: "verify",
+    razorpay_payment_id: result.razorpay_payment_id,
+    razorpay_subscription_id: result.razorpay_subscription_id,
+    razorpay_signature: result.razorpay_signature,
+  });
+  if (error) return { error };
+  return {
+    planId: typeof data?.planId === "string" ? data.planId : undefined,
+    status: typeof data?.status === "string" ? data.status : undefined,
+  };
 }
 
 export async function cancelSubscription() {

@@ -31,22 +31,24 @@ Deno.serve(async (req) => {
     const caller = await callerFromRequest(req, sb);
     await requireWorkspaceRole(sb, caller.id, workspaceId, ["owner", "admin"]);
 
-    const entitlements = await getEntitlements(sb, caller.id);
-    const { data: members } = await sb
-      .from("workspace_members")
-      .select("user_id", { count: "exact" })
-      .eq("workspace_id", workspaceId);
-    if ((members?.length ?? 1) >= entitlements.allowances.seats) {
-      throw new HttpError(403, `Your ${entitlements.plan} plan includes ${entitlements.allowances.seats} ${entitlements.allowances.seats === 1 ? "seat" : "seats"}.`);
-    }
+    /* Seats come from the WORKSPACE OWNER's effective plan (identical to the
+       enforce_seat_limit() trigger and to /api/team-invite), and a pending
+       invitation already holds a seat. */
+    const { data: ownerRow } = await sb.from("workspaces").select("owner_id").eq("id", workspaceId).maybeSingle();
+    const ownerId = ownerRow?.owner_id ?? caller.id;
+    const entitlements = await getEntitlements(sb, ownerId);
+    const seats = entitlements.allowances.seats;
 
-    const { count: pendingInvites } = await sb
-      .from("workspace_invitations")
-      .select("id", { count: "exact", head: true })
-      .eq("workspace_id", workspaceId)
-      .eq("status", "pending");
-    if ((members?.length ?? 0) + (pendingInvites ?? 0) >= entitlements.allowances.seats) {
-      throw new HttpError(403, `Your ${entitlements.plan} plan includes ${entitlements.allowances.seats} ${entitlements.allowances.seats === 1 ? "seat" : "seats"}.`);
+    const [{ count: memberCount }, { count: pendingInvites }] = await Promise.all([
+      sb.from("workspace_members").select("user_id", { count: "exact", head: true }).eq("workspace_id", workspaceId),
+      sb
+        .from("workspace_invitations")
+        .select("id", { count: "exact", head: true })
+        .eq("workspace_id", workspaceId)
+        .eq("status", "pending"),
+    ]);
+    if ((memberCount ?? 0) + (pendingInvites ?? 0) >= seats) {
+      throw new HttpError(403, `Your ${entitlements.plan} plan includes ${seats} ${seats === 1 ? "seat" : "seats"}.`);
     }
 
     const { data: ws } = await sb.from("workspaces").select("name").eq("id", workspaceId).single();

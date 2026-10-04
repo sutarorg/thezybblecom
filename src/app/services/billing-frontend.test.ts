@@ -29,7 +29,7 @@ vi.mock("./supabase", () => ({
   BACKEND_ENABLED: true,
 }));
 
-import { cancelSubscription, startCheckout, syncBilling } from "./api";
+import { cancelSubscription, startCheckout, syncBilling, verifyCheckout } from "./api";
 
 const SESSION = { data: { session: { access_token: "caller-token", user: { id: "u1" } } } };
 
@@ -56,14 +56,31 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+const CHECKOUT_PAYLOAD = {
+  keyId: "rzp_test_public",
+  subscriptionId: "sub_route",
+  planId: "growth",
+  planLabel: "Growth",
+  amount: 4900,
+  currency: "INR",
+  name: "Zybble",
+  description: "Growth plan · monthly",
+  prefill: { email: "founder@zybble.com" },
+  method: { card: true, wallet: true, upi: false },
+  notes: { user_id: "u1", plan: "growth" },
+  themeColor: "#0e7a52",
+};
+
 describe("startCheckout", () => {
   it("uses the same-origin billing route first and forwards the bearer token", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ url: "https://rzp.io/i/route", subscriptionId: "sub_route" }));
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(CHECKOUT_PAYLOAD));
     vi.stubGlobal("fetch", fetchMock);
 
-    const { url, error } = await startCheckout("growth");
+    const { session, error } = await startCheckout("growth");
     expect(error).toBeUndefined();
-    expect(url).toBe("https://rzp.io/i/route");
+    expect(session?.subscriptionId).toBe("sub_route");
+    expect(session?.keyId).toBe("rzp_test_public");
+    expect(session?.currency).toBe("INR");
     expect(fetchMock).toHaveBeenCalledWith("/api/billing", expect.objectContaining({
       method: "POST",
       headers: expect.objectContaining({ Authorization: "Bearer caller-token" }),
@@ -72,12 +89,28 @@ describe("startCheckout", () => {
     expect(h.invoke).not.toHaveBeenCalled();
   });
 
-  it("falls back to the Edge Function when the same-origin billing route is missing", async () => {
-    h.invoke.mockResolvedValue({ data: { url: "https://rzp.io/i/abc123", subscriptionId: "sub_1" }, error: null });
+  it("never exposes a Razorpay hosted-page URL to the browser", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
+      ...CHECKOUT_PAYLOAD,
+      // Even if a server were to leak these, the typed session must not carry
+      // them: there is nothing for the UI to redirect to.
+      short_url: "https://rzp.io/i/abc",
+      auth_link: "https://api.razorpay.com/v1/l/subscriptions/sub_route",
+    })));
 
-    const { url, error } = await startCheckout("growth");
+    const { session } = await startCheckout("growth");
+    expect(session).toBeTruthy();
+    expect(JSON.stringify(session)).not.toContain("rzp.io");
+    expect(JSON.stringify(session)).not.toContain("/v1/l/");
+    expect(session).not.toHaveProperty("url");
+  });
+
+  it("falls back to the Edge Function when the same-origin billing route is missing", async () => {
+    h.invoke.mockResolvedValue({ data: { ...CHECKOUT_PAYLOAD, subscriptionId: "sub_edge" }, error: null });
+
+    const { session, error } = await startCheckout("growth");
     expect(error).toBeUndefined();
-    expect(url).toBe("https://rzp.io/i/abc123");
+    expect(session?.subscriptionId).toBe("sub_edge");
     expect(h.invoke).toHaveBeenCalledWith("billing", {
       body: { action: "checkout", plan: "growth" },
       headers: { Authorization: "Bearer caller-token" },
@@ -86,8 +119,8 @@ describe("startCheckout", () => {
 
   it("surfaces an application error returned by the same-origin route without falling back", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ error: "That plan doesn't exist." }, 400)));
-    const { url, error } = await startCheckout("growth");
-    expect(url).toBeUndefined();
+    const { session, error } = await startCheckout("growth");
+    expect(session).toBeUndefined();
     expect(error).toBe("That plan doesn't exist.");
     expect(h.invoke).not.toHaveBeenCalled();
   });
@@ -105,11 +138,18 @@ describe("startCheckout", () => {
     expect(error).not.toContain("Edge Function");
   });
 
-  it("never reports success without a checkout URL", async () => {
+  it("never reports success without a usable checkout payload", async () => {
     h.invoke.mockResolvedValue({ data: {}, error: null });
-    const { url, error } = await startCheckout("growth");
-    expect(url).toBeUndefined();
-    expect(error).toBe("The payment provider didn't return a checkout link. Please try again.");
+    const { session, error } = await startCheckout("growth");
+    expect(session).toBeUndefined();
+    expect(error).toBe("The payment provider didn't return a usable checkout. Please try again.");
+  });
+
+  it("rejects a checkout payload that is missing the public key id", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ ...CHECKOUT_PAYLOAD, keyId: "" })));
+    const { session, error } = await startCheckout("growth");
+    expect(session).toBeUndefined();
+    expect(error).toContain("didn't return a usable checkout");
   });
 
   it("replaces an unreachable Edge Function error with an actionable, non-technical message", async () => {
@@ -117,8 +157,8 @@ describe("startCheckout", () => {
       data: null,
       error: { message: "Failed to send a request to the Edge Function" },
     });
-    const { url, error } = await startCheckout("growth");
-    expect(url).toBeUndefined();
+    const { session, error } = await startCheckout("growth");
+    expect(session).toBeUndefined();
     expect(error).toContain("Billing is temporarily unavailable");
     expect(error).not.toContain("Edge Function");
     expect(error).not.toContain("deployed");
@@ -148,6 +188,41 @@ describe("startCheckout", () => {
     expect(error).toBe("Your session expired — sign in again.");
     expect(fetch).not.toHaveBeenCalled();
     expect(h.invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("verifyCheckout", () => {
+  const RESULT = {
+    razorpay_payment_id: "pay_123",
+    razorpay_subscription_id: "sub_123",
+    razorpay_signature: "deadbeef",
+  };
+
+  it("sends the Razorpay callback to the server for verification", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true, planId: "growth", status: "active" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await verifyCheckout(RESULT);
+    expect(result).toEqual({ planId: "growth", status: "active" });
+    expect(fetchMock).toHaveBeenCalledWith("/api/billing", expect.objectContaining({
+      body: JSON.stringify({ action: "verify", ...RESULT }),
+    }));
+  });
+
+  it("surfaces a verification failure instead of pretending the plan changed", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
+      error: "We couldn't verify that payment. Nothing was changed on your account.",
+      code: "signature_invalid",
+    }, 400)));
+    const result = await verifyCheckout(RESULT);
+    expect(result.planId).toBeUndefined();
+    expect(result.error).toContain("couldn't verify that payment");
+  });
+
+  it("requires a session", async () => {
+    h.getSession.mockResolvedValue({ data: { session: null } });
+    const result = await verifyCheckout(RESULT);
+    expect(result.error).toBe("Your session expired — sign in again.");
   });
 });
 

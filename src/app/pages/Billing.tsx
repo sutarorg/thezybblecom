@@ -34,9 +34,12 @@ import {
   getUsage,
   startCheckout,
   syncBilling,
+  verifyCheckout,
   type BillingState,
   type UsageData,
 } from "../services/api";
+import { openRazorpayCheckout } from "../services/razorpay";
+import { formatMoney, formatRupees } from "../lib/money";
 import { useWorkspaceContext } from "../services/hooks";
 
 export function BillingPage() {
@@ -84,6 +87,20 @@ export function BillingPage() {
   const plan = planFromId(billing?.planId ?? planId);
   const pct = usage && usage.allowance > 0 ? Math.round((usage.used / usage.allowance) * 100) : 0;
 
+  /**
+   * Upgrade — entirely on zybble.com.
+   *
+   * 1. the server prepares the Razorpay subscription with its secret key and
+   *    returns only browser-safe checkout data (no hosted-page URL exists in
+   *    the response, so none can be opened);
+   * 2. Razorpay Standard Checkout opens as an overlay on this page;
+   * 3. the success callback is verified SERVER-SIDE (signature + a fresh read
+   *    of the subscription and payment from Razorpay) before any plan change;
+   * 4. plan, usage, seats and workspace entitlements are refreshed in place.
+   *
+   * Dismissal and failure leave the current plan untouched and simply allow a
+   * retry — nothing is granted from a browser callback alone.
+   */
   const onSwitch = async (planName: string) => {
     if (planName === currentPlan) {
       toast("You're already on that plan", "info");
@@ -93,17 +110,42 @@ export function BillingPage() {
       setConfirmCancel(true);
       return;
     }
+
     setSwitching(planName);
-    const { url, error: checkoutError } = await startCheckout(
+    const { session, error: checkoutError } = await startCheckout(
       planName.toLowerCase() as "growth" | "agency" | "scale"
     );
-    setSwitching(null);
-    if (checkoutError || !url) {
+    if (checkoutError || !session) {
+      setSwitching(null);
       toast(checkoutError ?? "Checkout couldn't start right now.", "error");
       return;
     }
-    window.open(url, "_blank", "noopener,noreferrer");
-    toast("Complete checkout in the new tab — your plan updates automatically.", "info");
+
+    const outcome = await openRazorpayCheckout(session);
+
+    if (outcome.kind === "dismissed") {
+      setSwitching(null);
+      toast("Checkout closed — your plan hasn't changed. You can try again anytime.", "info");
+      return;
+    }
+    if (outcome.kind === "failed") {
+      setSwitching(null);
+      toast(outcome.message, "error");
+      return;
+    }
+
+    const verified = await verifyCheckout(outcome.result);
+    setSwitching(null);
+    if (verified.error) {
+      toast(verified.error, "error");
+      load();
+      return;
+    }
+    toast(`Payment confirmed — you're on ${planFromId(verified.planId ?? planName.toLowerCase()).label}.`);
+    // Plan, seats, allowances and client-workspace entitlement all follow the
+    // refreshed server state; no sign-out/sign-in required.
+    refresh();
+    load();
   };
 
   return (
@@ -162,7 +204,7 @@ export function BillingPage() {
                       </Badge>
                     </div>
                     <p className="mt-0.5 text-xs text-ink-mute">
-                      ${(plan.priceCents / 100).toFixed(0)}/month · billed monthly
+                      {formatMoney(plan.priceCents)}/month · billed monthly
                     </p>
                   </div>
                 </div>
@@ -241,7 +283,7 @@ export function BillingPage() {
                   </div>
                   <p className="mt-1.5">
                     <span className="font-display text-[26px] font-semibold tracking-[-0.03em] text-ink">
-                      ${p.price}
+                      {formatRupees(p.price)}
                     </span>
                     <span className="text-xs text-ink-mute">/mo</span>
                   </p>

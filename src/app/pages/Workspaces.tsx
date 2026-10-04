@@ -21,7 +21,7 @@ import { WorkspacesSkeleton } from "../components/skeletons";
 import { planFromId } from "../data/plans";
 import type { Workspace } from "../data/types";
 import { useAppSeo } from "../hooks";
-import { createWorkspace, listWorkspaces } from "../services/api";
+import { createWorkspace, listWorkspacesWithRecovery } from "../services/api";
 import { useWorkspaceContext } from "../services/hooks";
 
 export function WorkspacesPage() {
@@ -40,7 +40,10 @@ export function WorkspacesPage() {
   const load = useCallback(() => {
     setLoading(true);
     setError(null);
-    listWorkspaces()
+    /* Self-healing: a user whose personal workspace membership was never
+       provisioned gets it re-created server-side (idempotently) instead of
+       seeing an empty or unauthorized list. */
+    listWorkspacesWithRecovery()
       .then(setWorkspaces)
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));

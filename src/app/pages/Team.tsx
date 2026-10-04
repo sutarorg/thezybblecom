@@ -29,7 +29,7 @@ import { TeamSkeleton } from "../components/skeletons";
 import { planFromId } from "../data/plans";
 import type { Role, TeamMember } from "../data/types";
 import { useAppSeo } from "../hooks";
-import { getTeam, inviteMember, removeMember } from "../services/api";
+import { getSeatUsage, getTeam, inviteMember, removeMember, type SeatUsage } from "../services/api";
 import { useWorkspaceContext } from "../services/hooks";
 
 const ROLE_META: Record<Role, { icon: React.ElementType; label: string }> = {
@@ -52,16 +52,23 @@ export function TeamPage() {
   const [role, setRole] = useState<Role>("member");
   const [sending, setSending] = useState(false);
   const [toRemove, setToRemove] = useState<TeamMember | null>(null);
+  const [seats, setSeats] = useState<SeatUsage | null>(null);
 
   const load = useCallback(() => {
     if (!workspace) return;
     setLoading(true);
     setError(null);
-    getTeam(workspace.id)
-      .then(setMembers)
+    /* Seats are governed by the WORKSPACE OWNER's plan (the same rule the
+       database trigger enforces), so they're read from the server rather
+       than inferred from the signed-in user's own plan. */
+    Promise.all([getTeam(workspace.id), getSeatUsage(workspace.id, planId)])
+      .then(([team, seatUsage]) => {
+        setMembers(team);
+        setSeats(seatUsage);
+      })
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
-  }, [workspace]);
+  }, [workspace, planId]);
 
   useEffect(() => {
     if (!ctxLoading && !workspace) setLoading(false);
@@ -70,7 +77,11 @@ export function TeamPage() {
 
   const active = members.filter((m) => m.status === "active").length;
   const pending = members.length - active;
-  const atSeatLimit = active >= plan.maxUsers;
+  const seatLimit = seats?.maxUsers ?? plan.maxUsers;
+  const seatPlan = planFromId(seats?.planId ?? planId);
+  /* A pending invitation already holds a seat — the invite endpoints count it
+     the same way, so the button state matches what the server will allow. */
+  const atSeatLimit = active + pending >= seatLimit;
   const busy = loading || ctxLoading;
 
   const onInvite = async (e: FormEvent) => {
@@ -111,7 +122,7 @@ export function TeamPage() {
             onClick={() => {
               if (atSeatLimit) {
                 toast(
-                  `Your ${plan.label} plan includes ${plan.maxUsers} ${plan.maxUsers === 1 ? "seat" : "seats"}.`,
+                  `Your ${seatPlan.label} plan includes ${seatLimit} ${seatLimit === 1 ? "seat" : "seats"}.`,
                   "error"
                 );
                 return;
@@ -132,10 +143,12 @@ export function TeamPage() {
         </span>
         <div className="min-w-0 flex-1">
           <p className="text-xs font-medium text-ink">
-            {plan.label} plan · {plan.maxUsers} {plan.maxUsers === 1 ? "seat" : "seats"} included
+            {seatPlan.label} plan · {seatLimit} {seatLimit === 1 ? "seat" : "seats"} included
           </p>
           <p className="text-[11px] text-ink-mute">
-            {busy ? "Checking seats…" : `You're using ${active} of ${plan.maxUsers}.`}
+            {busy
+              ? "Checking seats…"
+              : `You're using ${active + pending} of ${seatLimit}${pending ? ` (${pending} invited)` : ""}.`}
           </p>
         </div>
         <Btn variant="outline" size="sm" href="/billing">

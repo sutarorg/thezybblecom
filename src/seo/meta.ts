@@ -137,7 +137,7 @@ export function homeMeta(): PageMeta {
         offers: {
           "@type": "Offer",
           price: "0",
-          priceCurrency: "USD",
+          priceCurrency: "INR",
           description: "Free plan with 50 leads per month",
         },
         publisher: { "@id": `${SITE_URL}/#organization` },

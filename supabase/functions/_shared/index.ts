@@ -6,7 +6,9 @@ import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supa
 import { OpenRouterError, getOpenRouterModel, openRouterChatJson } from "./openrouter.ts";
 import { INTERPRET_SYSTEM_PROMPT, cleanInterpretResult, extractJsonObject } from "./interpret.ts";
 import { normalizeOpenState, type OpenState } from "./open-state.ts";
+import { webhookSignatureMatches } from "./billing.ts";
 
+export * from "./billing.ts";
 export { normalizeOpenState };
 export type { OpenState };
 
@@ -142,12 +144,21 @@ export type Entitlements = {
 export async function getEntitlements(sb: SupabaseClient, userId: string): Promise<Entitlements> {
   const { data: sub } = await sb
     .from("subscriptions")
-    .select("plan_id, status")
+    .select("plan_id, status, current_period_end")
     .eq("user_id", userId)
     .maybeSingle();
 
-  const planId =
-    sub && ["active", "trialing"].includes(sub.status) ? sub.plan_id : "free";
+  /* Same rule as the SQL function effective_plan_for_user(): active/trialing
+     entitles, and a cancelled subscription still entitles until the paid
+     period it already covers actually ends. */
+  const entitled = Boolean(
+    sub &&
+      (["active", "trialing"].includes(sub.status) ||
+        (["cancelled", "completed"].includes(sub.status) &&
+          sub.current_period_end &&
+          new Date(sub.current_period_end).getTime() > Date.now())),
+  );
+  const planId = entitled ? sub!.plan_id : "free";
 
   const { data: plan } = await sb.from("plans").select("*").eq("id", planId).single();
   /* Fallback mirrors the seeded `plans` table (see migrations) — Zybble AI is
@@ -394,20 +405,9 @@ export async function verifyRazorpaySignature(rawBody: string, signature: string
   const secret = Deno.env.get("RAZORPAY_WEBHOOK_SECRET");
   if (!secret) throw new HttpError(500, "Webhook secret isn't configured. Missing server environment variable: RAZORPAY_WEBHOOK_SECRET. Set it as a Supabase Edge Function secret, then redeploy the function.");
   if (!signature) throw new HttpError(400, "Missing webhook signature.");
-
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const digest = await crypto.subtle.sign("HMAC", key, encoder.encode(rawBody));
-  const computed = Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-  if (computed !== signature) throw new HttpError(401, "Invalid webhook signature.");
+  if (!(await webhookSignatureMatches(rawBody, signature, secret))) {
+    throw new HttpError(401, "Invalid webhook signature.");
+  }
 }
 
 /* ------------------------------------------------------------------ */
