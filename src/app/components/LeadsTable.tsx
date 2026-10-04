@@ -308,7 +308,11 @@ export function LeadsTable({
                     />
                   </th>
                 ) : null}
-                <th scope="col" className="py-2 pr-3" aria-sort={sortKey === "name" ? (sortDir === 1 ? "ascending" : "descending") : undefined}>
+                <th
+                  scope="col"
+                  className={cn("py-2 pr-3", !showSelection && "pl-3")}
+                  aria-sort={sortKey === "name" ? (sortDir === 1 ? "ascending" : "descending") : undefined}
+                >
                   {sortBtn("name", "Business")}
                 </th>
                 {visible("category") ? (
@@ -377,7 +381,7 @@ export function LeadsTable({
                         />
                       </td>
                     ) : null}
-                    <td className="max-w-[260px] py-2 pr-3">
+                    <td className={cn("max-w-[260px] py-2 pr-3", !showSelection && "pl-3")}>
                       {/* Business identity: the avatar owns a fixed 24px
                           track (size-6 + shrink-0) followed by a consistent
                           gap-2.5, and the name track is a shrinkable

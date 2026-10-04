@@ -44,12 +44,17 @@ export const maxDuration = 60;
 export const ASSISTANT_MARKER = 'You are "Ask Zybble", the assistant on the Zybble website';
 
 const MAX_MESSAGES = 24;
+/* The system message is the generated assistant fact sheet (see
+   src/assistant/prompt.ts), not user input — it's the same on every request
+   and currently runs well over 40,000 characters. Its cap just needs enough
+   headroom for the knowledge base to keep growing; it carries no abuse risk
+   since the client can't set its content. */
 const LIMITS: Record<OpenRouterServerMessage["role"], number> = {
-  system: 20_000,
+  system: 80_000,
   user: 4_000,
   assistant: 8_000,
 };
-const MAX_TOTAL_CHARS = 30_000;
+const MAX_TOTAL_CHARS = 120_000;
 const ASSISTANT_MAX_OUTPUT_TOKENS = 1_200;
 const UPSTREAM_TIMEOUT_MS = 40_000;
 

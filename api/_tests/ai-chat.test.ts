@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import handler, { ASSISTANT_MARKER } from "../ai-chat";
+import { assistantSystemPrompt } from "../../src/assistant/prompt";
 
 /**
  * Full-flow tests for POST /api/ai-chat — the server-side AI bridge the
@@ -338,6 +339,16 @@ describe("POST /api/ai-chat — request policy", () => {
     expect(seen[0]!.model).toBe(OPENROUTER_MODEL);
     expect(seen[0]!).not.toHaveProperty("temperature");
     expect(seen[0]!.max_tokens).toBe(1_200); // fixed server-side budget
+  });
+
+  it("accepts the real, fully-built assistant fact sheet as the system message (regression: the knowledge base must always fit under the server's per-message cap)", async () => {
+    const realSystemPrompt = assistantSystemPrompt();
+    expect(realSystemPrompt).toContain(ASSISTANT_MARKER);
+    const { req, res, getStatus } = createMockReqRes({
+      body: { messages: [{ role: "system", content: realSystemPrompt }, { role: "user", content: "What is Zybble?" }] },
+    });
+    await handler(req, res);
+    expect(getStatus()).toBe(200);
   });
 
   it("rate-limits a single source after the per-window allowance", async () => {

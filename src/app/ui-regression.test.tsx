@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { RecentLeadsCard } from "./components/RecentLeads";
-import { LeadAvatar } from "./components/LeadsTable";
+import { LeadAvatar, LeadsTable } from "./components/LeadsTable";
 import type { Lead } from "./data/types";
 import { applyLightAppearance, getRuntimePreferences, setRuntimePreferences } from "./lib/datetime";
 
@@ -293,6 +293,33 @@ describe("/find Recent Leads card", () => {
     expect(avatar.getAttribute("class")).toMatch(/shrink-0/);
     act(() => root2.unmount());
     span.remove();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* /find "leads collected" results table — the search-results table    */
+/* hides the selection checkbox column, so the Business column must    */
+/* carry its own left padding or its content sits flush against the    */
+/* card's left edge, looking like it overlaps the border.              */
+/* ------------------------------------------------------------------ */
+describe("/find leads-collected table (search-results mode)", () => {
+  const leads: Lead[] = [makeLead({ id: "lead-1" }), makeLead({ id: "lead-2", name: "Second Spot" })];
+
+  it("gives the Business column left padding so it doesn't sit flush on the card edge", async () => {
+    await render(<LeadsTable leads={leads} mode="search-results" />);
+
+    const headerCell = container.querySelector("thead th:first-child") as HTMLElement;
+    expect(headerCell).not.toBeNull();
+    expect(headerCell.getAttribute("class") ?? "").toMatch(/(^|\s)pl-3(\s|$)/);
+
+    const bodyCell = container.querySelector("tbody tr:first-child td:first-child") as HTMLElement;
+    expect(bodyCell).not.toBeNull();
+    expect(bodyCell.getAttribute("class") ?? "").toMatch(/(^|\s)pl-3(\s|$)/);
+  });
+
+  it("does not render a selection checkbox column in search-results mode", async () => {
+    await render(<LeadsTable leads={leads} mode="search-results" />);
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
   });
 });
 
