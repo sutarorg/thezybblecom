@@ -8,6 +8,17 @@ import {
   SupabaseServerConfigError,
   SUPABASE_URL_VAR,
 } from "./_lib/supabase-server.js";
+import {
+  BILLING_CURRENCY,
+  checkoutMethodConfig,
+  epochToIso,
+  invoiceNumber,
+  mapSubscriptionStatus,
+  PLAN_LABELS,
+  statusEntitles,
+  verifySubscriptionSignature,
+  type PaidPlanId,
+} from "./_lib/billing-core.js";
 
 type VercelRequest = IncomingMessage & { body?: unknown };
 type VercelResponse = ServerResponse & { status(code: number): VercelResponse; json(body: unknown): void };
@@ -23,7 +34,7 @@ const PLAN_ENV: Record<"growth" | "agency" | "scale", string> = {
   scale: "RAZORPAY_PLAN_SCALE_ID",
 };
 
-type BillingAction = "checkout" | "sync" | "cancel";
+type BillingAction = "checkout" | "verify" | "sync" | "cancel";
 
 type SupabaseServiceConfig = {
   url: string;
@@ -151,17 +162,17 @@ function tokenOf(req: VercelRequest) {
 
 function actionOf(input: unknown): BillingAction {
   const action = String(input ?? "");
-  if (action === "checkout" || action === "sync" || action === "cancel") return action;
+  if (action === "checkout" || action === "verify" || action === "sync" || action === "cancel") return action;
   throw new ApiError(400, "Unknown billing action.", "action_invalid");
 }
 
-function planOf(input: unknown): "growth" | "agency" | "scale" {
+function planOf(input: unknown): PaidPlanId {
   const plan = String(input ?? "").toLowerCase();
   if (plan === "growth" || plan === "agency" || plan === "scale") return plan;
   throw new ApiError(400, "That plan doesn't exist.", "plan_invalid");
 }
 
-function requirePlanId(plan: "growth" | "agency" | "scale") {
+function requirePlanId(plan: PaidPlanId) {
   const variable = PLAN_ENV[plan];
   const planId = readServerEnv(variable);
   if (!planId) throw new ApiError(500, `The ${plan} plan isn't available in payments yet.`, "billing_config");
@@ -232,75 +243,344 @@ function dbFailed(message: string, code: string) {
   return new ApiError(500, message, code);
 }
 
-function mapStatus(remote: unknown, fallback: string) {
-  const status = String(remote ?? "");
-  if (["active", "trialing", "paused", "cancelled"].includes(status)) return status;
-  if (status === "expired" || status === "halted") return "failed";
-  if (status === "pending") return "past_due";
-  return fallback;
+const mapStatus = mapSubscriptionStatus;
+
+type PlanRow = { id: string; price_cents: number; currency: string | null };
+
+async function planRow(sb: SupabaseClient, planId: PaidPlanId): Promise<PlanRow> {
+  const { data, error } = await sb
+    .from("plans")
+    .select("id, price_cents, currency")
+    .eq("id", planId)
+    .maybeSingle();
+  if (error) throw dbFailed("Couldn't read the plan catalog. Please try again.", "plan_read_failed");
+  if (!data) throw new ApiError(500, `The ${planId} plan isn't configured yet.`, "billing_config");
+  return data as PlanRow;
 }
 
+/**
+ * Prepare an ON-SITE checkout.
+ *
+ * This creates (or reuses) the Razorpay subscription with the server-only key
+ * secret and returns ONLY browser-safe data: the public key id, the
+ * subscription id to hand to Razorpay Standard Checkout, and display copy.
+ * It deliberately never returns `short_url`, `auth_link`, or any
+ * api.razorpay.com/v1/l/... hosted page — the browser has nothing to redirect
+ * to, so the payment always happens in the Checkout overlay on Zybble.
+ *
+ * It also never touches `subscriptions`: preparing a checkout must not grant
+ * anything. The pending provider subscription is parked in
+ * `subscription_checkouts` until a payment is verified or a signed webhook
+ * arrives.
+ */
 async function checkout(sb: SupabaseClient, user: User, body: Json) {
   const planId = planOf(body.plan);
   const razorpayPlan = requirePlanId(planId);
+  const { keyId } = requireRazorpayConfig();
+  const plan = await planRow(sb, planId);
 
   const { data: existingSub, error: existingSubError } = await sb
     .from("subscriptions")
-    .select("*")
+    .select("razorpay_customer_id, razorpay_subscription_id, plan_id, status")
     .eq("user_id", user.id)
     .maybeSingle();
   if (existingSubError) throw dbFailed("Couldn't read your current subscription. Please try again.", "subscription_read_failed");
 
   let customerId = typeof existingSub?.razorpay_customer_id === "string" ? existingSub.razorpay_customer_id : null;
-  if (!customerId) {
-    const customer = await razorpay("/customers", {
-      method: "POST",
-      body: JSON.stringify({ email: user.email, fail_existing: 0 }),
-    });
-    customerId = typeof customer.id === "string" ? customer.id : null;
-    if (!customerId) throw new ApiError(502, "The payment provider didn't return a customer id. Please try again.", "provider_malformed");
+
+  /* Retry-friendly: a checkout the user abandoned less than an hour ago is
+     still in Razorpay's `created` state and can be reopened as-is. This
+     prevents a pile of orphan subscriptions when someone closes the modal
+     and clicks Upgrade again. */
+  const { data: reusable } = await sb
+    .from("subscription_checkouts")
+    .select("razorpay_subscription_id, razorpay_customer_id, created_at")
+    .eq("user_id", user.id)
+    .eq("plan_id", planId)
+    .eq("status", "created")
+    .gte("created_at", new Date(Date.now() - 60 * 60 * 1000).toISOString())
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  let subscriptionId = "";
+  if (reusable?.razorpay_subscription_id) {
+    const remote = await razorpay(`/subscriptions/${reusable.razorpay_subscription_id}`).catch(() => null);
+    if (remote && String(remote.status ?? "") === "created") {
+      subscriptionId = String(remote.id);
+      customerId = customerId ?? (typeof remote.customer_id === "string" ? remote.customer_id : null);
+    }
   }
 
-  const subscription = await razorpay("/subscriptions", {
-    method: "POST",
-    body: JSON.stringify({
-      plan_id: razorpayPlan,
-      total_count: 120,
-      quantity: 1,
-      customer_notify: 0,
-      customer_id: customerId,
-      notes: { user_id: user.id, plan: planId },
-      notify_info: { notify_email: user.email ? [user.email] : [] },
-    }),
+  if (!subscriptionId) {
+    if (!customerId) {
+      const customer = await razorpay("/customers", {
+        method: "POST",
+        body: JSON.stringify({ email: user.email, fail_existing: 0 }),
+      });
+      customerId = typeof customer.id === "string" ? customer.id : null;
+      if (!customerId) throw new ApiError(502, "The payment provider didn't return a customer id. Please try again.", "provider_malformed");
+    }
+
+    const subscription = await razorpay("/subscriptions", {
+      method: "POST",
+      body: JSON.stringify({
+        plan_id: razorpayPlan,
+        total_count: 120,
+        quantity: 1,
+        customer_notify: 0,
+        customer_id: customerId,
+        notes: { user_id: user.id, plan: planId },
+      }),
+    });
+
+    subscriptionId = typeof subscription.id === "string" ? subscription.id : "";
+    if (!subscriptionId) throw new ApiError(502, "The payment provider didn't return a subscription id. Please try again.", "provider_malformed");
+
+    const { error: checkoutWriteError } = await sb.from("subscription_checkouts").upsert(
+      {
+        user_id: user.id,
+        plan_id: planId,
+        razorpay_subscription_id: subscriptionId,
+        razorpay_customer_id: customerId,
+        razorpay_plan_id: typeof subscription.plan_id === "string" ? subscription.plan_id : razorpayPlan,
+        status: "created",
+        amount_cents: plan.price_cents,
+        currency: BILLING_CURRENCY,
+      },
+      { onConflict: "razorpay_subscription_id" },
+    );
+    if (checkoutWriteError) {
+      throw dbFailed("Couldn't start checkout. Please try again.", "checkout_write_failed");
+    }
+  }
+
+  return {
+    keyId,
+    subscriptionId,
+    planId,
+    planLabel: PLAN_LABELS[planId],
+    amount: plan.price_cents,
+    currency: BILLING_CURRENCY,
+    name: "Zybble",
+    description: `${PLAN_LABELS[planId]} plan · monthly`,
+    prefill: { email: user.email ?? "" },
+    method: checkoutMethodConfig(readServerEnv("RAZORPAY_CHECKOUT_METHODS")),
+    notes: { user_id: user.id, plan: planId },
+    themeColor: "#0e7a52",
+  };
+}
+
+/**
+ * Verify a completed on-site checkout and ONLY THEN grant the plan.
+ *
+ * Three independent checks must all pass before a single entitlement row is
+ * written, so a forged browser callback cannot upgrade an account:
+ *   1. the HMAC signature over `payment_id|subscription_id`, computed with
+ *      the server-only key secret;
+ *   2. the subscription must be one this very user started (looked up in
+ *      `subscription_checkouts`);
+ *   3. a fresh read of the subscription AND the payment from Razorpay must
+ *      show a real, captured/authorized INR payment on an active mandate.
+ */
+async function verify(sb: SupabaseClient, user: User, body: Json) {
+  const { secret } = requireRazorpayConfig();
+  const paymentId = String(body.razorpay_payment_id ?? "").trim();
+  const subscriptionId = String(body.razorpay_subscription_id ?? "").trim();
+  const signature = String(body.razorpay_signature ?? "").trim();
+  if (!paymentId || !subscriptionId || !signature) {
+    throw new ApiError(400, "That payment confirmation was incomplete.", "verify_invalid");
+  }
+
+  if (!verifySubscriptionSignature({ paymentId, subscriptionId, signature, secret })) {
+    console.error("billing verify", { code: "signature_mismatch" });
+    throw new ApiError(400, "We couldn't verify that payment. Nothing was changed on your account.", "signature_invalid");
+  }
+
+  const { data: pending, error: pendingError } = await sb
+    .from("subscription_checkouts")
+    .select("*")
+    .eq("razorpay_subscription_id", subscriptionId)
+    .maybeSingle();
+  if (pendingError) throw dbFailed("Couldn't confirm your checkout. Please refresh and try again.", "checkout_read_failed");
+  if (!pending || pending.user_id !== user.id) {
+    throw new ApiError(403, "That payment doesn't belong to your account.", "checkout_mismatch");
+  }
+
+  const remote = await razorpay(`/subscriptions/${subscriptionId}`);
+  const providerStatus = String(remote.status ?? "");
+  const status = mapStatus(providerStatus, "created");
+  if (!["authenticated", "active", "completed"].includes(providerStatus)) {
+    throw new ApiError(402, "That subscription isn't active yet. If you were charged, it will appear here shortly.", "subscription_not_active");
+  }
+
+  const payment = await razorpay(`/payments/${paymentId}`);
+  const paymentStatus = String(payment.status ?? "");
+  if (!["captured", "authorized", "refunded"].includes(paymentStatus)) {
+    throw new ApiError(402, "That payment hasn't been captured. Nothing was changed on your account.", "payment_not_captured");
+  }
+  const currency = String(payment.currency ?? BILLING_CURRENCY).toUpperCase();
+  if (currency !== BILLING_CURRENCY) {
+    console.error("billing verify", { code: "currency_mismatch" });
+    throw new ApiError(400, "That payment used an unsupported currency.", "currency_invalid");
+  }
+
+  const planId = String(pending.plan_id) as PaidPlanId;
+  await applyActiveSubscription(sb, {
+    userId: user.id,
+    planId,
+    providerStatus,
+    status,
+    subscriptionId,
+    customerId: typeof remote.customer_id === "string" ? remote.customer_id : pending.razorpay_customer_id ?? null,
+    razorpayPlanId: typeof remote.plan_id === "string" ? remote.plan_id : pending.razorpay_plan_id ?? null,
+    currentStart: epochToIso(remote.current_start),
+    currentEnd: epochToIso(remote.current_end),
+    chargeAt: epochToIso(remote.charge_at),
+    paymentId,
+    amountMinor: Number(payment.amount ?? pending.amount_cents ?? 0),
+    paymentMethod: typeof payment.method === "string" ? payment.method : null,
+    paymentStatus,
   });
 
-  const subscriptionId = typeof subscription.id === "string" ? subscription.id : "";
-  if (!subscriptionId) throw new ApiError(502, "The payment provider didn't return a subscription id. Please try again.", "provider_malformed");
+  return { ok: true, planId, status, entitled: statusEntitles(status) };
+}
+
+type ApplyInput = {
+  userId: string;
+  planId: PaidPlanId;
+  providerStatus: string;
+  status: string;
+  subscriptionId: string;
+  customerId: string | null;
+  razorpayPlanId: string | null;
+  currentStart: string | null;
+  currentEnd: string | null;
+  chargeAt: string | null;
+  paymentId: string | null;
+  amountMinor: number;
+  paymentMethod: string | null;
+  paymentStatus: string;
+};
+
+/**
+ * Single writer for "this verified Razorpay subscription is now the user's
+ * plan". Idempotent: re-running with the same payment updates the same rows
+ * and cannot duplicate payments or invoices (unique provider ids).
+ */
+async function applyActiveSubscription(sb: SupabaseClient, input: ApplyInput) {
+  const entitled = input.providerStatus === "active" || input.providerStatus === "authenticated";
+  const { data: previous } = await sb
+    .from("subscriptions")
+    .select("id, razorpay_subscription_id")
+    .eq("user_id", input.userId)
+    .maybeSingle();
 
   const { error: upsertError } = await sb.from("subscriptions").upsert(
     {
-      user_id: user.id,
-      plan_id: planId,
-      status: mapStatus(subscription.status, "active"),
-      razorpay_customer_id: customerId,
-      razorpay_subscription_id: subscriptionId,
-      razorpay_plan_id: typeof subscription.plan_id === "string" ? subscription.plan_id : razorpayPlan,
-      current_period_start: typeof subscription.current_start === "number" ? new Date(subscription.current_start * 1000).toISOString() : null,
-      current_period_end: typeof subscription.current_end === "number" ? new Date(subscription.current_end * 1000).toISOString() : null,
+      user_id: input.userId,
+      plan_id: input.planId,
+      status: entitled ? "active" : input.status,
+      currency: BILLING_CURRENCY,
+      razorpay_customer_id: input.customerId,
+      razorpay_subscription_id: input.subscriptionId,
+      razorpay_plan_id: input.razorpayPlanId,
+      current_period_start: input.currentStart,
+      current_period_end: input.currentEnd,
+      charge_at: input.chargeAt,
+      cancel_at: null,
+      cancel_at_cycle_end: false,
+      latest_payment_id: input.paymentId,
+      last_event_at: new Date().toISOString(),
     },
     { onConflict: "user_id" },
   );
-  if (upsertError) throw dbFailed("Checkout started, but we couldn't save your billing details. Please contact support@zybble.com.", "subscription_write_failed");
+  if (upsertError) {
+    console.error("billing write", { code: "subscription_write_failed" });
+    throw dbFailed("Your payment went through, but we couldn't update your plan. Contact support@zybble.com.", "subscription_write_failed");
+  }
 
-  const appUrl = readServerEnv("APP_URL") || "https://zybble.com";
-  const url = typeof subscription.short_url === "string"
-    ? subscription.short_url
-    : typeof subscription.auth_link === "string"
-      ? subscription.auth_link
-      : `${appUrl}/billing`;
-  return { url, subscriptionId };
+  const { data: saved } = await sb
+    .from("subscriptions")
+    .select("id")
+    .eq("user_id", input.userId)
+    .maybeSingle();
+
+  if (input.paymentId) {
+    await sb.from("payments").upsert(
+      {
+        user_id: input.userId,
+        subscription_id: saved?.id ?? null,
+        razorpay_payment_id: input.paymentId,
+        razorpay_subscription_id: input.subscriptionId,
+        amount_cents: input.amountMinor,
+        currency: BILLING_CURRENCY,
+        status: input.paymentStatus === "refunded" ? "refunded" : "captured",
+        method: input.paymentMethod,
+        captured_at: new Date().toISOString(),
+      },
+      { onConflict: "razorpay_payment_id" },
+    );
+
+    await sb.from("invoices").upsert(
+      {
+        user_id: input.userId,
+        subscription_id: saved?.id ?? null,
+        number: invoiceNumber(input.paymentId),
+        description: `${PLAN_LABELS[input.planId]} plan · monthly`,
+        amount_cents: input.amountMinor,
+        currency: BILLING_CURRENCY,
+        status: "paid",
+        razorpay_invoice_id: input.paymentId,
+        razorpay_payment_id: input.paymentId,
+        period_start: input.currentStart,
+        period_end: input.currentEnd,
+      },
+      { onConflict: "razorpay_invoice_id" },
+    );
+  }
+
+  await sb
+    .from("subscription_checkouts")
+    .update({ status: "completed", completed_at: new Date().toISOString() })
+    .eq("razorpay_subscription_id", input.subscriptionId);
+
+  /* Plan change: a user can only hold one live mandate, so the mandate that
+     was replaced is cancelled at the provider. Best-effort — a failure here
+     must never undo a verified upgrade. */
+  const replaced = previous?.razorpay_subscription_id;
+  if (replaced && replaced !== input.subscriptionId) {
+    await razorpay(`/subscriptions/${replaced}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ cancel_at_cycle_end: 0 }),
+    }).catch(() => undefined);
+  }
+
+  const { data: workspace } = await sb
+    .from("workspaces")
+    .select("id")
+    .eq("owner_id", input.userId)
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (workspace?.id) {
+    await sb
+      .from("activity_logs")
+      .insert({
+        workspace_id: workspace.id,
+        actor_id: input.userId,
+        kind: "billing",
+        text: `${PLAN_LABELS[input.planId]} plan activated`,
+      })
+      .then(() => undefined);
+  }
 }
 
+/**
+ * Pull the authoritative state from Razorpay. The database stays the source
+ * of truth for entitlement, but a webhook can be delayed or missed, so the
+ * Billing page reconciles on load. Only provider state can move the plan.
+ */
 async function sync(sb: SupabaseClient, user: User) {
   const { data: sub, error: subError } = await sb
     .from("subscriptions")
@@ -308,24 +588,45 @@ async function sync(sb: SupabaseClient, user: User) {
     .eq("user_id", user.id)
     .maybeSingle();
   if (subError) throw dbFailed("Couldn't read your current subscription. Please try again.", "subscription_read_failed");
-  if (!sub?.razorpay_subscription_id) return { ok: true, status: sub?.status ?? "active" };
+  if (!sub?.razorpay_subscription_id) return { ok: true, status: sub?.status ?? "free" };
 
   const remote = await razorpay(`/subscriptions/${sub.razorpay_subscription_id}`);
-  const status = mapStatus(remote.status, sub.status);
-  const { error: updateError } = await sb
-    .from("subscriptions")
-    .update({
-      status,
-      current_period_start: typeof remote.current_start === "number" ? new Date(remote.current_start * 1000).toISOString() : null,
-      current_period_end: typeof remote.current_end === "number" ? new Date(remote.current_end * 1000).toISOString() : null,
-      cancel_at: typeof remote.schedule_end === "number" ? new Date(remote.schedule_end * 1000).toISOString() : null,
-    })
-    .eq("id", sub.id);
+  const providerStatus = String(remote.status ?? "");
+  const status = mapStatus(providerStatus, sub.status);
+  const currentEnd = epochToIso(remote.current_end);
+
+  const patch: Record<string, unknown> = {
+    status,
+    current_period_start: epochToIso(remote.current_start),
+    current_period_end: currentEnd,
+    charge_at: epochToIso(remote.charge_at),
+    cancel_at: epochToIso(remote.ended_at) ?? (remote.end_at ? epochToIso(remote.end_at) : null),
+    last_event_at: new Date().toISOString(),
+  };
+
+  /* A subscription whose paid period has elapsed must fall back to Free.
+     Entitlement is computed live from status + period end, and the stored
+     plan is normalized here so reporting agrees with it. */
+  if (
+    ["cancelled", "completed", "expired"].includes(status) &&
+    (!currentEnd || new Date(currentEnd).getTime() <= Date.now())
+  ) {
+    patch.plan_id = "free";
+    patch.status = "expired";
+    patch.cancel_at_cycle_end = false;
+  }
+
+  const { error: updateError } = await sb.from("subscriptions").update(patch).eq("id", sub.id);
   if (updateError) throw dbFailed("Couldn't update your billing status. Please try again.", "subscription_write_failed");
 
-  return { ok: true, status };
+  return { ok: true, status: String(patch.status ?? status) };
 }
 
+/**
+ * Cancel at the end of the paid cycle. The row stays entitled until
+ * `current_period_end` (see effective_plan_for_user()), and Razorpay's
+ * `subscription.cancelled` webhook finalizes it when the cycle actually ends.
+ */
 async function cancel(sb: SupabaseClient, user: User) {
   const { data: sub, error: subError } = await sb
     .from("subscriptions")
@@ -342,11 +643,21 @@ async function cancel(sb: SupabaseClient, user: User) {
 
   const { error: updateError } = await sb
     .from("subscriptions")
-    .update({ status: "cancelled", cancel_at: new Date().toISOString() })
+    .update({
+      cancel_at_cycle_end: true,
+      cancel_at: sub.current_period_end ?? new Date().toISOString(),
+      last_event_at: new Date().toISOString(),
+    })
     .eq("id", sub.id);
   if (updateError) throw dbFailed("Couldn't update your cancellation status. Please contact support@zybble.com.", "subscription_write_failed");
 
-  const { data: workspace } = await sb.from("workspaces").select("id").eq("owner_id", user.id).limit(1).single();
+  const { data: workspace } = await sb
+    .from("workspaces")
+    .select("id")
+    .eq("owner_id", user.id)
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
   if (workspace?.id) {
     await sb.from("activity_logs").insert({
       workspace_id: workspace.id,
@@ -356,7 +667,7 @@ async function cancel(sb: SupabaseClient, user: User) {
     }).then(() => undefined);
   }
 
-  return { ok: true };
+  return { ok: true, cancelAtCycleEnd: true, accessUntil: sub.current_period_end ?? null };
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -374,11 +685,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const sb = serviceClient();
     const user = await requireCaller(sb, token);
 
-    const result = action === "checkout"
-      ? await checkout(sb, user, body)
-      : action === "sync"
-        ? await sync(sb, user)
-        : await cancel(sb, user);
+    const result =
+      action === "checkout"
+        ? await checkout(sb, user, body)
+        : action === "verify"
+          ? await verify(sb, user, body)
+          : action === "sync"
+            ? await sync(sb, user)
+            : await cancel(sb, user);
 
     return res.status(200).json(result);
   } catch (error) {

@@ -85,7 +85,10 @@ function isDeploymentClassification(message: string): boolean {
  * server at all".
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function readBillingError(error: any, action: "checkout" | "sync" | "cancel"): Promise<string> {
+export async function readBillingError(
+  error: any,
+  action: "checkout" | "verify" | "sync" | "cancel",
+): Promise<string> {
   const detail = await readFunctionError(error, "billing", "billing");
   if (isDeploymentClassification(detail)) {
     console.error("billing request unreachable", { action, detail });

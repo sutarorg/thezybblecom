@@ -53,11 +53,22 @@ function client(token: string): SupabaseClient {
 function escapeHtml(text: string) {
   return text.replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]!));
 }
+/**
+ * The workspace OWNER always counts as an owner, even if the membership row
+ * is missing (legacy/partial provisioning) — that mismatch is exactly what
+ * used to lock owners out of their own team page.
+ */
 async function requireAdmin(sb: SupabaseClient, workspaceId: string, userId: string) {
-  const { data, error } = await sb.from("workspace_members").select("role").eq("workspace_id", workspaceId).eq("user_id", userId).maybeSingle();
-  if (error || !data) throw new ApiError(403, "You don't have access to that workspace.", "workspace_forbidden");
-  if (!["owner", "admin"].includes(data.role)) throw new ApiError(403, "Only a workspace owner or admin can invite members.", "role_forbidden");
-  return data.role as string;
+  const [{ data: membership }, { data: workspace }] = await Promise.all([
+    sb.from("workspace_members").select("role").eq("workspace_id", workspaceId).eq("user_id", userId).maybeSingle(),
+    sb.from("workspaces").select("owner_id").eq("id", workspaceId).maybeSingle(),
+  ]);
+  if (workspace?.owner_id === userId) return "owner";
+  if (!membership) throw new ApiError(403, "You don't have access to that workspace.", "workspace_forbidden");
+  if (!["owner", "admin"].includes(membership.role)) {
+    throw new ApiError(403, "Only a workspace owner or admin can invite members.", "role_forbidden");
+  }
+  return membership.role as string;
 }
 async function sendInviteEmail(opts: { to: string; subject: string; html: string }) {
   const key = readServerEnv("RESEND_API_KEY");
@@ -103,20 +114,45 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (authError || !auth.user) throw new ApiError(401, "Your session expired — sign in again.", "auth_invalid");
     await requireAdmin(sb, workspaceId, auth.user.id);
 
-    const [{ data: ws }, { data: profile }, { data: sub }] = await Promise.all([
+    const [{ data: ws }, { data: profile }] = await Promise.all([
       sb.from("workspaces").select("name, owner_id").eq("id", workspaceId).maybeSingle(),
       sb.from("profiles").select("name").eq("id", auth.user.id).maybeSingle(),
-      sb.from("subscriptions").select("plan_id, status").eq("user_id", auth.user.id).maybeSingle(),
     ]);
     if (!ws) throw new ApiError(404, "Workspace not found.", "workspace_not_found");
-    const planId = sub && ["active", "trialing"].includes(sub.status) ? sub.plan_id : "free";
-    const { data: plan } = await sb.from("plans").select("max_users").eq("id", planId).maybeSingle();
-    const maxUsers = plan?.max_users ?? 1;
-    const [{ count: activeCount }, { count: pendingCount }] = await Promise.all([
-      sb.from("workspace_members").select("user_id", { count: "exact", head: true }).eq("workspace_id", workspaceId),
-      sb.from("workspace_invitations").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("status", "pending"),
-    ]);
-    if ((activeCount ?? 0) + (pendingCount ?? 0) >= maxUsers) {
+
+    /* Seats are governed by the WORKSPACE OWNER's effective plan — the same
+       rule the enforce_seat_limit() trigger applies — so an admin member
+       inviting into an Agency workspace gets the Agency seat count, not the
+       Free count of their own account. A pending invitation holds a seat. */
+    const { data: seatRows, error: seatError } = await sb.rpc("workspace_seat_usage", { ws: workspaceId });
+    let maxUsers = 1;
+    let used = 0;
+    if (!seatError && Array.isArray(seatRows) && seatRows.length > 0) {
+      const row = seatRows[0] as { max_users?: number; active_members?: number; pending_invites?: number };
+      maxUsers = Number(row.max_users ?? 1);
+      used = Number(row.active_members ?? 0) + Number(row.pending_invites ?? 0);
+    } else {
+      const { data: ownerSub } = await sb
+        .from("subscriptions")
+        .select("plan_id, status, current_period_end")
+        .eq("user_id", ws.owner_id)
+        .maybeSingle();
+      const entitled =
+        ownerSub &&
+        (["active", "trialing"].includes(ownerSub.status) ||
+          (["cancelled", "completed"].includes(ownerSub.status) &&
+            ownerSub.current_period_end &&
+            new Date(ownerSub.current_period_end).getTime() > Date.now()));
+      const planId = entitled ? ownerSub!.plan_id : "free";
+      const { data: plan } = await sb.from("plans").select("max_users").eq("id", planId).maybeSingle();
+      maxUsers = plan?.max_users ?? 1;
+      const [{ count: activeCount }, { count: pendingCount }] = await Promise.all([
+        sb.from("workspace_members").select("user_id", { count: "exact", head: true }).eq("workspace_id", workspaceId),
+        sb.from("workspace_invitations").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("status", "pending"),
+      ]);
+      used = (activeCount ?? 0) + (pendingCount ?? 0);
+    }
+    if (used >= maxUsers) {
       throw new ApiError(403, `Your current plan includes ${maxUsers} ${maxUsers === 1 ? "seat" : "seats"}.`, "seat_limit");
     }
 
