@@ -68,6 +68,25 @@ const BillingPage = lazy(() => import("./app/pages/Billing").then((m) => ({ defa
 const UsagePage = lazy(() => import("./app/pages/Usage").then((m) => ({ default: m.UsagePage })));
 const SettingsPage = lazy(() => import("./app/pages/Settings").then((m) => ({ default: m.SettingsPage })));
 
+/* Admin console — lazily loaded so none of it is in the customer bundle. */
+const AdminLayout = lazy(() => import("./app/admin/AdminLayout").then((m) => ({ default: m.AdminLayout })));
+const AdminDashboard = lazy(() => import("./app/admin/pages/Dashboard").then((m) => ({ default: m.AdminDashboard })));
+const AdminUsers = lazy(() => import("./app/admin/pages/Users").then((m) => ({ default: m.AdminUsers })));
+const AdminUserDetail = lazy(() => import("./app/admin/pages/UserDetail").then((m) => ({ default: m.AdminUserDetail })));
+const AdminWorkspaces = lazy(() => import("./app/admin/pages/Workspaces").then((m) => ({ default: m.AdminWorkspaces })));
+const AdminWorkspaceDetail = lazy(() => import("./app/admin/pages/WorkspaceDetail").then((m) => ({ default: m.AdminWorkspaceDetail })));
+const AdminBilling = lazy(() => import("./app/admin/pages/Billing").then((m) => ({ default: m.AdminBilling })));
+const AdminPlans = lazy(() => import("./app/admin/pages/Plans").then((m) => ({ default: m.AdminPlans })));
+const AdminSearches = lazy(() => import("./app/admin/pages/Searches").then((m) => ({ default: m.AdminSearches })));
+const AdminSearchDetail = lazy(() => import("./app/admin/pages/Searches").then((m) => ({ default: m.AdminSearchDetail })));
+const AdminLeads = lazy(() => import("./app/admin/pages/Leads").then((m) => ({ default: m.AdminLeads })));
+const AdminUsage = lazy(() => import("./app/admin/pages/Usage").then((m) => ({ default: m.AdminUsage })));
+const AdminAi = lazy(() => import("./app/admin/pages/Ai").then((m) => ({ default: m.AdminAi })));
+const AdminWebhooks = lazy(() => import("./app/admin/pages/Webhooks").then((m) => ({ default: m.AdminWebhooks })));
+const AdminAuditLogs = lazy(() => import("./app/admin/pages/AuditLogs").then((m) => ({ default: m.AdminAuditLogs })));
+const AdminSystem = lazy(() => import("./app/admin/pages/System").then((m) => ({ default: m.AdminSystem })));
+const AdminSettings = lazy(() => import("./app/admin/pages/Settings").then((m) => ({ default: m.AdminSettings })));
+
 /* ------------------------------------------------------------------ */
 /* Marketing home                                                      */
 /* ------------------------------------------------------------------ */
@@ -182,6 +201,34 @@ VITE_SUPABASE_PUBLISHABLE_KEY`}
   );
 }
 
+/**
+ * Admin console gate.
+ *
+ * This is PRESENTATION ONLY. It hides a UI that the user could not use
+ * anyway: every /api/admin/* request independently verifies the Supabase
+ * JWT and re-reads profiles.role server-side before touching any data.
+ * Editing client state or typing the URL therefore grants nothing.
+ */
+function AdminOnly({ children }: { children: ReactNode }) {
+  const user = useAuthUser();
+  const location = useLocation();
+
+  if (!BACKEND_ENABLED) return <BackendMissing />;
+  if (user === "loading") return <Splash label="Checking your access…" />;
+  if (!user) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  if (!user.isAdmin) return <Navigate to="/overview" replace />;
+
+  return (
+    <ErrorBoundary>
+      <ToastProvider>
+        <Suspense fallback={<Splash label="Loading the admin console…" />}>
+          <AdminLayout user={user}>{children}</AdminLayout>
+        </Suspense>
+      </ToastProvider>
+    </ErrorBoundary>
+  );
+}
+
 /** Auth screens redirect away once a session exists. */
 function PublicOnly({ children }: { children: ReactNode }) {
   const user = useAuthUser();
@@ -228,6 +275,12 @@ function NavigationBridge() {
  * Hash routes were used by an earlier app shell. Keep old bookmarks working,
  * but immediately replace them with clean paths on every page.
  */
+/** Billing tab (summary | subscriptions | payments | invoices). */
+function AdminBillingRoute() {
+  const { view } = useParams();
+  return <AdminBilling view={view} />;
+}
+
 function LegacyHashRouteRedirect() {
   const navigate = useNavigate();
 
@@ -298,6 +351,26 @@ export function RoutedApp() {
         <Route path="/billing" element={<Protected><BillingPage /></Protected>} />
         <Route path="/usage" element={<Protected><UsagePage /></Protected>} />
         <Route path="/settings" element={<Protected><SettingsPage /></Protected>} />
+
+        {/* Admin console. Clean paths, so every one of these survives a
+            hard refresh via the existing SPA rewrite in vercel.json. */}
+        <Route path="/admin" element={<AdminOnly><AdminDashboard /></AdminOnly>} />
+        <Route path="/admin/users" element={<AdminOnly><AdminUsers /></AdminOnly>} />
+        <Route path="/admin/users/:id" element={<AdminOnly><AdminUserDetail /></AdminOnly>} />
+        <Route path="/admin/workspaces" element={<AdminOnly><AdminWorkspaces /></AdminOnly>} />
+        <Route path="/admin/workspaces/:id" element={<AdminOnly><AdminWorkspaceDetail /></AdminOnly>} />
+        <Route path="/admin/billing" element={<AdminOnly><AdminBilling /></AdminOnly>} />
+        <Route path="/admin/billing/:view" element={<AdminOnly><AdminBillingRoute /></AdminOnly>} />
+        <Route path="/admin/plans" element={<AdminOnly><AdminPlans /></AdminOnly>} />
+        <Route path="/admin/searches" element={<AdminOnly><AdminSearches /></AdminOnly>} />
+        <Route path="/admin/searches/:id" element={<AdminOnly><AdminSearchDetail /></AdminOnly>} />
+        <Route path="/admin/leads" element={<AdminOnly><AdminLeads /></AdminOnly>} />
+        <Route path="/admin/usage" element={<AdminOnly><AdminUsage /></AdminOnly>} />
+        <Route path="/admin/ai" element={<AdminOnly><AdminAi /></AdminOnly>} />
+        <Route path="/admin/webhooks" element={<AdminOnly><AdminWebhooks /></AdminOnly>} />
+        <Route path="/admin/audit-logs" element={<AdminOnly><AdminAuditLogs /></AdminOnly>} />
+        <Route path="/admin/system" element={<AdminOnly><AdminSystem /></AdminOnly>} />
+        <Route path="/admin/settings" element={<AdminOnly><AdminSettings /></AdminOnly>} />
 
         <Route path="*" element={<NotFoundPage />} />
       </Routes>

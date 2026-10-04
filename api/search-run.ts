@@ -185,6 +185,11 @@ async function reserveLeads(sb: SupabaseClient, workspaceId: string, delta: numb
   if (error) throw new ApiError(500, "Usage accounting failed — try again.", "usage_failed");
   if (data === -1) throw new ApiError(403, "You don't have access to that workspace.", "workspace_forbidden");
   if (data === -2) throw new ApiError(429, "You've reached your monthly lead limit.", "quota_exceeded");
+  // -3 is returned by reserve_leads() when the workspace owner's account has
+  // been suspended by an administrator (see migration 0008).
+  if (data === -3) {
+    throw new ApiError(403, "This account is suspended. Contact Zybble support.", "account_suspended");
+  }
 }
 
 async function refundLeads(sb: SupabaseClient, workspaceId: string, count: number) {

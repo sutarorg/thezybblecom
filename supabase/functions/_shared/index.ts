@@ -195,6 +195,8 @@ export async function reserveLeads(
   if (error) throw new HttpError(500, "Usage accounting failed — try again.");
   if (data === -1) throw new HttpError(403, "You don't have access to that workspace.");
   if (data === -2) throw new HttpError(429, "You've reached your monthly lead limit.");
+  // -3: the workspace owner's account was suspended by an administrator.
+  if (data === -3) throw new HttpError(403, "This account is suspended. Contact Zybble support.");
   return data as number;
 }
 

@@ -25,7 +25,8 @@ describe("migration set", () => {
   it("adds every repair as a NEW migration rather than editing deployed ones", () => {
     expect(files).toContain("0006_team_workspace_billing_repair.sql");
     expect(files).toContain("0007_membership_security_and_invitations.sql");
-    expect(files[files.length - 1]).toBe("0007_membership_security_and_invitations.sql");
+    expect(files).toContain("0008_admin_console.sql");
+    expect(files[files.length - 1]).toBe("0008_admin_console.sql");
   });
 
   it("never disables row level security", () => {
