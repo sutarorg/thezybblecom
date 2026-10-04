@@ -63,9 +63,13 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
-/* Scroll reveal — deliberately almost invisible                       */
+/* Scroll reveal — deliberately almost invisible.                      */
+/* Hiding is gated on html.js (set by an inline script in index.html)  */
+/* so prerendered static HTML remains fully visible to crawlers and    */
+/* no-JS visitors; browsers with JS get the exact same animation as    */
+/* before.                                                             */
 /* ------------------------------------------------------------------ */
-.reveal {
+html.js .reveal {
   opacity: 0;
   transform: translateY(14px);
   transition:
@@ -73,7 +77,7 @@ body {
     transform 0.9s cubic-bezier(0.22, 1, 0.36, 1);
   transition-delay: var(--reveal-delay, 0ms);
 }
-.reveal.is-visible {
+html.js .reveal.is-visible {
   opacity: 1;
   transform: translateY(0);
 }

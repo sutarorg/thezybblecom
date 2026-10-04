@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, type ReactNode } from "react";
 import {
   BrowserRouter,
   Navigate,
@@ -25,9 +25,12 @@ import { Pricing } from "./sections/Pricing";
 import { Faq } from "./sections/Faq";
 import { FinalCta, Footer } from "./sections/Closing";
 import ContactPage from "./pages/Contact";
+import BlogPage from "./pages/Blog";
+import BlogPostPage from "./pages/BlogPost";
 import { PrivacyPage, TermsPage } from "./pages/Legal";
 import { Assistant } from "./assistant/Assistant";
 import { usePageSeo, useScrollToHash } from "./lib/hooks";
+import { homeMeta } from "./seo/meta";
 import { legacyHashRouteToPath } from "./lib/legacy-route";
 
 /* app */
@@ -36,37 +39,40 @@ import { ZybbleMark } from "./components/primitives";
 import { ErrorBoundary } from "./app/components/ErrorBoundary";
 import { BACKEND_ENABLED } from "./app/services/api";
 import { ToastProvider } from "./app/components/ui";
-import { CommandPalette } from "./app/components/CommandPalette";
 import { registerNavigate } from "./app/hooks";
 import { useAuthUser } from "./app/services/hooks";
-import { LoginPage, ResetPage, SignupPage } from "./app/pages/Auth";
-import { OverviewPage } from "./app/pages/Overview";
-import { FindPage } from "./app/pages/Find";
-import { SearchHistoryPage } from "./app/pages/SearchHistory";
-import { LeadsPage } from "./app/pages/Leads";
-import { LeadDetailPage } from "./app/pages/LeadDetail";
-import { ListsPage } from "./app/pages/Lists";
-import { ListDetailPage } from "./app/pages/ListDetail";
-import { ExportsPage } from "./app/pages/Exports";
-import { TeamPage } from "./app/pages/Team";
-import { WorkspacesPage } from "./app/pages/Workspaces";
-import { WorkspaceDetailPage } from "./app/pages/WorkspaceDetail";
-import { BillingPage } from "./app/pages/Billing";
-import { UsagePage } from "./app/pages/Usage";
-import { SettingsPage } from "./app/pages/Settings";
 import { NotFoundPage } from "./app/pages/NotFound";
+
+/* The authenticated application is code-split away from the marketing
+   bundle: visitors reading the homepage or blog never download the app
+   pages, and the prerendered marketing routes stay lean. Each chunk loads
+   on first navigation into the app (behind the auth gates below, which
+   provide the Suspense boundary + splash). */
+const CommandPalette = lazy(() =>
+  import("./app/components/CommandPalette").then((m) => ({ default: m.CommandPalette })));
+const LoginPage = lazy(() => import("./app/pages/Auth").then((m) => ({ default: m.LoginPage })));
+const SignupPage = lazy(() => import("./app/pages/Auth").then((m) => ({ default: m.SignupPage })));
+const ResetPage = lazy(() => import("./app/pages/Auth").then((m) => ({ default: m.ResetPage })));
+const OverviewPage = lazy(() => import("./app/pages/Overview").then((m) => ({ default: m.OverviewPage })));
+const FindPage = lazy(() => import("./app/pages/Find").then((m) => ({ default: m.FindPage })));
+const SearchHistoryPage = lazy(() => import("./app/pages/SearchHistory").then((m) => ({ default: m.SearchHistoryPage })));
+const LeadsPage = lazy(() => import("./app/pages/Leads").then((m) => ({ default: m.LeadsPage })));
+const LeadDetailPage = lazy(() => import("./app/pages/LeadDetail").then((m) => ({ default: m.LeadDetailPage })));
+const ListsPage = lazy(() => import("./app/pages/Lists").then((m) => ({ default: m.ListsPage })));
+const ListDetailPage = lazy(() => import("./app/pages/ListDetail").then((m) => ({ default: m.ListDetailPage })));
+const ExportsPage = lazy(() => import("./app/pages/Exports").then((m) => ({ default: m.ExportsPage })));
+const TeamPage = lazy(() => import("./app/pages/Team").then((m) => ({ default: m.TeamPage })));
+const WorkspacesPage = lazy(() => import("./app/pages/Workspaces").then((m) => ({ default: m.WorkspacesPage })));
+const WorkspaceDetailPage = lazy(() => import("./app/pages/WorkspaceDetail").then((m) => ({ default: m.WorkspaceDetailPage })));
+const BillingPage = lazy(() => import("./app/pages/Billing").then((m) => ({ default: m.BillingPage })));
+const UsagePage = lazy(() => import("./app/pages/Usage").then((m) => ({ default: m.UsagePage })));
+const SettingsPage = lazy(() => import("./app/pages/Settings").then((m) => ({ default: m.SettingsPage })));
 
 /* ------------------------------------------------------------------ */
 /* Marketing home                                                      */
 /* ------------------------------------------------------------------ */
 function Home() {
-  usePageSeo({
-    title:
-      "Zybble — Find the businesses you need. Turn them into usable leads.",
-    description:
-      "Zybble turns one plain-language request into an organized business lead list. Describe the businesses you want, get structured lead data, analyze it with AI, and export it as CSV.",
-    path: "/",
-  });
+  usePageSeo(homeMeta());
 
   return (
     <>
@@ -116,8 +122,10 @@ function Protected({ children }: { children: ReactNode }) {
   return (
     <ErrorBoundary>
       <ToastProvider>
-        {children}
-        <CommandPalette />
+        <Suspense fallback={<Splash />}>
+          {children}
+          <CommandPalette />
+        </Suspense>
       </ToastProvider>
     </ErrorBoundary>
   );
@@ -176,7 +184,9 @@ function PublicOnly({ children }: { children: ReactNode }) {
   if (user) return <Navigate to={from && from !== "/login" ? from : "/overview"} replace />;
   return (
     <ErrorBoundary>
-      <ToastProvider>{children}</ToastProvider>
+      <ToastProvider>
+        <Suspense fallback={<Splash label="Loading…" />}>{children}</Suspense>
+      </ToastProvider>
     </ErrorBoundary>
   );
 }
@@ -227,7 +237,13 @@ function LegacyHashRouteRedirect() {
   return null;
 }
 
-function RoutedApp() {
+/**
+ * The routed application without a router around it. Exported so the
+ * build-time prerenderer (src/entry-prerender.tsx) can render the public
+ * marketing routes to static HTML with a StaticRouter, while the browser
+ * entry keeps using BrowserRouter below.
+ */
+export function RoutedApp() {
   useScrollToHash();
   return (
     <>
@@ -248,6 +264,8 @@ function RoutedApp() {
       <Routes>
         {/* marketing */}
         <Route path="/" element={<Home />} />
+        <Route path="/blog" element={<BlogPage />} />
+        <Route path="/blog/:slug" element={<BlogPostPage />} />
         <Route path="/contact" element={<ContactPage />} />
         <Route path="/privacy" element={<PrivacyPage />} />
         <Route path="/terms" element={<TermsPage />} />

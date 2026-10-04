@@ -1,4 +1,7 @@
 # SPA fallback for client-side routes (/find, /leads, /lists, …).
-# API routes must pass through untouched — never serve index.html for /api/*.
+# Public marketing routes (/, /blog, /blog/<slug>, /contact, /privacy,
+# /terms) are prerendered static files and served directly; everything
+# else falls back to the noindex app shell. API routes must pass through
+# untouched — never serve a shell for /api/*.
 /api/*    /api/:splat    200
-/*        /index.html    200
+/*        /app.html      200

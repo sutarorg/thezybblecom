@@ -217,7 +217,7 @@ export const NAV_LINKS = [
   { label: "Product", href: "/#product" },
   { label: "How it works", href: "/#how-it-works" },
   { label: "Pricing", href: "/#pricing" },
-  { label: "FAQ", href: "/#faq" },
+  { label: "Blog", href: "/blog" },
 ];
 
 export const FOOTER_COLS: {
@@ -235,6 +235,7 @@ export const FOOTER_COLS: {
   {
     title: "Resources",
     links: [
+      { label: "Blog", href: "/blog" },
       { label: "How it works", href: "/#how-it-works" },
       { label: "FAQ", href: "/#faq" },
       { label: "Contact", href: "/contact" },

@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 import { SubpageShell } from "../components/SubpageShell";
 import { Reveal } from "../components/primitives";
 import { usePageSeo } from "../lib/hooks";
+import { privacyMeta, termsMeta } from "../seo/meta";
 import { CONTACT_EMAIL } from "../lib/site";
 
 function LegalSection({
@@ -44,12 +45,7 @@ function LegalSection({
 }
 
 export function PrivacyPage() {
-  usePageSeo({
-    title: "Privacy Policy — Zybble",
-    description:
-      "How Zybble collects, uses, stores, and deletes account and usage data — and the control you keep over your searches, lead lists, and exports.",
-    path: "/privacy",
-  });
+  usePageSeo(privacyMeta());
 
   return (
     <SubpageShell
@@ -135,12 +131,7 @@ export function PrivacyPage() {
 }
 
 export function TermsPage() {
-  usePageSeo({
-    title: "Terms of Service — Zybble",
-    description:
-      "The contract for Zybble: your account, what the product provides, fair use of monthly limits, acceptable use, data ownership, and cancellation.",
-    path: "/terms",
-  });
+  usePageSeo(termsMeta());
 
   return (
     <SubpageShell

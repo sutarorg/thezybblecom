@@ -4,7 +4,6 @@ import { fileURLToPath } from "url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv, type Plugin } from "vite";
-import { viteSingleFile } from "vite-plugin-singlefile";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -75,8 +74,13 @@ function safeJson(raw: string): unknown {
 }
 
 // https://vite.dev/config/
+// NOTE: the former vite-plugin-singlefile inlining was removed deliberately:
+// hashed, immutable /assets files are shared by every prerendered page and
+// cached across routes, where a ~1 MB inlined index.html had to be
+// re-downloaded per navigation and per prerendered route. This is both the
+// CWV-friendly and the prerender-friendly shape.
 export default defineConfig(({ mode }) => ({
-  plugins: [react(), tailwindcss(), viteSingleFile(), vercelApiDev(mode)],
+  plugins: [react(), tailwindcss(), vercelApiDev(mode)],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "src"),
