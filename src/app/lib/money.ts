@@ -1,30 +1,41 @@
 /* ------------------------------------------------------------------ */
 /* Zybble — money formatting.                                          */
 /*                                                                     */
-/* Zybble bills in INR only. Every amount that crosses Razorpay, the   */
-/* database (`price_cents`, `amount_cents`) or this module is stored   */
-/* in the SMALLEST currency unit — paise. 4900 paise = ₹49.00.         */
+/* Plan prices listed on the site (PLANS in src/lib/site.ts) are in    */
+/* US DOLLARS — whole-dollar amounts formatted with `formatDollars`.   */
+/*                                                                     */
+/* Backend billing (Razorpay, `price_cents`, `amount_cents`) stores    */
+/* every amount in the SMALLEST currency unit of its billing currency  */
+/* (currently paise). 4900 paise = ₹49.00. Format those with           */
+/* `formatMoney`.                                                      */
 /* ------------------------------------------------------------------ */
 
+/** Currency backend amounts are billed in (Razorpay / database). */
 export const BILLING_CURRENCY = "INR" as const;
 
-/** Format a paise amount as Indian Rupees, e.g. 4900 → "₹49". */
+/** Currency plan prices are listed in on the marketing site and in-app. */
+export const LIST_CURRENCY = "USD" as const;
+
+/** Format a minor-unit amount, e.g. 4900 → "₹49" (INR) or "$49" (USD). */
 export function formatMoney(minorUnits: number, currency: string = BILLING_CURRENCY): string {
   const amount = Number.isFinite(minorUnits) ? minorUnits / 100 : 0;
-  const hasPaise = Math.round(amount * 100) % 100 !== 0;
+  const hasMinorUnits = Math.round(amount * 100) % 100 !== 0;
+  const code = (currency || BILLING_CURRENCY).toUpperCase();
+  const locale = code === "INR" ? "en-IN" : "en-US";
   try {
-    return new Intl.NumberFormat("en-IN", {
+    return new Intl.NumberFormat(locale, {
       style: "currency",
-      currency: (currency || BILLING_CURRENCY).toUpperCase(),
-      minimumFractionDigits: hasPaise ? 2 : 0,
+      currency: code,
+      minimumFractionDigits: hasMinorUnits ? 2 : 0,
       maximumFractionDigits: 2,
     }).format(amount);
   } catch {
-    return `₹${amount.toFixed(hasPaise ? 2 : 0)}`;
+    const symbol = code === "INR" ? "₹" : "$";
+    return `${symbol}${amount.toFixed(hasMinorUnits ? 2 : 0)}`;
   }
 }
 
-/** Format a whole-rupee amount (what the marketing plan cards store). */
-export function formatRupees(rupees: number): string {
-  return formatMoney(Math.round(rupees * 100));
+/** Format a whole-dollar plan price (what the marketing plan cards store), e.g. 49 → "$49". */
+export function formatDollars(dollars: number): string {
+  return formatMoney(Math.round(dollars * 100), LIST_CURRENCY);
 }

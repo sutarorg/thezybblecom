@@ -2,7 +2,7 @@ import { Check } from "lucide-react";
 import { cn } from "../utils/cn";
 import { PLANS } from "../lib/site";
 import { Reveal, SectionHeading, SourceStrip } from "../components/primitives";
-import { formatRupees } from "../app/lib/money";
+import { formatDollars } from "../app/lib/money";
 
 export function Pricing() {
   return (
@@ -45,7 +45,7 @@ export function Pricing() {
                 </h3>
                 <p className="mt-4 flex items-baseline gap-1">
                   <span className="font-display text-[2.1rem] leading-none font-semibold tracking-[-0.03em]">
-                    {formatRupees(plan.price)}
+                    {formatDollars(plan.price)}
                   </span>
                   <span className="text-[13px] text-ink-mute">/mo</span>
                 </p>
