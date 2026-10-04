@@ -71,12 +71,12 @@ function PrefRow({
 
 function SelectField({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: string[] }) {
   return (
-    <div>
+    <div className="min-w-0">
       <FieldLabel>{label}</FieldLabel>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="h-8 w-full rounded border border-black/[0.09] bg-white px-2 text-xs text-ink outline-none transition-colors focus:border-brand-600/50"
+        className="h-8 w-full min-w-0 max-w-full rounded border border-black/[0.09] bg-white px-2 text-xs text-ink outline-none transition-colors focus:border-brand-600/50"
       >
         {options.map((o) => (
           <option key={o}>{o}</option>
@@ -190,11 +190,12 @@ export function SettingsPage() {
       {ctxLoading || !user ? (
         <SettingsSkeleton />
       ) : (
-      <div className="grid gap-3 lg:grid-cols-[200px_minmax(0,1fr)]">
-        {/* tab rail */}
-        <nav aria-label="Settings sections" className="lg:sticky lg:top-[60px] lg:self-start">
+      <div className="grid min-w-0 gap-3 lg:grid-cols-[200px_minmax(0,1fr)]">
+        {/* tab rail — a hidden-scrollbar horizontal rail on mobile, a
+            sticky vertical list from lg up. */}
+        <nav aria-label="Settings sections" className="min-w-0 lg:sticky lg:top-[60px] lg:self-start">
           <Card className="p-1.5">
-            <ul className="flex gap-1 overflow-x-auto thin-scroll lg:flex-col">
+            <ul className="no-scrollbar flex gap-1 overflow-x-auto overscroll-x-contain lg:flex-col lg:overflow-x-visible">
               {TABS.map((t) => {
                 const Icon = t.icon;
                 const active = tab === t.id;
@@ -230,19 +231,19 @@ export function SettingsPage() {
               <div className="space-y-4 px-4 py-5 sm:px-5">
                 <div className="flex items-center gap-3">
                   <Avatar name={name || "?"} tint="bg-brand-50 text-brand-700" src={user?.avatarUrl} size="lg" />
-                  <div>
-                    <p className="text-xs font-medium text-ink">{name || "—"}</p>
-                    <p className="mt-0.5 text-[10.5px] text-neutral-400">
+                  <div className="min-w-0">
+                    <p className="truncate text-xs font-medium text-ink">{name || "—"}</p>
+                    <p className="mt-0.5 text-[10.5px] leading-4 text-neutral-400">
                       Your initials are shown across shared workspaces.
                     </p>
                   </div>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
-                  <div>
+                  <div className="min-w-0">
                     <FieldLabel htmlFor="set-name">Full name</FieldLabel>
                     <Input id="set-name" value={name} onChange={(e) => setName(e.target.value)} />
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <FieldLabel htmlFor="set-email">Email</FieldLabel>
                     <Input id="set-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
                   </div>
@@ -269,20 +270,25 @@ export function SettingsPage() {
                     ["Plan", `${plan.label} — $${(plan.priceCents / 100).toFixed(0)}/month`],
                     ["Workspace", workspace?.name ?? "—"],
                   ].map(([label, value]) => (
-                    <div key={label} className="flex items-center justify-between gap-4 py-3">
-                      <dt className="text-[11px] text-ink-mute">{label}</dt>
-                      <dd className="text-xs font-medium text-ink">{value}</dd>
+                    <div
+                      key={label}
+                      className="flex flex-col gap-0.5 py-3 min-[420px]:flex-row min-[420px]:items-center min-[420px]:justify-between min-[420px]:gap-4"
+                    >
+                      <dt className="shrink-0 text-[11px] text-ink-mute">{label}</dt>
+                      <dd className="min-w-0 break-words text-xs font-medium text-ink min-[420px]:text-right">
+                        {value}
+                      </dd>
                     </div>
                   ))}
                 </dl>
               </Card>
               <Card className="flex flex-wrap items-center gap-3 px-4 py-3 sm:px-5">
-                <LogOut className="size-4 text-neutral-300" aria-hidden="true" />
-                <div className="min-w-0 flex-1">
+                <LogOut className="size-4 shrink-0 text-neutral-300" aria-hidden="true" />
+                <div className="min-w-0 grow basis-40">
                   <p className="text-xs font-medium text-ink">Sign out of Zybble</p>
-                  <p className="text-[11px] text-ink-mute">You'll return to the login screen.</p>
+                  <p className="text-[11px] leading-4.5 text-ink-mute">You'll return to the login screen.</p>
                 </div>
-                <Btn variant="outline" size="sm" onClick={async () => { await signOut(); navigate("/login", { replace: true }); }}>
+                <Btn variant="outline" size="sm" className="shrink-0" onClick={async () => { await signOut(); navigate("/login", { replace: true }); }}>
                   Log out
                 </Btn>
               </Card>
@@ -296,11 +302,11 @@ export function SettingsPage() {
               </div>
               <div className="space-y-4 px-4 py-5 sm:px-5">
                 <div className="grid gap-3 sm:grid-cols-2">
-                  <div>
+                  <div className="min-w-0">
                     <FieldLabel htmlFor="ws-name-set">Workspace name</FieldLabel>
                     <Input id="ws-name-set" value={wsName} onChange={(e) => setWsName(e.target.value)} />
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <FieldLabel htmlFor="ws-plan">Plan</FieldLabel>
                     <Input id="ws-plan" value={plan.label} readOnly disabled />
                   </div>
@@ -347,7 +353,7 @@ export function SettingsPage() {
                 </div>
                 <div className="space-y-3 px-4 py-5 sm:px-5">
                   <div className="grid gap-3 sm:grid-cols-2">
-                    <div>
+                    <div className="min-w-0">
                       <FieldLabel htmlFor="set-pw-new">New password</FieldLabel>
                       <Input
                         id="set-pw-new"
@@ -358,7 +364,7 @@ export function SettingsPage() {
                         onChange={(e) => setPw(e.target.value)}
                       />
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <FieldLabel htmlFor="set-pw-confirm">Confirm new password</FieldLabel>
                       <Input
                         id="set-pw-confirm"
@@ -389,13 +395,13 @@ export function SettingsPage() {
                     const browser = /Chrome/i.test(ua) ? "Chrome" : /Safari/i.test(ua) ? "Safari" : /Firefox/i.test(ua) ? "Firefox" : /Edg/i.test(ua) ? "Edge" : "Browser";
                     const os = /Mac OS|Macintosh/i.test(ua) ? "macOS" : /Windows/i.test(ua) ? "Windows" : /Android/i.test(ua) ? "Android" : /iPhone|iPad/i.test(ua) ? "iOS" : /Linux/i.test(ua) ? "Linux" : "Unknown device";
                     return (
-                      <li key={s.id} className="flex items-center gap-3 border-b border-black/[0.04] py-2.5 last:border-0">
-                        <span className="grid size-7 place-items-center rounded-md bg-neutral-50 text-neutral-400">
+                      <li key={s.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-black/[0.04] py-2.5 last:border-0">
+                        <span className="grid size-7 shrink-0 place-items-center rounded-md bg-neutral-50 text-neutral-400">
                           <Lock className="size-3.5" aria-hidden="true" />
                         </span>
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs font-medium text-ink">{browser} · {os}</p>
-                          <p className="text-[10.5px] text-neutral-400">Last seen {new Date(s.last_seen_at).toLocaleString()} {s.revoked_at ? "· revoked" : ""}</p>
+                        <div className="min-w-0 grow basis-40">
+                          <p className="truncate text-xs font-medium text-ink">{browser} · {os}</p>
+                          <p className="break-words text-[10.5px] leading-4 text-neutral-400">Last seen {new Date(s.last_seen_at).toLocaleString()} {s.revoked_at ? "· revoked" : ""}</p>
                         </div>
                         {s.current ? (
                           <Badge tone="green">This device</Badge>
@@ -453,19 +459,19 @@ export function SettingsPage() {
                 </div>
                 <div className="px-4 py-4 sm:px-5">
                   <div className="flex flex-wrap items-center gap-3 border-b border-black/[0.04] pb-4">
-                    <Globe className="size-4 text-neutral-300" aria-hidden="true" />
-                    <div className="min-w-0 flex-1">
+                    <Globe className="size-4 shrink-0 text-neutral-300" aria-hidden="true" />
+                    <div className="min-w-0 grow basis-48">
                       <p className="text-xs font-medium text-ink">Export all account data</p>
                       <p className="text-[11px] leading-4.5 text-ink-mute">Download every list and lead you own before making account changes.</p>
                     </div>
-                    <Btn variant="outline" size="sm" onClick={() => toast("Full account export started — check Exports", "info")}>
+                    <Btn variant="outline" size="sm" className="shrink-0" onClick={() => toast("Full account export started — check Exports", "info")}>
                       <Download className="size-3.5" aria-hidden="true" />
                       Export everything
                     </Btn>
                   </div>
                   <div className="flex flex-wrap items-center gap-3 pt-4">
-                    <TriangleAlert className="size-4 text-red-400" aria-hidden="true" />
-                    <div className="min-w-0 flex-1">
+                    <TriangleAlert className="size-4 shrink-0 text-red-400" aria-hidden="true" />
+                    <div className="min-w-0 grow basis-48">
                       <p className="text-xs font-medium text-red-700">Delete this account</p>
                       <p className="text-[11px] leading-4.5 text-red-950/60">
                         Permanently removes searches, lead lists, exports, and membership from all workspaces.
@@ -474,7 +480,7 @@ export function SettingsPage() {
                     <Btn
                       variant="primary"
                       size="sm"
-                      className="bg-red-600 hover:bg-red-700 shadow-none"
+                      className="shrink-0 bg-red-600 hover:bg-red-700 shadow-none"
                       onClick={() => setConfirmDelete(true)}
                     >
                       Delete account

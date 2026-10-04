@@ -74,6 +74,14 @@ const SettingsPage = lazy(() => import("./app/pages/Settings").then((m) => ({ de
 function Home() {
   usePageSeo(homeMeta());
 
+  /* Flags the document for the landing-page-only CSS in src/index.css
+     (hidden scrollbars on small screens). Removed again on navigation so
+     every other route keeps its normal scrollbars. */
+  useEffect(() => {
+    document.documentElement.setAttribute("data-route", "home");
+    return () => document.documentElement.removeAttribute("data-route");
+  }, []);
+
   return (
     <>
       <Navbar />

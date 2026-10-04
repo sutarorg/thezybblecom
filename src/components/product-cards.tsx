@@ -270,12 +270,12 @@ export function HeroAppCard({ className }: { className?: string }) {
               </li>
             ))}
           </ul>
-          <div className="flex items-center justify-between border-t border-black/[0.05] bg-neutral-50/70 px-3 py-2">
-            <p className="text-[10px] text-neutral-400">
+          <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 border-t border-black/[0.05] bg-neutral-50/70 px-3 py-2">
+            <p className="min-w-0 truncate text-[10px] text-neutral-400">
               + 496 more businesses
             </p>
-            <p className="inline-flex items-center gap-1 text-[10px] font-medium text-brand-700">
-              <Check className="size-3" aria-hidden="true" />
+            <p className="inline-flex shrink-0 items-center gap-1 text-[10px] font-medium text-brand-700">
+              <Check className="size-3 shrink-0" aria-hidden="true" />
               Saved to “Austin Dentists”
             </p>
           </div>

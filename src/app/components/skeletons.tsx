@@ -599,11 +599,11 @@ export function UsageSkeleton() {
 /* ------------------------------------------------------------------ */
 export function SettingsSkeleton() {
   return (
-    <div className="grid gap-3 lg:grid-cols-[200px_minmax(0,1fr)]" aria-hidden="true">
+    <div className="grid min-w-0 gap-3 lg:grid-cols-[200px_minmax(0,1fr)]" aria-hidden="true">
       {/* tab rail — same 7 items as the real rail */}
-      <nav className="lg:sticky lg:top-[60px] lg:self-start">
+      <nav className="min-w-0 lg:sticky lg:top-[60px] lg:self-start">
         <Card className="p-1.5">
-          <ul className="flex gap-1 overflow-x-auto lg:flex-col">
+          <ul className="no-scrollbar flex gap-1 overflow-x-auto lg:flex-col lg:overflow-x-visible">
             {Array.from({ length: 7 }).map((_, i) => (
               <li key={i} className="shrink-0 lg:shrink">
                 <Skel className={cn("h-8 rounded", i === 0 ? "w-24" : "w-[104px]")} />
