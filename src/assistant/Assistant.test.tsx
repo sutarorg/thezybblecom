@@ -7,11 +7,12 @@ import { SUGGESTED_PROMPTS } from "./prompt";
 import type { AIChatMessage } from "../lib/openrouter-ai";
 
 /**
- * The landing-page assistant is a real DeepSeek V3.2 chatbot through the
- * shared AI helper (mocked here). These tests pin the chat contract:
- * exactly three suggested prompts that submit into the conversation, a
- * typing bar with Enter-to-send, generation locking, streamed replies, and
- * error recovery.
+ * The landing-page assistant is Zybble AI, a real chatbot through the shared
+ * AI helper (mocked here). These tests pin the chat contract: exactly three
+ * suggested prompts that submit into the conversation and rotate out for
+ * unique under-six-word replacements once used, a typing bar with
+ * Enter-to-send, generation locking, streamed replies with the caret kept
+ * inline with the text, and error recovery.
  */
 
 const streamAIChat = vi.hoisted(() => vi.fn());
@@ -73,9 +74,13 @@ async function renderAssistant() {
 }
 
 const suggestionButtons = (el: HTMLElement) =>
-  Array.from(el.querySelectorAll("button")).filter((b) =>
-    (SUGGESTED_PROMPTS as readonly string[]).includes(b.textContent ?? ""),
-  );
+  Array.from(el.querySelectorAll<HTMLButtonElement>("button.qa-chip"));
+
+const chipTexts = (el: HTMLElement) =>
+  suggestionButtons(el).map((b) => (b.textContent ?? "").trim());
+
+/** "Under six words" = at most five whitespace-separated words. */
+const wordCount = (text: string) => text.trim().split(/\s+/).filter(Boolean).length;
 
 describe("Assistant chat", () => {
   it("shows exactly three suggested prompts and a typing bar", async () => {
@@ -91,6 +96,71 @@ describe("Assistant chat", () => {
     const send = el.querySelector<HTMLButtonElement>("button[aria-label='Send message']");
     expect(send).not.toBeNull();
     expect(send!.disabled).toBe(true); // empty input
+  });
+
+  it("presents itself as Zybble AI", async () => {
+    const el = await renderAssistant();
+
+    expect(el.querySelector("#zybble-assistant-title")?.textContent).toBe("Zybble AI");
+    expect(el.textContent).toContain("I'm Zybble AI");
+    // The old provider label is gone — the assistant is branded Zybble AI.
+    expect(el.textContent).not.toContain("DeepSeek");
+  });
+
+  it("retires a used suggestion and rotates in a unique short replacement", async () => {
+    streamAIChat.mockResolvedValue("Answer.");
+    const el = await renderAssistant();
+
+    const initial = chipTexts(el);
+    expect(initial).toHaveLength(3);
+    const seen = new Set(initial);
+
+    const useOneChip = async () => {
+      const before = chipTexts(el);
+      await act(async () => {
+        suggestionButtons(el)[0]!.click();
+      });
+      await act(async () => {
+        await flushFrame();
+      });
+
+      const after = chipTexts(el);
+      // Still exactly three chips…
+      expect(after).toHaveLength(3);
+      // …the used one disappeared…
+      expect(after).not.toContain(before[0]);
+      // …replaced by exactly one new question under six words.
+      const fresh = after.filter((c) => !seen.has(c));
+      expect(fresh).toHaveLength(1);
+      expect(wordCount(fresh[0]!)).toBeLessThan(6);
+      after.forEach((c) => seen.add(c));
+      return fresh[0]!;
+    };
+
+    const replacements = [await useOneChip(), await useOneChip(), await useOneChip()];
+    // Every replacement is a different, never-before-shown question.
+    expect(new Set(replacements).size).toBe(3);
+  });
+
+  it("also retires a chip when its exact text is typed and sent", async () => {
+    streamAIChat.mockResolvedValue("Answer.");
+    const el = await renderAssistant();
+    const input = el.querySelector<HTMLTextAreaElement>("textarea")!;
+    const before = chipTexts(el);
+
+    await act(async () => {
+      typeInto(input, before[1]!);
+    });
+    await act(async () => {
+      pressEnter(input);
+    });
+    await act(async () => {
+      await flushFrame();
+    });
+
+    const after = chipTexts(el);
+    expect(after).toHaveLength(3);
+    expect(after).not.toContain(before[1]);
   });
 
   it("submits a suggested prompt directly into the chat", async () => {
@@ -194,6 +264,51 @@ describe("Assistant chat", () => {
       typeInto(el.querySelector<HTMLTextAreaElement>("textarea")!, "Next question?");
     });
     expect(sendAfter.disabled).toBe(false);
+  });
+
+  it("keeps the streaming caret inline with the last line of text", async () => {
+    const el = await renderAssistant();
+    const input = el.querySelector<HTMLTextAreaElement>("textarea")!;
+
+    let release: ((value: string) => void) | undefined;
+    streamAIChat.mockImplementation(
+      (_messages: AIChatMessage[], options?: { onDelta?: (d: string) => void }) =>
+        new Promise<string>((resolve) => {
+          options?.onDelta?.("Zybble finds businesses");
+          release = resolve;
+        }),
+    );
+
+    await act(async () => {
+      typeInto(input, "How does it work?");
+    });
+    await act(async () => {
+      pressEnter(input);
+    });
+    await act(async () => {
+      await flushFrame();
+    });
+
+    const caret = el.querySelector(".qa-caret");
+    expect(caret).not.toBeNull();
+    // The caret lives inside the streamed text block (a paragraph or list
+    // item) so it renders on the text's own line — not as a sibling dropped
+    // below the block content.
+    expect(caret!.closest("p, li")).not.toBeNull();
+    expect(caret!.parentElement?.tagName).not.toBe("DIV");
+    // It follows the streamed words in the same text node chain.
+    expect(caret!.parentElement?.textContent).toContain("Zybble finds businesses");
+
+    await act(async () => {
+      release!(" and turns them into leads.");
+    });
+    await act(async () => {
+      await flushFrame();
+    });
+
+    // The caret disappears once the reply is committed as a message.
+    expect(el.querySelector(".qa-caret")).toBeNull();
+    expect(el.textContent).toContain("turns them into leads");
   });
 
   it("shows an error with a retry that re-runs the last turn", async () => {

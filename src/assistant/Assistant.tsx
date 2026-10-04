@@ -20,12 +20,26 @@ import {
   streamAIChat,
   type AIChatMessage,
 } from "../lib/openrouter-ai";
-import { SUGGESTED_PROMPTS, assistantSystemPrompt } from "./prompt";
+import {
+  SUGGESTED_PROMPTS,
+  SUGGESTION_POOL,
+  assistantSystemPrompt,
+} from "./prompt";
 
 const DESKTOP_QUERY = "(min-width: 1024px)";
 const GREET_KEY = "zybble.assistant.greeted";
 /** Conversation turns sent to the model (system prompt excluded). */
 const MAX_HISTORY_TURNS = 10;
+
+/** Fisher–Yates shuffle so every visit rotates suggestions in a fresh order. */
+function shuffle<T>(items: readonly T[]): T[] {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j]!, copy[i]!];
+  }
+  return copy;
+}
 
 type Message =
   | { kind: "intro" }
@@ -70,8 +84,15 @@ function RichText({ text }: { text: string }) {
   );
 }
 
-/** Safe plain-text renderer: paragraphs, "- " bullet lists, and **bold**. */
-function RichContent({ text }: { text: string }) {
+/**
+ * Safe plain-text renderer: paragraphs, "- " bullet lists, and **bold**.
+ *
+ * `caret`, when provided, is rendered INLINE at the end of the last block —
+ * inside the final paragraph or list item — so the streaming caret sits on
+ * the text's baseline (aligned with the words) instead of dropping onto its
+ * own line below the block content.
+ */
+function RichContent({ text, caret }: { text: string; caret?: ReactNode }) {
   const lines = text.split("\n").filter((line) => line.trim().length > 0);
   const blocks: { type: "p" | "list"; lines: string[] }[] = [];
   for (const line of lines) {
@@ -84,10 +105,16 @@ function RichContent({ text }: { text: string }) {
     }
     blocks.push({ type: "p", lines: [line] });
   }
+  if (blocks.length === 0) {
+    return caret ? (
+      <p className="text-[12.5px] leading-5.5 text-ink-soft">{caret}</p>
+    ) : null;
+  }
   return (
     <div className="space-y-2">
-      {blocks.map((block, i) =>
-        block.type === "list" ? (
+      {blocks.map((block, i) => {
+        const isLastBlock = i === blocks.length - 1;
+        return block.type === "list" ? (
           <ul key={i} className="space-y-1">
             {block.lines.map((item, j) => (
               <li key={j} className="flex gap-2 text-[12.5px] leading-5.5">
@@ -97,6 +124,7 @@ function RichContent({ text }: { text: string }) {
                 />
                 <span className="text-ink-soft">
                   <RichText text={item} />
+                  {isLastBlock && j === block.lines.length - 1 ? caret : null}
                 </span>
               </li>
             ))}
@@ -104,9 +132,10 @@ function RichContent({ text }: { text: string }) {
         ) : (
           <p key={i} className="text-[12.5px] leading-5.5 text-ink-soft">
             <RichText text={block.lines[0]!} />
+            {isLastBlock ? caret : null}
           </p>
-        ),
-      )}
+        );
+      })}
     </div>
   );
 }
@@ -167,6 +196,11 @@ export function Assistant() {
   /** null = idle · "" = waiting for the first streamed token · text = streaming. */
   const [streaming, setStreaming] = useState<string | null>(null);
   const generating = streaming !== null;
+  /**
+   * The suggestion chips: three starters that, once used, are replaced by a
+   * never-before-shown question from the pool (each under six words).
+   */
+  const [suggestions, setSuggestions] = useState<string[]>([...SUGGESTED_PROMPTS]);
 
   const launcherRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -177,6 +211,13 @@ export function Assistant() {
   /** Stream deltas are batched into state on animation frames. */
   const pendingDelta = useRef("");
   const frameRef = useRef<number | null>(null);
+  /** Every prompt that has ever appeared as a chip — replacements never repeat. */
+  const shownSuggestionsRef = useRef<Set<string>>(new Set(SUGGESTED_PROMPTS));
+  /** Session-shuffled queue of replacement questions (lazily shuffled once). */
+  const suggestionPoolRef = useRef<string[] | null>(null);
+  if (suggestionPoolRef.current === null) {
+    suggestionPoolRef.current = shuffle(SUGGESTION_POOL);
+  }
 
   /* Desktop-only, defensive: JS + CSS both hide on mobile */
   useEffect(() => {
@@ -330,10 +371,27 @@ export function Assistant() {
     }
   };
 
-  /* Typed input and suggested prompts share this exact path. */
-  const send = (raw: string) => {
+  /* A used suggested question disappears from the chips and a new, unique
+     question (under six words, never shown before this visit) rotates in. */
+  const retireSuggestion = (prompt: string) => {
+    const fresh = suggestionPoolRef.current!.find(
+      (candidate) => !shownSuggestionsRef.current.has(candidate),
+    );
+    if (fresh) shownSuggestionsRef.current.add(fresh);
+    setSuggestions((current) => {
+      const next = current.filter((p) => p !== prompt);
+      if (fresh) next.push(fresh);
+      return next;
+    });
+  };
+
+  /* Typed input and suggested prompts share this exact path. A prompt sent
+     from a chip (fromSuggestion) — or typed text that matches a live chip —
+     retires that chip so it never lingers after being used. */
+  const send = (raw: string, fromSuggestion = false) => {
     const text = raw.trim();
     if (!text || generating) return;
+    if (fromSuggestion || suggestions.includes(text)) retireSuggestion(text);
     setInput("");
     commit((m) => [...m, { kind: "user", text }]);
     void runTurn(toChatMessages(messagesRef.current));
@@ -418,7 +476,7 @@ export function Assistant() {
               id="zybble-assistant-title"
               className="text-[13px] font-semibold tracking-[-0.01em] text-ink"
             >
-              Ask Zybble
+              Zybble AI
             </p>
             <p className="text-[10.5px] leading-3.5 text-ink-mute">
               Quick answers about Zybble
@@ -448,8 +506,8 @@ export function Assistant() {
               return (
                 <MessageShell key={i}>
                   <p className="text-[12.5px] leading-5.5 text-ink-soft">
-                    Hey — what would you like to know about Zybble? Ask
-                    anything below, or start with a suggestion.
+                    Hey — I'm Zybble AI. What would you like to know about
+                    Zybble? Ask anything below, or start with a suggestion.
                   </p>
                 </MessageShell>
               );
@@ -489,18 +547,18 @@ export function Assistant() {
             );
           })}
 
-          {/* Streaming reply: dots until the first token, then live text */}
+          {/* Streaming reply: dots until the first token, then live text with an
+              inline caret that sits on the text's baseline while typing */}
           {generating ? (
             streaming ? (
               <MessageShell>
-                <RichContent text={streaming} />
-                <span
-                  className="mt-1 inline-block h-3.5 w-[2px] rounded-sm bg-brand-500 motion-safe:animate-pulse align-text-bottom"
-                  aria-hidden="true"
+                <RichContent
+                  text={streaming}
+                  caret={<span className="qa-caret" aria-hidden="true" />}
                 />
               </MessageShell>
             ) : (
-              <div className="qa-msg flex justify-start" aria-label="Zybble is thinking">
+              <div className="qa-msg flex justify-start" aria-label="Zybble AI is thinking">
                 <div className="flex items-center gap-1.5 rounded-2xl rounded-bl-md border border-black/[0.05] bg-white px-3.5 py-3">
                   {[0, 1, 2].map((n) => (
                     <span
@@ -515,7 +573,7 @@ export function Assistant() {
           ) : null}
         </div>
 
-        {/* Composer — exactly three suggested prompts + typing bar */}
+        {/* Composer — three suggested prompts (used ones rotate out) + typing bar */}
         <div className="border-t border-black/[0.05] bg-white px-3.5 py-3">
           <p
             id="zybble-assistant-suggestions"
@@ -524,13 +582,13 @@ export function Assistant() {
             Suggested
           </p>
           <div className="mt-2 flex flex-wrap gap-1.5">
-            {SUGGESTED_PROMPTS.map((prompt) => (
+            {suggestions.map((prompt) => (
               <button
                 key={prompt}
                 type="button"
-                onClick={() => send(prompt)}
+                onClick={() => send(prompt, true)}
                 disabled={generating}
-                className="group inline-flex items-center gap-1.5 rounded-full border border-black/[0.07] bg-white px-3 py-1.5 text-left text-[12px] font-medium text-ink-soft transition-all duration-200 hover:border-brand-600/30 hover:text-ink focus-visible:border-brand-600/40 disabled:opacity-60"
+                className="qa-chip group inline-flex items-center gap-1.5 rounded-full border border-black/[0.07] bg-white px-3 py-1.5 text-left text-[12px] font-medium text-ink-soft transition-all duration-200 hover:border-brand-600/30 hover:text-ink focus-visible:border-brand-600/40 disabled:opacity-60"
               >
                 <span
                   className="size-1 shrink-0 rounded-full bg-brand-500/60 transition-colors group-hover:bg-brand-600"
@@ -556,7 +614,7 @@ export function Assistant() {
               type="submit"
               disabled={generating || !input.trim()}
               aria-label="Send message"
-              title={generating ? "Zybble is answering…" : "Send message"}
+              title={generating ? "Zybble AI is answering…" : "Send message"}
               className="grid size-9 shrink-0 place-items-center rounded-full bg-brand-600 text-white shadow-[0_1px_2px_rgba(11,99,67,0.22)] transition-all hover:bg-brand-700 active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-40"
             >
               <ArrowUp className="size-4" aria-hidden="true" />
@@ -567,7 +625,7 @@ export function Assistant() {
             <p className="text-[9.5px] text-neutral-400">
               AI-generated answers from Zybble's product guide
             </p>
-            <p className="text-[9.5px] text-neutral-400">DeepSeek V3.2</p>
+            <p className="text-[9.5px] text-neutral-400">Zybble AI</p>
           </div>
         </div>
       </div>
@@ -579,7 +637,7 @@ export function Assistant() {
         onClick={toggle}
         aria-expanded={open}
         aria-controls="zybble-assistant-panel"
-        aria-label={open ? "Close Zybble assistant" : "Ask Zybble — open assistant"}
+        aria-label={open ? "Close Zybble AI assistant" : "Ask Zybble AI — open assistant"}
         className={cn(
           "fixed z-[70] hidden grid place-items-center rounded-full border transition-all duration-200",
           "right-6 bottom-6 size-12",
