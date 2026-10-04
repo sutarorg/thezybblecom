@@ -230,20 +230,21 @@ npm run dev
 1. Push the repo to GitHub.
 2. Vercel → **Add New Project → Import Git Repository**.
 3. Framework preset: **Vite** (auto-detected). Build command `npm run build`, output `dist`.
-   The six production handlers are the only deployable files at the root of `api/`.
+   The production handlers are the only deployable files at the root of `api/`.
    API tests live in `api/_tests/`; Vercel ignores underscore-prefixed paths, so
-   those tests do not consume the Hobby plan's 12-Function deployment limit.
+   those tests do not deploy as functions.
 4. **Environment Variables** — set for **Production, Preview, and Development**:
    - `VITE_SUPABASE_URL` — browser build value (inlined by Vite)
    - `VITE_SUPABASE_PUBLISHABLE_KEY` — browser build value (inlined by Vite)
    - `SUPABASE_URL` — **server-side** copy of the project URL used by the Vercel Functions in `api/`
-   - `SUPABASE_PUBLISHABLE_KEY` — **server-side** publishable key used by the Vercel Functions (`SUPABASE_ANON_KEY` works as a legacy fallback). Never a service-role/secret key — the API routes reject those so RLS is never bypassed.
+   - `SUPABASE_PUBLISHABLE_KEY` — **server-side** publishable key used by the user-scoped Vercel Functions (`SUPABASE_ANON_KEY` works as a legacy fallback). Never a service-role/secret key here — those routes reject it so RLS is never bypassed.
+   - `SUPABASE_SERVICE_ROLE_KEY` (or `SUPABASE_SECRET_KEY`) — **server-only**, used only by `/api/billing` after it authenticates the caller. Never prefix with `VITE_` and never paste it into `SUPABASE_PUBLISHABLE_KEY`.
    - `SERPAPI_API_KEY` — server-only; used by `/api/search-run` and never included in the Vite bundle
    - `OPENROUTER_API_KEY` and optional `OPENROUTER_MODEL` (default `deepseek/deepseek-v3.2`), `OPENROUTER_HTTP_REFERER`, `OPENROUTER_X_TITLE` — server-only; used by `/api/ai-chat`, `/api/ai-interpret`, and `/api/ai-analyze`. Also set the key and model as Supabase Edge Function secrets when using the non-Vercel fallback. Never prefix with `VITE_`.
-   - `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `APP_URL` — server-only; used by `/api/team-invite` (emails/links).
-   - Razorpay keys remain Supabase Edge Function secrets and must not be added to the browser bundle.
+   - `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `APP_URL` — server-only; used by `/api/team-invite` (emails/links) and checkout return links.
+   - `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_PLAN_GROWTH_ID`, `RAZORPAY_PLAN_AGENCY_ID`, `RAZORPAY_PLAN_SCALE_ID` — server-only; used by `/api/billing` and by the Supabase Edge billing fallback when deployed. `RAZORPAY_WEBHOOK_SECRET` is server-only for `razorpay-webhook`. Keep live keys with live plan ids and test keys with test plan ids.
 
-   **A `VITE_` prefix never satisfies a server-side lookup.** `VITE_SUPABASE_URL` is inlined into the browser bundle at build time; the Node runtime of `/api/search-run` reads `process.env.SUPABASE_URL`. Both sets must be configured — they are separate variables by design so a missing server configuration fails with a clear, actionable error instead of silently degrading.
+   **A `VITE_` prefix never satisfies a server-side lookup.** `VITE_SUPABASE_URL` is inlined into the browser bundle at build time; the Node runtime of `/api/search-run` and `/api/billing` reads `process.env.SUPABASE_URL`. Both sets must be configured — they are separate variables by design so a missing server configuration fails with a clear, actionable error instead of silently degrading.
 5. **Redeploy after adding or changing an environment variable** — existing deployments do not receive new values retroactively — then test the preview URL end-to-end.
 6. Add your custom domain → then go back and:
    - Supabase **Auth → URL Configuration**: add the domain as Site URL + allowed redirect URLs.
@@ -261,28 +262,47 @@ npm run dev
 
 All of these return HTTP 500 with a `code` of `supabase_config`/`serpapi_config`; the frontend surfaces the message directly and does **not** retry through the Supabase Edge Function, so the real backend problem is never masked.
 
-### Troubleshooting billing ("The requested Edge Function \"billing\" couldn't be reached")
+### Troubleshooting billing ("Billing is temporarily unavailable")
 
-Billing (`checkout` / `sync` / `cancel`) is **intentionally** a Supabase Edge
-Function-only path — see "Architecture notes" below. Unlike search, AI,
-export, and invite, it has **no same-origin `/api/*` fallback on Vercel**,
-because writing authoritative subscription state requires the Supabase
-service-role key, which the Vercel routes deliberately refuse to hold. That
-means `billing` has no safety net: if the Edge Function isn't deployed (or
-its secrets aren't set), every checkout/sync/cancel call fails with exactly
-this message — it is not a frontend bug, it's a deployment/config gap.
+Billing (`checkout` / `sync` / `cancel`) now prefers the same-origin Vercel
+Function at `/api/billing`. That avoids the previous browser → Supabase Edge
+cross-origin failure mode that produced:
+
+> Billing is temporarily unavailable. Your plan and payment details are unaffected…
+
+If `/api/billing` is not present on an older/non-Vercel deployment, the frontend
+still falls back to the Supabase Edge Function named `billing` with the same
+request contract. Both paths keep Razorpay keys and the Supabase write key on the
+server only.
 
 | Symptom | Meaning | Fix |
 | --- | --- | --- |
-| `The requested Edge Function "billing" couldn't be reached. Check that it is deployed and try again.` | The function was never deployed to the linked Supabase project (most common — `supabase/config.toml` only configures JWT verification at deploy time; it does not deploy anything by itself, and nothing in this repo's CI deploys Edge Functions automatically), or the Supabase project's Edge Functions have never been provisioned at all. | Run `supabase link --project-ref <ref>` then `supabase functions deploy billing` (see exact command below). |
-| `The requested Edge Function "billing" is not deployed.` | The function responded with an explicit 404 from Supabase. | Same fix — deploy it. |
-| `Razorpay isn't configured on the server. Missing server environment variable(s): RAZORPAY_KEY_ID and/or RAZORPAY_KEY_SECRET…` | The function **is** deployed but its secrets were never set (or were set on the wrong linked project). | `supabase secrets set RAZORPAY_KEY_ID=… RAZORPAY_KEY_SECRET=…`, then redeploy. |
-| `The growth/agency/scale plan isn't available in payments yet.` | `RAZORPAY_PLAN_GROWTH_ID` / `_AGENCY_ID` / `_SCALE_ID` wasn't set as a secret. | Set the missing plan secret(s), then redeploy. |
+| `The billing server isn't connected to Supabase with write access… SUPABASE_SERVICE_ROLE_KEY…` | `/api/billing` deployed, but Vercel is missing the server-only Supabase service-role/secret key. | Add `SUPABASE_SERVICE_ROLE_KEY` (or `SUPABASE_SECRET_KEY`) in Vercel for Production/Preview/Development, then redeploy. Do **not** put this value in any `VITE_` variable or in `SUPABASE_PUBLISHABLE_KEY`. |
+| `…must be the Supabase service-role/secret key, not the publishable/anon key` | The billing route received the public key where it needs the server write key. | Replace only `SUPABASE_SERVICE_ROLE_KEY` with the Supabase secret/service-role key; keep `SUPABASE_PUBLISHABLE_KEY` as the public publishable key. |
+| `Razorpay isn't configured on the billing server. Missing server environment variable…` | `/api/billing` deployed, but the Razorpay API key id/secret is missing in Vercel. | Add `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` in Vercel, then redeploy. Add `RAZORPAY_WEBHOOK_SECRET` wherever `razorpay-webhook` is deployed. |
+| `The growth/agency/scale plan isn't available in payments yet.` | The matching `RAZORPAY_PLAN_*` variable is absent or was set in the wrong environment. | Set the missing plan id in Vercel and, if using Edge fallback, in Supabase secrets too. Live keys require live plan ids; test keys require test plan ids. |
+| The old plain-language banner still appears after redeploy | Both `/api/billing` and the Edge fallback were unreachable, or the browser is still on an old deployment. | Confirm `/api/billing` exists on the Vercel deployment, confirm the new env vars are set in the same Vercel environment you are testing, then redeploy. If you rely on Edge fallback, also deploy `billing` with `supabase functions deploy billing`. |
 
-To confirm deployment status: **Supabase Dashboard → Edge Functions** should
-list `billing` with a recent deployment, and **Edge Functions → billing →
-Secrets** should show every `RAZORPAY_*` key set (values are never shown back,
-only names).
+For the Supabase Edge fallback/webhook path, also set the same Razorpay values as
+Edge secrets and deploy the functions:
+
+```bash
+supabase secrets set \
+  RAZORPAY_KEY_ID=rzp_live_xxx \
+  RAZORPAY_KEY_SECRET=xxx \
+  RAZORPAY_WEBHOOK_SECRET=xxx \
+  RAZORPAY_PLAN_GROWTH_ID=plan_xxx \
+  RAZORPAY_PLAN_AGENCY_ID=plan_xxx \
+  RAZORPAY_PLAN_SCALE_ID=plan_xxx \
+  APP_URL="https://your-domain.com"
+
+supabase functions deploy billing razorpay-webhook
+```
+
+To confirm Edge deployment status: **Supabase Dashboard → Edge Functions** should
+list `billing` and `razorpay-webhook` with recent deployments, and **Edge
+Functions → billing → Secrets** should show every `RAZORPAY_*` key name (values
+are never shown back).
 
 ### Writing imports inside `api/`
 
@@ -315,7 +335,7 @@ Never commit: `.env`, `.env.local`, any key material. `.gitignore` already exclu
 
 ## Architecture notes
 
-- **Secrets**: only `VITE_SUPABASE_URL` + `VITE_SUPABASE_PUBLISHABLE_KEY` reach the browser; the publishable key is safe because every table is RLS-guarded. `SUPABASE_URL` + `SUPABASE_PUBLISHABLE_KEY` (server-side runtime config), `SERPAPI_API_KEY`, `OPENROUTER_API_KEY`, `RESEND_API_KEY`, and `APP_URL` are read only by server functions (Vercel and the Edge fallback) via `api/_lib/supabase-server.ts` and `api/_lib/openrouter.ts`, and never inlined into the Vite bundle. Razorpay keys and the Supabase service-role/secret keys remain Supabase Edge Function secrets — the Vercel routes deliberately reject secret keys so requests always run with the caller's JWT under RLS. All AI runs server-side through OpenRouter (DeepSeek V3.2) — no AI provider credential exists in the browser.
+- **Secrets**: only `VITE_SUPABASE_URL` + `VITE_SUPABASE_PUBLISHABLE_KEY` reach the browser; the publishable key is safe because every table is RLS-guarded. `SUPABASE_URL` + `SUPABASE_PUBLISHABLE_KEY` (server-side runtime config), `SERPAPI_API_KEY`, `OPENROUTER_API_KEY`, `RESEND_API_KEY`, and `APP_URL` are read only by user-scoped server functions (Vercel and the Edge fallback) via `api/_lib/supabase-server.ts` and `api/_lib/openrouter.ts`, and never inlined into the Vite bundle. `/api/billing` is the sole Vercel route allowed to read `SUPABASE_SERVICE_ROLE_KEY`/`SUPABASE_SECRET_KEY`, because it must persist payment-provider subscription state after authenticating the caller; all other Vercel routes reject service-role keys so requests keep running with the caller's JWT under RLS. Razorpay keys remain server-only in Vercel and, when the Edge fallback/webhook is deployed, Supabase Edge secrets. All AI runs server-side through OpenRouter (DeepSeek V3.2) — no AI provider credential exists in the browser.
 - **AI flow**: `/find` interpretation is authorized and interpreted server-side (session → workspace → plan → `ai_requests` usage row) by `/api/ai-interpret` (Edge fallback twin with the same contract). Interpretation only fills the filter form; it never runs a search. The landing-page assistant streams through `/api/ai-chat` via the shared browser helper `src/lib/openrouter-ai.ts` and answers from the reviewed knowledge base in `src/assistant/` (flattened into its system prompt), with streamed replies and conversation history. Per-lead analysis runs through `/api/ai-analyze` and is cached in `ai_insights`.
 - **Usage enforcement**: `reserve_leads()` is a security-definer RPC doing an atomic check-and-increment — concurrent searches can't overrun an allowance; unused reservations are refunded after each run.
 - **Limits**: one-list (Free), seat counts, and client-workspace gating are enforced by **database triggers**, not the UI.
