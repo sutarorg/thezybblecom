@@ -1,4 +1,11 @@
+# Zybble — crawling policy.
+# Indexing control for private app routes is done with noindex
+# (X-Robots-Tag headers + meta robots in the app shell), NOT by
+# disallowing them here: a robots.txt block would stop Google from
+# ever seeing the noindex. Only the JSON API is excluded from
+# crawling — it serves no renderable content.
 User-agent: *
 Allow: /
+Disallow: /api/
 
 Sitemap: https://zybble.com/sitemap.xml

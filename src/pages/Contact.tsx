@@ -17,7 +17,9 @@ import { cn } from "../utils/cn";
 import { SubpageShell } from "../components/SubpageShell";
 import { Reveal } from "../components/primitives";
 import { usePageSeo } from "../lib/hooks";
-import { CONTACT_EMAIL, WEB3FORMS_KEY } from "../lib/site";
+import { contactMeta } from "../seo/meta";
+import { CONTACT_EMAIL } from "../lib/site";
+import { isValidEmail, submitWeb3Form } from "../lib/web3forms";
 
 const TOPICS = [
   "General question",
@@ -67,12 +69,7 @@ type FormState = {
 };
 
 export default function ContactPage() {
-  usePageSeo({
-    title: "Contact Zybble — Talk to us about lead discovery",
-    description:
-      "Questions about Zybble, pricing, or plans? One message reaches a human. Write to us and we'll get back to you within one business day.",
-    path: "/contact",
-  });
+  usePageSeo(contactMeta());
 
   const [form, setForm] = useState<FormState>({
     name: "",
@@ -96,7 +93,7 @@ export default function ContactPage() {
   const validate = () => {
     const next: Record<string, string> = {};
     if (form.name.trim().length < 2) next.name = "Please add your name.";
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim()))
+    if (!isValidEmail(form.email))
       next.email = "Please add a valid email address.";
     if (form.message.trim().length < 10)
       next.message = "Tell us a little more (10+ characters).";
@@ -111,43 +108,25 @@ export default function ContactPage() {
 
     setStatus("sending");
     setStatusMessage("");
-    try {
-      const res = await fetch("https://api.web3forms.com/submit", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({
-          access_key: WEB3FORMS_KEY,
-          subject: `Zybble contact — ${form.topic} · ${form.name.trim()}`,
-          from_name: "Zybble Contact Form",
-          name: form.name.trim(),
-          email: form.email.trim(),
-          topic: form.topic,
-          message: form.message.trim(),
-          botcheck,
-        }),
-      });
-      const data: { success?: boolean; message?: string } = await res
-        .json()
-        .catch(() => ({}));
-      if (res.ok && data.success) {
-        setStatus("sent");
-        setStatusMessage(
-          "Message sent — thanks for writing. We'll reply to your inbox soon."
-        );
-      } else {
-        setStatus("error");
-        setStatusMessage(
-          data.message ||
-            "Something went wrong sending your message. Please try again."
-        );
-      }
-    } catch {
+    const result = await submitWeb3Form({
+      subject: `Zybble contact — ${form.topic} · ${form.name.trim()}`,
+      from_name: "Zybble Contact Form",
+      name: form.name.trim(),
+      email: form.email.trim(),
+      topic: form.topic,
+      message: form.message.trim(),
+      botcheck,
+    });
+    if (result.ok) {
+      setStatus("sent");
+      setStatusMessage(
+        "Message sent — thanks for writing. We'll reply to your inbox soon."
+      );
+    } else {
       setStatus("error");
       setStatusMessage(
-        "We couldn't reach the form service. Check your connection and try again."
+        result.message ||
+          "We couldn't send your message right now. Please try again, or email us directly."
       );
     }
   };

@@ -300,6 +300,14 @@ Never commit: `.env`, `.env.local`, any key material. `.gitignore` already exclu
 - **Deduplication**: deterministic `dedupe_key` (place_id → data_id → data_cid → domain → phone → name+address fallback) + `unique(workspace_id, dedupe_key)` upsert — searches are re-runnable without ever doubling leads.
 - **AI honesty**: Zybble AI is instructed never to fabricate data; missing fields (e.g. email) are explicitly unavailable.
 
+## Blog + SEO architecture
+
+- **Content model**: articles live as typed data in `src/blog/posts/*` (one file per article) and are registered in `src/blog/index.ts`. Reading time, tables of contents, related links, sitemap entries, and structured data are all derived from that one registry — adding an article is one file + one registry line.
+- **Prerendering**: `npm run build` runs `vite build`, then an SSR build of `src/entry-prerender.tsx`, then `scripts/prerender.mjs`, which renders every public route (`/`, `/blog`, each `/blog/<slug>`, `/contact`, `/privacy`, `/terms`) to static HTML in `dist/` with its unique title, meta description, canonical URL, Open Graph/Twitter tags, and JSON-LD already in the `<head>`. Crawlers never depend on client-side JavaScript; the browser boots the unchanged SPA on top.
+- **Head metadata**: one registry, `src/seo/meta.ts`, feeds the prerenderer, the runtime `usePageSeo` hook (for client-side navigations), and the generated `dist/sitemap.xml`.
+- **SPA fallback**: non-prerendered routes (the authenticated app, auth screens, unknown URLs) are rewritten to `dist/app.html`, a `noindex` shell (see `vercel.json`), and the private routes additionally send `X-Robots-Tag: noindex`.
+- **Lead capture**: the landing-page assistant offers an *optional* email follow-up at most once per session, only after the visitor's second turn with clear intent (or sustained engagement), never in the first answer, and never again after a decline (`src/assistant/lead.ts`). Accepted emails post to `/api/ai-lead`, which validates, rate-limits, dedupes, and forwards to Web3Forms server-side using `WEB3FORMS_ACCESS_KEY` (falls back to the public contact-form key). The conversation transcript is never stored or forwarded.
+
 ## Demo data
 
 There is none. The app ships without any mock/demo data source — every screen renders

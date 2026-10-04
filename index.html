@@ -3,26 +3,34 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Zybble — Find the businesses you need. Turn them into usable leads.</title>
+    <!-- Progressive enhancement: scroll-reveal hiding only applies when JS
+         runs, so prerendered HTML stays fully visible to crawlers and
+         no-JS visitors. Must run before first paint. -->
+    <script>document.documentElement.classList.add("js");</script>
 
-    <!-- Primary SEO -->
-    <meta name="description" content="Zybble turns one plain-language request into an organized business lead list. Describe the businesses you want, get structured lead data, analyze it with AI, and export it as CSV." />
-    <meta name="application-name" content="Zybble" />
+    <!-- Route metadata. Everything between the seo markers is replaced per
+         route by the build-time prerenderer (scripts/prerender.mjs) from the
+         central registry in src/seo/meta.ts. The tags below are the homepage
+         defaults, used verbatim in dev. -->
+    <!--seo:start-->
+    <title>Zybble — Find the businesses you need. Turn them into usable leads.</title>
+    <meta name="description" content="Zybble turns one plain-language request into an organized business lead list. Describe the businesses you want, get structured lead data, and export it as CSV." />
     <meta name="robots" content="index, follow, max-image-preview:large" />
     <link rel="canonical" href="https://zybble.com/" />
-    <meta name="theme-color" content="#fbfbf8" />
-
-    <!-- Open Graph -->
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="Zybble — Find the businesses you need." />
+    <meta property="og:site_name" content="Zybble" />
+    <meta property="og:title" content="Zybble — Find the businesses you need. Turn them into usable leads." />
     <meta property="og:description" content="Describe the leads you want in plain language. Zybble finds the businesses, organizes the data, and turns it into a list you can work." />
     <meta property="og:url" content="https://zybble.com/" />
-    <meta property="og:site_name" content="Zybble" />
-
-    <!-- Twitter/X -->
+    <meta property="og:image" content="https://zybble.com/blog/og/how-to-find-local-business-leads.jpg" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Zybble — Find the businesses you need." />
+    <meta name="twitter:title" content="Zybble — Find the businesses you need. Turn them into usable leads." />
     <meta name="twitter:description" content="Natural-language business discovery, structured lead data, AI lead intelligence, and one-click CSV export." />
+    <meta name="twitter:image" content="https://zybble.com/blog/og/how-to-find-local-business-leads.jpg" />
+    <!--seo:end-->
+
+    <meta name="application-name" content="Zybble" />
+    <meta name="theme-color" content="#fbfbf8" />
 
     <!-- Icons -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
@@ -35,41 +43,12 @@
       rel="stylesheet"
     />
 
-    <!-- The one landscape used across the whole product story -->
-    <link rel="preconnect" href="https://i.ibb.co" crossorigin />
-    <link
-      rel="preload"
-      as="image"
-      href="https://i.ibb.co/0jFFCfm3/Chat-GPT-Image-Sep-29-2026-07-01-04-PM.png"
-      fetchpriority="high"
-    />
-
-    <!-- Structured data -->
-    <script type="application/ld+json">
-      {
-        "@context": "https://schema.org",
-        "@type": "SoftwareApplication",
-        "name": "Zybble",
-        "applicationCategory": "BusinessApplication",
-        "operatingSystem": "Web",
-        "description": "AI-powered business lead discovery. Describe the businesses you want in plain language, organize them into lead lists, enrich the data, and export it.",
-        "url": "https://zybble.com/",
-        "offers": {
-          "@type": "Offer",
-          "price": "0",
-          "priceCurrency": "USD",
-          "description": "Free plan with 50 leads per month"
-        },
-        "publisher": {
-          "@type": "Organization",
-          "name": "Zybble",
-          "url": "https://zybble.com/"
-        }
-      }
-    </script>
+    <!-- The landscape image preload is route-specific: the prerenderer adds
+         it to the homepage head only (see homeMeta() in src/seo/meta.ts), so
+         blog/contact/legal pages don't pay for an image they never render. -->
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><!--app-html--></div>
     <!-- Zybble AI runs entirely on the server-side OpenRouter integration
          (/api/ai-chat, /api/ai-interpret, /api/ai-analyze with the
          server-only OPENROUTER_API_KEY). No AI provider script and no

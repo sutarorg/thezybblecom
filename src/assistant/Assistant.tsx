@@ -7,6 +7,9 @@ import {
 } from "react";
 import {
   ArrowUp,
+  CheckCircle2,
+  Loader2,
+  Mail,
   Minus,
   RotateCcw,
   Sparkles,
@@ -15,6 +18,7 @@ import {
 } from "lucide-react";
 import { cn } from "../utils/cn";
 import { ZybbleMark } from "../components/primitives";
+import { isValidEmail } from "../lib/web3forms";
 import {
   ZybbleAIError,
   streamAIChat,
@@ -25,6 +29,13 @@ import {
   SUGGESTION_POOL,
   assistantSystemPrompt,
 } from "./prompt";
+import {
+  collectAttribution,
+  detectLeadIntent,
+  setLeadState,
+  shouldOfferLead,
+  submitAiLead,
+} from "./lead";
 
 const DESKTOP_QUERY = "(min-width: 1024px)";
 const GREET_KEY = "zybble.assistant.greeted";
@@ -45,7 +56,10 @@ type Message =
   | { kind: "intro" }
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string }
-  | { kind: "error"; text: string };
+  | { kind: "error"; text: string }
+  /** One-per-session, consent-first email offer. Never sent to the model
+      (toChatMessages only forwards user/assistant turns). */
+  | { kind: "lead-offer"; intent: string | null; firstQuestion: string };
 
 function usePrefersReducedMotion() {
   const [reduced, setReduced] = useState(false);
@@ -169,6 +183,152 @@ function MessageShell({
         )}
       </div>
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Lead capture card — rendered as an assistant-side bubble.           */
+/* Consent-first: the email input only exists after "Yes". Declining   */
+/* is remembered for the session and the assistant never asks again.   */
+/* ------------------------------------------------------------------ */
+function LeadCaptureCard({
+  intent,
+  firstQuestion,
+}: {
+  intent: string | null;
+  firstQuestion: string;
+}) {
+  const [stage, setStage] = useState<
+    "offer" | "form" | "sending" | "sent" | "declined" | "error"
+  >("offer");
+  const [email, setEmail] = useState("");
+  const [fieldError, setFieldError] = useState("");
+  const emailRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (stage === "form") emailRef.current?.focus();
+  }, [stage]);
+
+  const decline = () => {
+    setLeadState("declined");
+    setStage("declined");
+  };
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (stage === "sending") return;
+    if (!isValidEmail(email)) {
+      setFieldError("That doesn't look like a valid email address.");
+      return;
+    }
+    setFieldError("");
+    setStage("sending");
+    const result = await submitAiLead({
+      email: email.trim().toLowerCase(),
+      ...collectAttribution(firstQuestion, intent),
+    });
+    if (result.ok) {
+      setLeadState("captured");
+      setStage("sent");
+    } else {
+      setFieldError(result.message ?? "We couldn't save your email right now.");
+      setStage("error");
+    }
+  };
+
+  if (stage === "declined") {
+    return (
+      <p className="text-[12.5px] leading-5.5 text-ink-soft">
+        No problem — I won't ask again. What else would you like to know?
+      </p>
+    );
+  }
+
+  if (stage === "sent") {
+    return (
+      <p className="flex items-start gap-1.5 text-[12.5px] leading-5.5 text-ink-soft" role="status">
+        <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-brand-600" aria-hidden="true" />
+        Done — we'll send a short summary and getting-started checklist to your
+        inbox. Now, where were we?
+      </p>
+    );
+  }
+
+  if (stage === "offer") {
+    return (
+      <div>
+        <p className="text-[12.5px] leading-5.5 text-ink-soft">
+          By the way — want me to send a short recap of this plus a
+          getting-started checklist to your inbox? Totally optional.
+        </p>
+        <div className="mt-2.5 flex gap-1.5">
+          <button
+            type="button"
+            onClick={() => setStage("form")}
+            className="inline-flex items-center gap-1.5 rounded-full bg-brand-600 px-3 py-1.5 text-[11.5px] font-semibold text-white transition-colors hover:bg-brand-700"
+          >
+            <Mail className="size-3" aria-hidden="true" />
+            Yes, email it
+          </button>
+          <button
+            type="button"
+            onClick={decline}
+            className="rounded-full border border-black/[0.08] bg-white px-3 py-1.5 text-[11.5px] font-medium text-ink-soft transition-colors hover:bg-neutral-50"
+          >
+            No thanks
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // form / sending / error
+  return (
+    <form onSubmit={submit}>
+      <label
+        htmlFor="zybble-lead-email"
+        className="block text-[12.5px] leading-5.5 text-ink-soft"
+      >
+        Great — where should we send it?
+      </label>
+      <div className="mt-2 flex gap-1.5">
+        <input
+          ref={emailRef}
+          id="zybble-lead-email"
+          type="email"
+          autoComplete="email"
+          placeholder="you@company.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          disabled={stage === "sending"}
+          aria-invalid={Boolean(fieldError)}
+          aria-describedby={fieldError ? "zybble-lead-email-error" : undefined}
+          className="h-8.5 min-w-0 flex-1 rounded-full border border-black/[0.08] bg-white px-3 text-[12px] text-ink outline-none transition-colors placeholder:text-neutral-400 focus:border-brand-600/50 focus:ring-2 focus:ring-brand-600/15 disabled:bg-neutral-50"
+        />
+        <button
+          type="submit"
+          disabled={stage === "sending"}
+          className="inline-flex h-8.5 shrink-0 items-center gap-1 rounded-full bg-brand-600 px-3 text-[11.5px] font-semibold text-white transition-colors hover:bg-brand-700 disabled:opacity-60"
+        >
+          {stage === "sending" ? (
+            <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+          ) : null}
+          {stage === "sending" ? "Sending…" : "Send"}
+        </button>
+      </div>
+      {fieldError ? (
+        <p id="zybble-lead-email-error" role="alert" className="mt-1.5 text-[11px] leading-4 text-red-600">
+          {fieldError}
+        </p>
+      ) : null}
+      <button
+        type="button"
+        onClick={decline}
+        className="mt-2 text-[11px] font-medium text-neutral-400 underline-offset-2 transition-colors hover:text-ink-mute hover:underline"
+      >
+        Actually, skip it
+      </button>
+    </form>
   );
 }
 
@@ -353,12 +513,33 @@ export function Assistant() {
     setStreaming(null);
   };
 
+  /* After a completed answer (never before or during), the assistant may —
+     once per session — offer an optional email follow-up. Pure UI: the
+     offer is deterministic, consent-first, and invisible to the model. */
+  const maybeOfferLead = () => {
+    const userMessages = messagesRef.current.filter(
+      (m): m is Extract<Message, { kind: "user" }> => m.kind === "user",
+    );
+    const userTurns = userMessages.length;
+    let intent: string | null = null;
+    for (let i = userMessages.length - 1; i >= 0 && !intent; i--) {
+      intent = detectLeadIntent(userMessages[i]!.text);
+    }
+    if (!shouldOfferLead(userTurns, intent)) return;
+    setLeadState("offered");
+    commit((m) => [
+      ...m,
+      { kind: "lead-offer", intent, firstQuestion: userMessages[0]?.text ?? "" },
+    ]);
+  };
+
   /* Run one AI turn over the given (already current) history. */
   const runTurn = async (history: AIChatMessage[]) => {
     setStreaming("");
     try {
       const full = await streamAIChat(history, { onDelta: queueDelta });
       commit((m) => [...m, { kind: "assistant", text: full }]);
+      maybeOfferLead();
     } catch (error) {
       const text =
         error instanceof ZybbleAIError
@@ -516,6 +697,13 @@ export function Assistant() {
               return (
                 <MessageShell key={i} user>
                   {msg.text}
+                </MessageShell>
+              );
+            }
+            if (msg.kind === "lead-offer") {
+              return (
+                <MessageShell key={i}>
+                  <LeadCaptureCard intent={msg.intent} firstQuestion={msg.firstQuestion} />
                 </MessageShell>
               );
             }

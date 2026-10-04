@@ -41,7 +41,9 @@ describe("Vercel routing", () => {
   });
 
   it("does not apply the SPA rewrite to /api routes", () => {
-    const source = config.rewrites.find((rewrite) => rewrite.destination === "/index.html")?.source ?? "";
+    // The SPA fallback is the noindex shell (app.html); indexable marketing
+    // routes are prerendered static files that Vercel serves before rewrites.
+    const source = config.rewrites.find((rewrite) => rewrite.destination === "/app.html")?.source ?? "";
     const routePattern = new RegExp(`^${source}$`);
     expect(routePattern.test("/find")).toBe(true);
     expect(routePattern.test("/leads")).toBe(true);
@@ -71,6 +73,23 @@ describe("Vercel routing", () => {
     expect(apiRule).toBeDefined();
     expect(catchAll).toBeDefined();
     expect(lines.indexOf(apiRule!)).toBeLessThan(lines.indexOf(catchAll!));
-    expect(catchAll).toContain("/index.html");
+    expect(catchAll).toContain("/app.html");
+  });
+
+  it("noindexes authenticated and auth routes via X-Robots-Tag", () => {
+    const headerConfigs = (config as unknown as {
+      headers: { source: string; headers: { key: string; value: string }[] }[];
+    }).headers;
+    const noindexRule = headerConfigs.find((entry) =>
+      entry.headers.some((h) => h.key === "X-Robots-Tag" && h.value.includes("noindex")),
+    );
+    expect(noindexRule).toBeDefined();
+    for (const route of ["login", "signup", "overview", "find", "leads", "billing", "settings"]) {
+      expect(noindexRule!.source).toContain(route);
+    }
+    // Public marketing routes must NOT be covered by the noindex rule.
+    for (const route of ["blog", "contact", "privacy", "terms"]) {
+      expect(noindexRule!.source).not.toContain(route);
+    }
   });
 });
