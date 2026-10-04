@@ -10,12 +10,12 @@ import {
 } from "./openrouter-ai";
 
 /**
- * The shared client-side AI helper. The browser never contacts the AI
+ * The shared client-side AI helper. The browser never contacts an AI
  * provider directly: conversations POST to the same-origin Zybble backend
- * (/api/ai-chat — DeepSeek V3.2 on OpenRouter's server-side API) and stream
- * back as server-sent events. These tests pin the SSE contract both AI
- * surfaces rely on, the friendly-error mapping, and the interpret-response
- * validation the search form depends on.
+ * (/api/ai-chat — Zybble AI answering through the server-side OpenRouter
+ * integration) and stream back as server-sent events. These tests pin the
+ * SSE contract both AI surfaces rely on, the friendly-error mapping, and the
+ * interpret-response validation the search form depends on.
  */
 
 function sseResponse(frames: Array<Record<string, unknown> | "[DONE]">, status = 200) {

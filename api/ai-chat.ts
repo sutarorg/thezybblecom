@@ -41,7 +41,7 @@ export const maxDuration = 60;
      leaves the server in no response, log line, or error message. */
 
 /** Keep in sync with assistantSystemPrompt() in src/assistant/prompt.ts. */
-export const ASSISTANT_MARKER = 'You are "Ask Zybble", the assistant on the Zybble website';
+export const ASSISTANT_MARKER = 'You are "Zybble AI", the assistant on the Zybble website';
 
 const MAX_MESSAGES = 24;
 /* The system message is the generated assistant fact sheet (see

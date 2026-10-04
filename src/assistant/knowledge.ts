@@ -1,15 +1,15 @@
 /**
- * Zybble Assistant — reviewed expert knowledge base.
+ * Zybble AI — reviewed expert knowledge base.
  *
- * The chatbot runs on DeepSeek V3.2 through the Zybble backend (see
+ * The chatbot is Zybble AI, answering through the Zybble backend (see
  * ./prompt.ts and ../lib/openrouter-ai.ts — the browser talks to
- * /api/ai-chat, never to the AI provider directly); this module is its
- * single source of truth. Every
- * entry is flattened into the assistant's system prompt so answers stay
- * grounded in reviewed content.
+ * /api/ai-chat, never to an AI provider directly); this module is its
+ * single source of truth. Every entry is flattened into the assistant's
+ * system prompt so answers stay grounded in reviewed content.
  *
  * CONTENT RULE: answers only state facts that appear elsewhere on the
- * public site. No invented features, numbers, or guarantees.
+ * public site or in the product itself. No invented features, numbers, or
+ * guarantees.
  */
 
 import { expand } from "./compact";
@@ -17,6 +17,7 @@ import { PACK_PRODUCT } from "./pack-product";
 import { PACK_DATA_AI } from "./pack-data-ai";
 import { PACK_PLANS } from "./pack-plans";
 import { PACK_EXTRA } from "./pack-extra";
+import { PACK_COMPANY } from "./pack-company";
 
 export type AnswerBlock =
   | { type: "p"; text: string }
@@ -777,8 +778,9 @@ const CORE_INTENTS: Record<string, Intent> = {
 /* ------------------------------------------------------------------ */
 /* Suggestion sources                                                  */
 /* ------------------------------------------------------------------ */
-/* The chat UI surfaces exactly three suggested prompts (see ./prompt.ts);
- * they submit straight into the DeepSeek conversation. */
+/* The chat UI surfaces three suggested prompts (see ./prompt.ts); they
+ * submit straight into the Zybble AI conversation, and a used chip rotates
+ * out for a never-before-shown question from SUGGESTION_POOL. */
 
 /* ------------------------------------------------------------------ */
 /* Registry — core entries + authored packs                            */
@@ -790,6 +792,7 @@ for (const entry of [
   ...PACK_DATA_AI,
   ...PACK_PLANS,
   ...PACK_EXTRA,
+  ...PACK_COMPANY,
 ]) {
   if (!INTENTS[entry.id]) INTENTS[entry.id] = expand(entry);
 }

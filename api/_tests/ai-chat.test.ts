@@ -163,7 +163,7 @@ function framesOf(sse: string): Array<Record<string, unknown> | "[DONE]"> {
 }
 
 describe("POST /api/ai-chat — streaming contract", () => {
-  it("streams a transcoded DeepSeek reply as {text} frames terminated by [DONE]", async () => {
+  it("streams a transcoded provider reply as {text} frames terminated by [DONE]", async () => {
     installOpenRouterStub(
       openRouterStreamSse([
         'data: {"id":"c1","choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n',

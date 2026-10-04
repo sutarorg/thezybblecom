@@ -4,10 +4,10 @@
 /* One implementation shared by every AI surface in the browser: the   */
 /* /find request interpreter (through services/api) and the landing-   */
 /* page assistant. All calls go to the same-origin Zybble backend      */
-/* (/api/ai-chat), which runs DeepSeek V3.2 through OpenRouter's       */
-/* server-side API with a server-only OPENROUTER_API_KEY. The browser  */
-/* never holds an AI credential and is never sent to a third-party     */
-/* sign-in.                                                            */
+/* (/api/ai-chat), which runs Zybble AI server-side (through           */
+/* OpenRouter's server-side API with a server-only OPENROUTER_API_KEY).*/
+/* The browser never holds an AI credential and is never sent to a     */
+/* third-party sign-in.                                                */
 /*                                                                     */
 /* The route streams server-sent events of the form                    */
 /*   data: {"text": "…"} / data: {"error": "…"} / data: [DONE]         */
