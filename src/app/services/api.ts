@@ -8,7 +8,7 @@ import { planFromId, planLabel } from "../data/plans";
 import { mergeTags, validateTag } from "../lib/tags";
 import { formatAppDate, setRuntimePreferences, type RuntimePreferences } from "../lib/datetime";
 import { parseApiResponse } from "./api-response";
-import { readFunctionError } from "./edge-error";
+import { readBillingError, readFunctionError } from "./edge-error";
 import { cleanServerInterpretation } from "../../lib/openrouter-ai";
 import type {
   ActivityItem,
@@ -1438,6 +1438,17 @@ export async function getBilling(workspaceId: string): Promise<BillingState> {
   };
 }
 
+/**
+ * Billing is a Supabase-Edge-Function-only path by design: checkout/sync/
+ * cancel must write authoritative subscription state with the service-role
+ * key, which the Vercel `/api/*` routes deliberately refuse to hold (they
+ * only ever run with the caller's JWT under RLS — see api/_lib/supabase-server.ts
+ * and README "Architecture notes"). There is intentionally no same-origin
+ * fallback here, so the Edge Function *must* be deployed
+ * (`supabase functions deploy billing`) with its Razorpay secrets set
+ * (`supabase secrets set RAZORPAY_KEY_ID=… RAZORPAY_KEY_SECRET=… …`) for
+ * production billing to work at all.
+ */
 export async function startCheckout(planId: "growth" | "agency" | "scale") {
   const sb = getSupabase();
   if (!sb) return { error: CONFIG_ERROR };
@@ -1449,9 +1460,10 @@ export async function startCheckout(planId: "growth" | "agency" | "scale") {
     body: { action: "checkout", plan: planId },
     headers: { Authorization: `Bearer ${session.access_token}` },
   });
-  if (error) return { error: await readFunctionError(error, "billing", "billing") };
+  if (error) return { error: await readBillingError(error, "checkout") };
   if (data?.error) return { error: data.error };
-  return { url: data?.url as string };
+  if (!data?.url) return { error: "The payment provider didn't return a checkout link. Please try again." };
+  return { url: data.url as string };
 }
 
 export async function cancelSubscription() {
@@ -1465,22 +1477,38 @@ export async function cancelSubscription() {
     body: { action: "cancel" },
     headers: { Authorization: `Bearer ${session.access_token}` },
   });
-  if (error) return { error: await readFunctionError(error, "billing", "billing") };
+  if (error) return { error: await readBillingError(error, "cancel") };
   if (data?.error) return { error: data.error };
   return { ok: true as const };
 }
 
-export async function syncBilling() {
+/**
+ * Best-effort refresh of subscription state from Razorpay before the
+ * Billing page reads the (RLS-guarded) `subscriptions`/`invoices` tables.
+ * A failure here must never block the page — the tables still reflect the
+ * last known-good state — but it must not be swallowed silently either, so
+ * the caller can show a soft "couldn't refresh" notice instead of silently
+ * presenting stale data as if it were current.
+ */
+export async function syncBilling(): Promise<{ ok: boolean; error?: string }> {
   const sb = getSupabase();
-  if (!sb) return;
+  if (!sb) return { ok: false, error: CONFIG_ERROR };
   const {
     data: { session },
   } = await sb.auth.getSession();
-  if (!session) return;
-  await sb.functions.invoke("billing", {
-    body: { action: "sync" },
-    headers: { Authorization: `Bearer ${session.access_token}` },
-  }).catch(() => undefined);
+  if (!session) return { ok: false, error: "Your session expired — sign in again." };
+  try {
+    const { data, error } = await sb.functions.invoke("billing", {
+      body: { action: "sync" },
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    if (error) return { ok: false, error: await readBillingError(error, "sync") };
+    if (data?.error) return { ok: false, error: String(data.error) };
+    return { ok: true };
+  } catch (e) {
+    console.error("billing sync failed", e);
+    return { ok: false, error: await readBillingError(e, "sync") };
+  }
 }
 
 /* ------------------------------------------------------------------ */

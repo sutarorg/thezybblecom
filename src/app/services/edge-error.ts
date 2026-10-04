@@ -67,3 +67,29 @@ export async function readFunctionError(error: any, functionName = "requested", 
   }
   return safeClientError(error?.message, fallback);
 }
+
+/** True for the two classifications that mean "the Edge Function itself is
+ * unreachable or absent" rather than an application-level failure returned
+ * by a function that *did* run (bad plan, expired session, provider error…). */
+function isDeploymentClassification(message: string): boolean {
+  return /is not deployed\.$|couldn't be reached\. check that it is deployed/i.test(message);
+}
+
+/**
+ * Billing touches real money and a real subscription, so its user-facing
+ * copy is deliberately different from the generic Edge Function message:
+ * no internal jargon ("Edge Function", "deployed"), and a concrete next
+ * step that doesn't alarm a paying customer. The precise technical reason
+ * is still logged for engineers/support — it is just never rendered
+ * verbatim to the end user when it boils down to "we couldn't reach the
+ * server at all".
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function readBillingError(error: any, action: "checkout" | "sync" | "cancel"): Promise<string> {
+  const detail = await readFunctionError(error, "billing", "billing");
+  if (isDeploymentClassification(detail)) {
+    console.error("billing request unreachable", { action, detail });
+    return "Billing is temporarily unavailable. Your plan and payment details are unaffected — please try again in a few minutes. If this keeps happening, contact support@zybble.com.";
+  }
+  return detail;
+}
