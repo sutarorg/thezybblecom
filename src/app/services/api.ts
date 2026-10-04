@@ -517,6 +517,34 @@ export async function createWorkspace(name: string): Promise<Workspace> {
   return workspace;
 }
 
+/**
+ * Rename a workspace.
+ *
+ * Settings → Workspace used to show a name field, a "Save changes" button and
+ * a "Workspace saved" toast that wrote nothing: the new name vanished on the
+ * next load. The write is real now. RLS ("workspaces owner admin update")
+ * decides who may do it, so a member who is not owner/admin gets a clear
+ * permission error from the database rather than a silent no-op.
+ */
+export async function renameWorkspace(workspaceId: string, name: string): Promise<Workspace> {
+  const sb = requireClient();
+  const trimmed = name.trim();
+  if (trimmed.length < 2) throw new Error("Workspace name needs at least 2 characters.");
+  if (trimmed.length > 80) throw new Error("Keep the workspace name under 80 characters.");
+
+  const { data, error } = await sb
+    .from("workspaces")
+    .update({ name: trimmed })
+    .eq("id", workspaceId)
+    .select("*")
+    .maybeSingle();
+  if (error) throw new Error(readableError(error.message));
+  /* RLS filters the UPDATE rather than failing it, so "no row came back"
+     means "you are not allowed to rename this workspace" — say so. */
+  if (!data) throw new Error("Only a workspace owner or admin can rename it.");
+  return mapWorkspace(data);
+}
+
 export async function getDefaultWorkspace(): Promise<Workspace | null> {
   const all = await listWorkspacesWithRecovery();
   if (!all.length) {
@@ -1270,6 +1298,67 @@ export async function removeMember(workspaceId: string, memberId: string, status
 }
 
 /* ------------------------------------------------------------------ */
+/* Invitations received by the signed-in user                          */
+/* ------------------------------------------------------------------ */
+export type ReceivedInvitation = {
+  id: string;
+  workspaceId: string;
+  workspaceName: string;
+  role: Role;
+  invitedBy: string;
+  createdAt: string;
+};
+
+/**
+ * Pending invitations addressed to the signed-in user's own verified email.
+ *
+ * This is the missing half of the team flow: /api/team-invite created the
+ * invitation and emailed it, but nothing ever accepted it, so an invited
+ * teammate signed up, landed in their own personal workspace, and the
+ * invitation sat `pending` forever while still consuming a paid seat.
+ *
+ * The `list_my_invitations()` SECURITY DEFINER RPC resolves the caller's
+ * email server-side (auth.users is never client-readable) and returns only
+ * invitations addressed to it — a different user cannot enumerate or accept
+ * someone else's invitation by guessing its id.
+ */
+export async function listMyInvitations(): Promise<ReceivedInvitation[]> {
+  const sb = getSupabase();
+  if (!sb) return [];
+  const { data, error } = await sb.rpc("list_my_invitations");
+  /* An older database without the RPC must not break the app shell — the
+     rest of the workspace list still renders. */
+  if (error) {
+    if (/function .*list_my_invitations.* does not exist|schema cache/i.test(error.message)) return [];
+    throw new Error(readableError(error.message));
+  }
+  /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
+  return ((data as any[]) ?? []).map((row: any) => ({
+    id: String(row.id),
+    workspaceId: String(row.workspace_id),
+    workspaceName: String(row.workspace_name ?? "Workspace"),
+    role: (row.role === "admin" ? "admin" : "member") as Role,
+    invitedBy: String(row.invited_by ?? "A teammate"),
+    createdAt: String(row.created_at),
+  }));
+}
+
+/** Join the workspace. Returns its id. Idempotent — safe to double-click. */
+export async function acceptInvitation(invitationId: string): Promise<string> {
+  const sb = requireClient();
+  const { data, error } = await sb.rpc("accept_invitation", { invitation_id: invitationId });
+  if (error) throw new Error(readableError(error.message));
+  return String(data ?? "");
+}
+
+/** Decline the invitation and free the seat it was holding. */
+export async function declineInvitation(invitationId: string): Promise<void> {
+  const sb = requireClient();
+  const { error } = await sb.rpc("decline_invitation", { invitation_id: invitationId });
+  if (error) throw new Error(readableError(error.message));
+}
+
+/* ------------------------------------------------------------------ */
 /* Usage                                                               */
 /* ------------------------------------------------------------------ */
 export type UsageData = {
@@ -1298,7 +1387,9 @@ export async function getUsage(workspaceId: string, planId: string): Promise<Usa
     sb.from("exports").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).gte("created_at", start).lt("created_at", nextStart),
     sb.from("ai_requests").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).gte("created_at", start).lt("created_at", nextStart),
     sb.from("lead_lists").select("id").eq("workspace_id", workspaceId),
-    sb.from("usage_counters").select("*").eq("workspace_id", workspaceId).order("period_start", { ascending: true }).limit(12),
+    /* Most RECENT twelve periods. Ordering ascending with a limit returned the
+       twelve OLDEST rows, so the usage chart silently froze a year in. */
+    sb.from("usage_counters").select("*").eq("workspace_id", workspaceId).order("period_start", { ascending: false }).limit(12),
   ]);
 
   const listIds = (listsRes.data ?? []).map((l) => l.id);
@@ -1306,7 +1397,21 @@ export async function getUsage(workspaceId: string, planId: string): Promise<Usa
     ? await sb.from("lead_list_members").select("lead_id", { count: "exact", head: true }).in("list_id", listIds)
     : { count: 0 };
 
-  const used = leadCount.count ?? 0;
+  /*
+   * `usage_counters.leads_used` is the number the SERVER meters against:
+   * reserve_leads() reserves from it, refunds to it, and returns 429 when it
+   * reaches the allowance. Counting `leads` rows instead (what this used to
+   * do) drifts away from it the moment a lead is deleted — the Usage page and
+   * the sidebar would promise remaining quota that the next search refuses,
+   * and they disagreed with Overview, which already reads the counter.
+   * The lead count is kept only as the pre-counter fallback for a workspace
+   * whose period row has not been created yet.
+   */
+  const periodRow = (history.data ?? []).find(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (row: any) => String(row.period_start).slice(0, 10) === start
+  ) as { leads_used?: number } | undefined;
+  const used = periodRow ? Number(periodRow.leads_used ?? 0) : (leadCount.count ?? 0);
   const reset = new Date(`${nextStart}T00:00:00Z`);
 
   return {
@@ -1319,7 +1424,7 @@ export async function getUsage(workspaceId: string, planId: string): Promise<Usa
     leadsSaved: savedCount.count ?? 0,
     resetDate: formatAppDate(reset),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    monthly: (history.data ?? []).map((row: any) => ({
+    monthly: [...(history.data ?? [])].reverse().map((row: any) => ({
       label: new Date(row.period_start).toLocaleDateString(undefined, { month: "short" }),
       value: row.leads_used ?? 0,
     })),
@@ -1788,6 +1893,11 @@ export function readableError(message: string): string {
   if (m.includes("seat_limit")) return "You've reached your plan's team-seat limit.";
   if (m.includes("client_workspaces_not_available"))
     return "Client workspaces are available on Agency and Scale.";
+  if (m.includes("invitation_not_found")) return "That invitation no longer exists.";
+  if (m.includes("invitation_not_pending")) return "That invitation was already used or cancelled.";
+  if (m.includes("invitation_email_mismatch"))
+    return "That invitation was sent to a different email address. Sign in with the invited address.";
+  if (m.includes("owner_role_immutable")) return "The workspace owner's role can't be changed.";
   if (m.includes("invalid_tag_one_word")) return "Tags must be one word — no spaces.";
   if (m.includes("invalid_tag")) return "Use lowercase one-word tags with letters, numbers, hyphens, or underscores.";
   if (m.includes("duplicate key")) return "That already exists.";

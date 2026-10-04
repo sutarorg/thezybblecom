@@ -17,6 +17,7 @@ import {
   formatDate,
   useToast,
 } from "../components/ui";
+import { PendingInvitations } from "../components/PendingInvitations";
 import { WorkspacesSkeleton } from "../components/skeletons";
 import { planFromId } from "../data/plans";
 import type { Workspace } from "../data/types";
@@ -93,6 +94,10 @@ export function WorkspacesPage() {
       }
       wide
     >
+      {/* Invitations addressed to this user — accepting adds the workspace to
+          the list below and to the switcher. */}
+      <PendingInvitations onAccepted={load} />
+
       {!plan.clientWorkspaces && !busy ? (
         <Card className="mb-3 flex flex-wrap items-center gap-3 px-4 py-3">
           <span className="grid size-8 place-items-center rounded-md bg-neutral-100 text-neutral-400">

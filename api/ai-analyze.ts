@@ -13,6 +13,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { extractJsonObject } from "./_lib/interpret.js";
 import { OpenRouterError, getOpenRouterModel, openRouterChatJson } from "./_lib/openrouter.js";
+import { consumeRateLimit } from "./_lib/rate-limit.js";
 import {
   createUserSupabaseClient,
   requireSupabaseServerConfig,
@@ -24,6 +25,10 @@ type VercelResponse = ServerResponse & { status(code: number): VercelResponse; j
 type Json = Record<string, unknown>;
 
 export const maxDuration = 30;
+
+/* One analysis per lead is the normal shape of this feature; this ceiling is
+   far above any human workflow and far below a cost incident. */
+const ANALYZE_MAX_PER_MINUTE = 20;
 
 class ApiError extends Error {
   readonly status: number;
@@ -137,6 +142,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const { data: auth, error: authError } = await sb.auth.getUser(token);
     if (authError || !auth.user) throw new ApiError(401, "Your session expired — sign in again.", "auth_invalid");
+
+    /* Lead analysis calls a paid model and `refresh: true` deliberately
+       bypasses the ai_insights cache, so without a governor one signed-in
+       account could loop a single lead and spend OpenRouter credit without
+       limit. Best-effort per warm instance — see api/_lib/rate-limit.ts. */
+    if (consumeRateLimit("ai-analyze", auth.user.id, { max: ANALYZE_MAX_PER_MINUTE, windowMs: 60_000 })) {
+      throw new ApiError(429, "You're analyzing leads faster than Zybble AI can keep up. Try again in a minute.", "rate_limited");
+    }
 
     const { data: membership, error: membershipError } = await sb
       .from("workspace_members")

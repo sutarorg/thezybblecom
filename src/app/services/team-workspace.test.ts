@@ -32,11 +32,15 @@ vi.mock("./supabase", () => ({
 }));
 
 import {
+  acceptInvitation,
+  renameWorkspace,
   createWorkspace,
   getDefaultWorkspace,
   getSelectedWorkspaceId,
   getTeam,
+  declineInvitation,
   getWorkspace,
+  listMyInvitations,
   listWorkspaces,
   setSelectedWorkspaceId,
 } from "./api";
@@ -243,5 +247,140 @@ describe("getTeam", () => {
     const selects = builder.select.mock.calls.map(([columns]) => String(columns));
     for (const select of selects) expect(select).not.toContain("profiles:user_id");
     expect(h.from).not.toHaveBeenCalledWith("workspace_members");
+  });
+});
+
+
+/* ------------------------------------------------------------------ */
+/* Invitations received by the signed-in user                          */
+/*                                                                     */
+/* Before this change the product had no way to accept an invitation at
+   all: /api/team-invite emailed a link to /signup, the invitee created
+   their own personal workspace, and the invitation stayed `pending`
+   forever while still consuming one of the inviter's paid seats.       */
+/* ------------------------------------------------------------------ */
+describe("listMyInvitations", () => {
+  it("reads through the RPC that resolves the caller's email server-side", async () => {
+    h.rpc.mockResolvedValue({
+      data: [
+        {
+          id: "inv-1",
+          workspace_id: "ws-1",
+          workspace_name: "Acme workspace",
+          role: "admin",
+          invited_by: "Ada",
+          created_at: "2026-02-01T00:00:00.000Z",
+        },
+      ],
+      error: null,
+    });
+
+    const rows = await listMyInvitations();
+
+    expect(h.rpc).toHaveBeenCalledWith("list_my_invitations");
+    // auth.users is not client-readable, so the email must never be a filter
+    // the browser supplies — that is exactly how one user could enumerate or
+    // claim another user's invitation.
+    expect(h.from).not.toHaveBeenCalled();
+    expect(rows).toEqual([
+      {
+        id: "inv-1",
+        workspaceId: "ws-1",
+        workspaceName: "Acme workspace",
+        role: "admin",
+        invitedBy: "Ada",
+        createdAt: "2026-02-01T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("degrades quietly when the RPC has not been deployed yet", async () => {
+    h.rpc.mockResolvedValue({
+      data: null,
+      error: { message: 'Could not find the function public.list_my_invitations in the schema cache' },
+    });
+    await expect(listMyInvitations()).resolves.toEqual([]);
+  });
+
+  it("surfaces a real failure instead of pretending there are no invitations", async () => {
+    h.rpc.mockResolvedValue({ data: null, error: { message: "network timeout" } });
+    await expect(listMyInvitations()).rejects.toThrow("network timeout");
+  });
+});
+
+describe("acceptInvitation / declineInvitation", () => {
+  it("joins through the security-definer RPC and returns the workspace id", async () => {
+    h.rpc.mockResolvedValue({ data: "ws-1", error: null });
+    await expect(acceptInvitation("inv-1")).resolves.toBe("ws-1");
+    expect(h.rpc).toHaveBeenCalledWith("accept_invitation", { invitation_id: "inv-1" });
+  });
+
+  it("translates the seat-limit trigger into plan language", async () => {
+    h.rpc.mockResolvedValue({ data: null, error: { message: 'seat_limit_reached' } });
+    await expect(acceptInvitation("inv-1")).rejects.toThrow("team-seat limit");
+  });
+
+  it("explains an invitation addressed to a different email", async () => {
+    h.rpc.mockResolvedValue({ data: null, error: { message: "invitation_email_mismatch" } });
+    await expect(acceptInvitation("inv-1")).rejects.toThrow(/different email address/i);
+  });
+
+  it("declines through its own RPC", async () => {
+    h.rpc.mockResolvedValue({ data: true, error: null });
+    await expect(declineInvitation("inv-1")).resolves.toBeUndefined();
+    expect(h.rpc).toHaveBeenCalledWith("decline_invitation", { invitation_id: "inv-1" });
+  });
+});
+
+describe("renameWorkspace", () => {
+  /**
+   * Settings → Workspace showed a name field, a Save button and a
+   * "Workspace saved" toast while writing nothing at all; the old name came
+   * back on the next load. The write is real now, and RLS decides who may do
+   * it.
+   */
+  beforeEach(() => {
+    h.getSession.mockResolvedValue({ data: { session: { user: { id: "user-1" }, access_token: "t" } } });
+  });
+
+  function updateStub(result: { data: unknown; error: unknown }) {
+    const maybeSingle = vi.fn(async () => result);
+    const select = vi.fn(() => ({ maybeSingle }));
+    const eq = vi.fn(() => ({ select }));
+    const update = vi.fn(() => ({ eq }));
+    h.from.mockReturnValue({ update });
+    return { update, eq, select, maybeSingle };
+  }
+
+  it("writes the trimmed name to the workspaces row and returns the stored record", async () => {
+    const stub = updateStub({
+      data: { id: "ws-1", name: "Northwind Agency", plan_id: "agency", owner_id: "user-1", created_at: "2026-01-01T00:00:00Z" },
+      error: null,
+    });
+
+    const result = await renameWorkspace("ws-1", "  Northwind Agency  ");
+
+    expect(h.from).toHaveBeenCalledWith("workspaces");
+    expect(stub.update).toHaveBeenCalledWith({ name: "Northwind Agency" });
+    expect(stub.eq).toHaveBeenCalledWith("id", "ws-1");
+    expect(result.name).toBe("Northwind Agency");
+  });
+
+  it("rejects names the database would not accept, without touching the network", async () => {
+    h.from.mockReset();
+    await expect(renameWorkspace("ws-1", " a ")).rejects.toThrow(/at least 2 characters/i);
+    await expect(renameWorkspace("ws-1", "x".repeat(81))).rejects.toThrow(/under 80 characters/i);
+    expect(h.from).not.toHaveBeenCalled();
+  });
+
+  it("reports a permission problem when RLS filters the update away", async () => {
+    // RLS silently matches zero rows for a non-admin member rather than erroring.
+    updateStub({ data: null, error: null });
+    await expect(renameWorkspace("ws-1", "Renamed by a member")).rejects.toThrow(/owner or admin/i);
+  });
+
+  it("surfaces a readable database error", async () => {
+    updateStub({ data: null, error: { message: "new row violates row-level security policy" } });
+    await expect(renameWorkspace("ws-1", "Renamed")).rejects.toThrow();
   });
 });

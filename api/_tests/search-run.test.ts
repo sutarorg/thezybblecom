@@ -110,6 +110,7 @@ describe("search-run handler", () => {
     try {
       const { req, res, getStatus, getBody } = createMockReqRes({
         method: "POST",
+        headers: { authorization: "Bearer caller-session-token" },
         body: { workspaceId: "11111111-1111-1111-1111-111111111111", filters: { category: "cafes" } },
       });
       await handler(req, res);
@@ -117,6 +118,29 @@ describe("search-run handler", () => {
       expect(getBody()).toMatchObject({ code: "serpapi_config" });
     } finally {
       if (oldKey) process.env.SERPAPI_API_KEY = oldKey;
+    }
+  });
+
+  it("answers an unauthenticated caller with 401 and never reveals server configuration", async () => {
+    /* Regression: the SerpApi configuration probe used to run before the
+       bearer-token check, so anonymous requests received a 500 naming the
+       missing provider secret. Authentication comes first now. */
+    const savedKey = process.env.SERPAPI_API_KEY;
+    delete process.env.SERPAPI_API_KEY;
+    delete process.env.SERPAPI_KEY;
+    delete process.env.SERP_API_KEY;
+    try {
+      const { req, res, getStatus, getBody } = createMockReqRes({
+        method: "POST",
+        body: { workspaceId: "11111111-1111-1111-1111-111111111111", filters: { category: "cafes" } },
+      });
+      await handler(req, res);
+      expect(getStatus()).toBe(401);
+      const body = getBody() as { error: string; code: string };
+      expect(body.code).toBe("auth_missing");
+      expect(JSON.stringify(body)).not.toMatch(/SERPAPI|SUPABASE/i);
+    } finally {
+      if (savedKey !== undefined) process.env.SERPAPI_API_KEY = savedKey;
     }
   });
 
@@ -279,6 +303,7 @@ describe("search-run server-side Supabase configuration", () => {
     try {
       const { req, res, getStatus, getBody } = createMockReqRes({
         method: "POST",
+        headers: { authorization: "Bearer caller-session-token" },
         body: { workspaceId: "11111111-1111-1111-1111-111111111111", filters: { category: "cafes" } },
       });
       await handler(req, res);
