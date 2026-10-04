@@ -39,7 +39,7 @@ import {
   type UsageData,
 } from "../services/api";
 import { openRazorpayCheckout } from "../services/razorpay";
-import { formatMoney, formatRupees } from "../lib/money";
+import { formatDollars, formatMoney, LIST_CURRENCY } from "../lib/money";
 import { useWorkspaceContext } from "../services/hooks";
 
 export function BillingPage() {
@@ -204,7 +204,7 @@ export function BillingPage() {
                       </Badge>
                     </div>
                     <p className="mt-0.5 text-xs text-ink-mute">
-                      {formatMoney(plan.priceCents)}/month · billed monthly
+                      {formatMoney(plan.priceCents, LIST_CURRENCY)}/month · billed monthly
                     </p>
                   </div>
                 </div>
@@ -283,7 +283,7 @@ export function BillingPage() {
                   </div>
                   <p className="mt-1.5">
                     <span className="font-display text-[26px] font-semibold tracking-[-0.03em] text-ink">
-                      {formatRupees(p.price)}
+                      {formatDollars(p.price)}
                     </span>
                     <span className="text-xs text-ink-mute">/mo</span>
                   </p>

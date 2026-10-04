@@ -92,7 +92,7 @@ export const PACK_EXTRA: Compact[] = [
 
   /* ——— Pricing scenarios ——— */
   { id: "x-p-agency-clients", q: "How many clients can I serve on Agency?", c: "pricing", k: "clients how many agency serve accounts",
-    a: ["Agency (₹99/mo) includes client workspaces, 3 team members, and 15,000 leads a month — the lead allowance is usually the practical constraint."], cta: ["View pricing", "/#pricing"], f: ["workspaces", "plan-agency", "u-shared"] },
+    a: ["Agency ($99/mo) includes client workspaces, 3 team members, and 15,000 leads a month — the lead allowance is usually the practical constraint."], cta: ["View pricing", "/#pricing"], f: ["workspaces", "plan-agency", "u-shared"] },
   { id: "x-p-which-volume", q: "How do I know how many leads I need?", c: "pricing", k: "how many need estimate volume guess calculate",
     a: ["Work back from outreach: a few hundred leads a month sits inside Growth's 5,000; multi-market or multi-client work usually lands on Agency or Scale."], cta: ["View pricing", "/#pricing"], f: ["p-compare", "which-plan", "limits"] },
   { id: "x-p-start-small", q: "Can I start small and grow?", c: "pricing", k: "start small grow scale later increase gradually",
@@ -102,9 +102,9 @@ export const PACK_EXTRA: Compact[] = [
   { id: "x-p-value", q: "What am I paying for exactly?", c: "pricing", k: "paying value what get worth included",
     a: ["The monthly lead allowance plus the features at that tier — AI, unlimited lists, team seats, client workspaces, and priority processing at the top."], cta: ["View pricing", "/#pricing"], f: ["p-compare", "p-per-lead", "pricing-work"] },
   { id: "x-p-free-forever", q: "Is the Free plan time-limited?", c: "pricing", k: "free forever expire trial days limited time",
-    a: ["Free is listed as a **₹0/mo plan** with 50 leads a month — a tier, not a countdown."], cta: ["View pricing", "/#pricing"], f: ["plan-free", "gs-trial", "limits"] },
+    a: ["Free is listed as a **$0/mo plan** with 50 leads a month — a tier, not a countdown."], cta: ["View pricing", "/#pricing"], f: ["plan-free", "gs-trial", "limits"] },
   { id: "x-p-currency", q: "What currency are prices in?", c: "billing", k: "currency usd dollars eur local money",
-    a: ["Prices are listed in Indian rupees — ₹0, ₹49, ₹99, and ₹199 per month."], cta: ["View pricing", "/#pricing"], f: ["pricing-work", "b-payment", "p-hidden-fees"] },
+    a: ["Prices are listed in US dollars — $0, $49, $99, and $199 per month."], cta: ["View pricing", "/#pricing"], f: ["pricing-work", "b-payment", "p-hidden-fees"] },
   { id: "x-p-tax", q: "Are taxes included?", c: "billing", k: "tax vat gst included sales",
     a: ["The plan prices shown are the listed monthly rates. For a billing specific to your region, the contact page reaches a person."], cta: ["Contact us", "/contact"], f: ["b-payment", "contact", "p-hidden-fees"] },
   { id: "x-p-invoice", q: "Can I get an invoice?", c: "billing", k: "invoice receipt bill accounting expense",

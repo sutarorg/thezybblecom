@@ -428,10 +428,10 @@ const CORE_INTENTS: Record<string, Intent> = {
       {
         type: "list",
         items: [
-          "**Free** — ₹0/mo · 50 leads a month",
-          "**Growth** — ₹49/mo · 5,000 leads a month",
-          "**Agency** — ₹99/mo · 15,000 leads a month",
-          "**Scale** — ₹199/mo · 50,000 leads a month",
+          "**Free** — $0/mo · 50 leads a month",
+          "**Growth** — $49/mo · 5,000 leads a month",
+          "**Agency** — $99/mo · 15,000 leads a month",
+          "**Scale** — $199/mo · 50,000 leads a month",
         ],
       },
       {
@@ -450,11 +450,11 @@ const CORE_INTENTS: Record<string, Intent> = {
     answer: [
       {
         type: "p",
-        text: "It depends on volume. **Free (₹0/mo)** covers a first real search with 50 leads a month — enough to evaluate the product.",
+        text: "It depends on volume. **Free ($0/mo)** covers a first real search with 50 leads a month — enough to evaluate the product.",
       },
       {
         type: "p",
-        text: "For everyday prospecting, **Growth (₹49/mo)** raises that to 5,000 leads with unlimited lists. Agencies add team seats and client workspaces on **Agency** and **Scale**.",
+        text: "For everyday prospecting, **Growth ($49/mo)** raises that to 5,000 leads with unlimited lists. Agencies add team seats and client workspaces on **Agency** and **Scale**.",
       },
     ],
     cta: { label: "View pricing", href: "/#pricing" },
@@ -466,7 +466,7 @@ const CORE_INTENTS: Record<string, Intent> = {
     category: "pricing",
     keywords: ["cheap", "cheapest", "free", "start", "zero", "cost"],
     answer: [
-      { type: "heading", text: "Free — ₹0/mo" },
+      { type: "heading", text: "Free — $0/mo" },
       {
         type: "list",
         items: [
@@ -491,7 +491,7 @@ const CORE_INTENTS: Record<string, Intent> = {
     category: "pricing",
     keywords: ["growth", "49", "5000", "5,000"],
     answer: [
-      { type: "heading", text: "Growth — ₹49/mo" },
+      { type: "heading", text: "Growth — $49/mo" },
       {
         type: "list",
         items: [
@@ -517,7 +517,7 @@ const CORE_INTENTS: Record<string, Intent> = {
     category: "pricing",
     keywords: ["agency", "99", "15000", "15,000", "clients"],
     answer: [
-      { type: "heading", text: "Agency — ₹99/mo" },
+      { type: "heading", text: "Agency — $99/mo" },
       {
         type: "list",
         items: [
@@ -541,7 +541,7 @@ const CORE_INTENTS: Record<string, Intent> = {
     category: "pricing",
     keywords: ["scale", "199", "50000", "50,000", "priority"],
     answer: [
-      { type: "heading", text: "Scale — ₹199/mo" },
+      { type: "heading", text: "Scale — $199/mo" },
       {
         type: "list",
         items: [
@@ -567,11 +567,11 @@ const CORE_INTENTS: Record<string, Intent> = {
     answer: [
       {
         type: "p",
-        text: "That maps to **Growth — ₹49/mo**: 5,000 leads a month, unlimited lists, phone and email data, and CSV export.",
+        text: "That maps to **Growth — $49/mo**: 5,000 leads a month, unlimited lists, phone and email data, and CSV export.",
       },
       {
         type: "p",
-        text: "If you also need teammates or client workspaces, that's **Agency — ₹99/mo** with 15,000 leads.",
+        text: "If you also need teammates or client workspaces, that's **Agency — $99/mo** with 15,000 leads.",
       },
     ],
     cta: { label: "View pricing", href: "/#pricing" },
@@ -585,7 +585,7 @@ const CORE_INTENTS: Record<string, Intent> = {
     answer: [
       {
         type: "p",
-        text: "That maps to **Scale — ₹199/mo**: 50,000 leads a month, 5 team members, client workspaces, and priority lead processing.",
+        text: "That maps to **Scale — $199/mo**: 50,000 leads a month, 5 team members, client workspaces, and priority lead processing.",
       },
       {
         type: "p",
@@ -605,7 +605,7 @@ const CORE_INTENTS: Record<string, Intent> = {
     answer: [
       {
         type: "p",
-        text: "Yes — **Agency (₹99/mo)** and **Scale (₹199/mo)** are built for it. Both include **client workspaces**, so each client's searches, lists, and exports stay separate.",
+        text: "Yes — **Agency ($99/mo)** and **Scale ($199/mo)** are built for it. Both include **client workspaces**, so each client's searches, lists, and exports stay separate.",
       },
       {
         type: "p",
