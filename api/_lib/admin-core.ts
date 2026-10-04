@@ -231,6 +231,13 @@ export async function requireAdmin(req: VercelRequest): Promise<AdminContext> {
     data: { user },
     error,
   } = await sb.auth.getUser(token);
+  if (error && (error.name === "AuthRetryableFetchError" || error.status === 0)) {
+    // The token may be perfectly valid — we simply couldn't reach Supabase.
+    // Saying "your session expired" here would send the operator chasing the
+    // wrong problem.
+    console.error("admin authorization", { route: ADMIN_ROUTE, code: "auth_unreachable" });
+    throw new AdminApiError(503, "We couldn't reach the authentication service. Try again in a moment.", "auth_unreachable");
+  }
   if (error || !user) throw new AdminApiError(401, "Your session expired — sign in again.", "auth_invalid");
 
   const { data: profile, error: profileError } = await sb

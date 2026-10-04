@@ -188,6 +188,17 @@ describe("authorization", () => {
     expect(h.rpc).not.toHaveBeenCalled();
   });
 
+  it("says the auth service is unreachable instead of blaming the session", async () => {
+    h.getUser.mockResolvedValue({
+      data: { user: null },
+      error: { name: "AuthRetryableFetchError", message: "fetch failed", status: 0 },
+    });
+    const { req, res, getStatus, getBody } = createMockReqRes({ url: "/api/admin?path=me" });
+    await handler(req, res);
+    expect(getStatus()).toBe(503);
+    expect(getBody().code).toBe("auth_unreachable");
+  });
+
   it("rejects a signed-in customer whose profile role is not admin", async () => {
     asAdmin("user");
     const { req, res, getStatus, getBody } = createMockReqRes({ url: "/api/admin?path=users" });
