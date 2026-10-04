@@ -217,3 +217,74 @@ old values.
 - [ ] Renewal (`subscription.charged`) extends the period and creates one invoice.
 - [ ] Amounts display as ₹ everywhere; no USD anywhere.
 - [ ] `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` and the service-role key appear in **no** browser payload or bundle.
+
+---
+
+## D. Admin console (`/admin`)
+
+The console is already in the code. It is **not** usable until the database
+migration has been applied and at least one account holds the admin role.
+
+### D1. What the code already does (nothing to do)
+
+| Area | What was added |
+| --- | --- |
+| Database | `supabase/migrations/0008_admin_console.sql` — idempotent and additive (`0001`–`0007` untouched). Adds the append-only `admin_audit_logs` table, ~30 operational indexes, and 19 `security definer` reporting/mutation functions that are **revoked from `anon` and `authenticated`** and granted only to `service_role`. No existing RLS policy is relaxed. |
+| API | One Vercel function, `api/admin.ts`, serving every `/api/admin/*` endpoint. It verifies the caller's Supabase JWT, re-reads `profiles.role` from the database on **every** request (reads and writes), and only then uses the privileged server client. Errors are always `{error, code}` — never a raw Postgres message. |
+| Audit | Every privileged mutation requires a typed reason plus an explicit confirmation, and writes an `admin_audit_logs` row with actor, action, target, before/after state, reason, IP and user agent — including when the action fails. |
+| UI | `/admin` and its 14 sub-routes, in their own lazy chunk and their own layout (not the customer `AppLayout`). The UI gate calls `GET /api/admin/me`; the client never holds a privileged credential. |
+
+### D2. Apply the migration (required)
+
+1. `supabase db push` from the repo root, **or** paste
+   `supabase/migrations/0008_admin_console.sql` into Dashboard → SQL Editor → Run.
+2. Verify:
+   ```sql
+   select count(*) from pg_proc where proname like 'admin\_%';   -- expect 19
+   select relrowsecurity from pg_class where relname = 'admin_audit_logs'; -- t
+   ```
+
+### D3. Make the first administrator (required, one time)
+
+`profiles.role` is protected by a trigger, so promote the first admin with SQL
+(the console can do every promotion after that):
+
+```sql
+update profiles set role = 'admin'
+where id = (select id from auth.users where email = 'you@yourdomain.com');
+```
+
+Then sign in and open `https://zybble.com/admin`.
+
+### D4. Environment variables
+
+The console adds **no new variables**. It reuses the server-side values that
+`/api/billing` already needs:
+
+| Variable | Where | Public/secret | Needed for | Redeploy |
+| --- | --- | --- | --- | --- |
+| `SUPABASE_URL` | Vercel → Environment Variables | public value, server-side | all admin endpoints | yes |
+| `SUPABASE_SERVICE_ROLE_KEY` (or `SUPABASE_SECRET_KEY`) | Vercel | **secret — never `VITE_`** | all admin endpoints | yes |
+| `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` | Vercel | **secret** | the "Reconcile with Razorpay" action only | yes |
+| `SERPAPI_API_KEY`, `OPENROUTER_API_KEY`, `RESEND_API_KEY`, `RAZORPAY_WEBHOOK_SECRET`, `RAZORPAY_PLAN_*_ID`, `APP_URL` | Vercel | **secret** (plan ids: non-public config) | reported as present/missing on `/admin/system`; not required by the console itself | yes |
+
+Nothing admin-related belongs in a `VITE_*` variable. If a secret ever appears
+in one, it is in the browser bundle and must be rotated.
+
+### D5. Production checklist
+
+- [ ] Migration 0008 applied; 19 `admin_*` functions exist.
+- [ ] At least one `profiles.role = 'admin'` account exists.
+- [ ] A normal customer hitting `/admin` sees "Admin access required", and
+      `curl -H "Authorization: Bearer <their token>" https://zybble.com/api/admin/users`
+      returns **403**.
+- [ ] No token at all returns **401** from every `/api/admin/*` endpoint.
+- [ ] `/admin/users/<id>` survives a hard refresh (Vercel rewrite + SPA route).
+- [ ] Granting a role, suspending an account, editing a plan, adjusting a quota
+      and reconciling a subscription each appear in `/admin/audit-logs` with a
+      reason.
+- [ ] `update admin_audit_logs set action = 'x';` fails with
+      `admin_audit_logs is append-only` (test it in the SQL editor).
+- [ ] A suspended account really cannot sign in.
+- [ ] `/admin/system` shows the database as Healthy and the credentials you set
+      as Configured.

@@ -27,8 +27,32 @@ function vercelApiDev(mode: string): Plugin {
         if (!url.startsWith("/api/")) return next();
 
         const route = url.replace(/^\/api\//, "").replace(/\/$/, "");
-        const file = path.resolve(__dirname, "api", `${route}.ts`);
-        if (!route || !fs.existsSync(file)) return next();
+        if (!route) return next();
+
+        // Resolve the longest `api/<file>.ts` prefix and hand the remainder to
+        // the handler as `?path=…`, mirroring the production rewrite
+        // `/api/admin/:path*` → `/api/admin?path=:path*` (Vercel rewrites do
+        // not preserve the original pathname, so nested admin routes must be
+        // read from the query string in both environments).
+        const parts = route.split("/");
+        let file = "";
+        let rest = "";
+        for (let depth = parts.length; depth > 0; depth -= 1) {
+          const candidate = path.resolve(__dirname, "api", `${parts.slice(0, depth).join("/")}.ts`);
+          if (fs.existsSync(candidate)) {
+            file = candidate;
+            rest = parts.slice(depth).join("/");
+            break;
+          }
+        }
+        if (!file) return next();
+
+        if (rest) {
+          const [, search = ""] = (req.url ?? "").split("?");
+          const query = new URLSearchParams(search);
+          query.set("path", rest);
+          req.url = `/api/${parts.slice(0, parts.length - rest.split("/").length).join("/")}?${query.toString()}`;
+        }
 
         try {
           const chunks: Buffer[] = [];

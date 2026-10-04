@@ -1,13 +1,11 @@
-import { createClient, type SupabaseClient, type User } from "@supabase/supabase-js";
-import { Buffer } from "node:buffer";
+import { type SupabaseClient, type User } from "@supabase/supabase-js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
-  looksLikeServiceRoleKey,
-  missingEnvMessage,
   readServerEnv,
   SupabaseServerConfigError,
-  SUPABASE_URL_VAR,
 } from "./_lib/supabase-server.js";
+import { createServiceClient } from "./_lib/supabase-service.js";
+import { razorpayRequest, requireRazorpayCredentials, RazorpayError } from "./_lib/razorpay.js";
 import {
   BILLING_CURRENCY,
   checkoutMethodConfig,
@@ -26,8 +24,6 @@ type Json = Record<string, unknown>;
 
 export const maxDuration = 60;
 
-const SERVICE_ROLE_VARS = ["SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SECRET_KEY"] as const;
-const SECRET_KEYS_VAR = "SUPABASE_SECRET_KEYS";
 const PLAN_ENV: Record<"growth" | "agency" | "scale", string> = {
   growth: "RAZORPAY_PLAN_GROWTH_ID",
   agency: "RAZORPAY_PLAN_AGENCY_ID",
@@ -35,12 +31,6 @@ const PLAN_ENV: Record<"growth" | "agency" | "scale", string> = {
 };
 
 type BillingAction = "checkout" | "verify" | "sync" | "cancel";
-
-type SupabaseServiceConfig = {
-  url: string;
-  key: string;
-  keyVariable: string;
-};
 
 class ApiError extends Error {
   readonly status: number;
@@ -54,90 +44,14 @@ class ApiError extends Error {
   }
 }
 
-function isHttpUrl(value: string): boolean {
-  try {
-    const parsed = new URL(value);
-    return (parsed.protocol === "https:" || parsed.protocol === "http:") && Boolean(parsed.hostname);
-  } catch {
-    return false;
-  }
-}
-
-function readSecretKeysDefault(): string {
-  const raw = readServerEnv(SECRET_KEYS_VAR);
-  if (!raw) return "";
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return typeof parsed.default === "string" ? parsed.default.trim() : "";
-  } catch {
-    throw new SupabaseServerConfigError(
-      `The billing server has invalid Supabase secret configuration. ${SECRET_KEYS_VAR} must be the JSON value Supabase provides, with a string default key.`,
-      "invalid_url",
-    );
-  }
-}
-
-function requireSupabaseServiceConfig(): SupabaseServiceConfig {
-  const url = readServerEnv(SUPABASE_URL_VAR);
-  let key = readServerEnv(...SERVICE_ROLE_VARS);
-  let keyVariable = key
-    ? SERVICE_ROLE_VARS.find((name) => readServerEnv(name) === key) ?? SERVICE_ROLE_VARS[0]
-    : "";
-
-  if (!key) {
-    key = readSecretKeysDefault();
-    keyVariable = key ? SECRET_KEYS_VAR : "";
-  }
-
-  const missing: string[] = [];
-  if (!url) missing.push(SUPABASE_URL_VAR);
-  if (!key) missing.push(`${SERVICE_ROLE_VARS[0]} (or ${SERVICE_ROLE_VARS[1]} or ${SECRET_KEYS_VAR})`);
-
-  if (missing.length > 0) {
-    const message =
-      `The billing server isn't connected to Supabase with write access. ${missingEnvMessage(missing)} ` +
-      `Add the Supabase service-role/secret key only to the server environment, then redeploy. ` +
-      `Do not use VITE_SUPABASE_* or the publishable key for billing writes.`;
-    console.error("server config", { runtime: "vercel-function", route: "/api/billing", code: "supabase_config", problem: "missing", missing });
-    throw new SupabaseServerConfigError(message, "missing", missing);
-  }
-
-  if (!isHttpUrl(url)) {
-    const message =
-      `The billing server has invalid Supabase configuration. ` +
-      `${SUPABASE_URL_VAR} isn't a valid URL — it should be your project URL with the https scheme.`;
-    console.error("server config", { runtime: "vercel-function", route: "/api/billing", code: "supabase_config", problem: "invalid_url" });
-    throw new SupabaseServerConfigError(message, "invalid_url");
-  }
-
-  if (!looksLikeServiceRoleKey(key)) {
-    const message =
-      `The billing server has invalid Supabase configuration. ` +
-      `${keyVariable || SERVICE_ROLE_VARS[0]} must be the Supabase service-role/secret key, not the publishable/anon key. ` +
-      `Billing writes are server-only and never use VITE_SUPABASE_* values.`;
-    console.error("server config", { runtime: "vercel-function", route: "/api/billing", code: "supabase_config", problem: "not_service_role", keyVariable });
-    throw new SupabaseServerConfigError(message, "secret_key");
-  }
-
-  return { url, key, keyVariable };
-}
-
+/**
+ * Privileged Supabase client. Billing is the one customer-facing route that
+ * needs write access (it persists verified Razorpay state), and it only ever
+ * touches the authenticated caller's own rows. Configuration and the
+ * "never accept a publishable key here" guard live in _lib/supabase-service.
+ */
 function serviceClient(): SupabaseClient {
-  const config = requireSupabaseServiceConfig();
-  try {
-    return createClient(config.url, config.key, {
-      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-      global: {
-        fetch: (input, init = {}) => fetch(input, { ...init, signal: AbortSignal.timeout(10_000) }),
-      },
-    });
-  } catch {
-    console.error("server config", { runtime: "vercel-function", route: "/api/billing", code: "supabase_config", problem: "client_creation", keyVariable: config.keyVariable });
-    throw new SupabaseServerConfigError(
-      "The billing server has invalid Supabase configuration. Check SUPABASE_URL and the service-role key for formatting errors.",
-      "client_creation",
-    );
-  }
+  return createServiceClient("billing", "/api/billing");
 }
 
 function bodyOf(req: VercelRequest): Json {
@@ -180,54 +94,20 @@ function requirePlanId(plan: PaidPlanId) {
 }
 
 function requireRazorpayConfig() {
-  const keyId = readServerEnv("RAZORPAY_KEY_ID");
-  const secret = readServerEnv("RAZORPAY_KEY_SECRET");
-  if (!keyId || !secret) {
-    const missing = [!keyId && "RAZORPAY_KEY_ID", !secret && "RAZORPAY_KEY_SECRET"].filter(Boolean) as string[];
-    throw new ApiError(
-      500,
-      `Razorpay isn't configured on the billing server. ${missingEnvMessage(missing)} Add the missing server secret${missing.length > 1 ? "s" : ""}, then redeploy.`,
-      "billing_config",
-    );
+  try {
+    return requireRazorpayCredentials("billing");
+  } catch (error) {
+    throw error instanceof RazorpayError ? new ApiError(error.status, error.message, error.code) : error;
   }
-  return { keyId, secret };
 }
 
+/** Razorpay v1 call with this route's error vocabulary. */
 export async function razorpay(path: string, init: RequestInit = {}) {
-  const { keyId, secret } = requireRazorpayConfig();
-  let response: Response;
   try {
-    response = await fetch(`https://api.razorpay.com/v1${path}`, {
-      ...init,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Basic ${Buffer.from(`${keyId}:${secret}`).toString("base64")}`,
-        ...(init.headers ?? {}),
-      },
-      signal: AbortSignal.timeout(15_000),
-    });
+    return await razorpayRequest(path, init, "billing");
   } catch (error) {
-    const timedOut = error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
-    throw new ApiError(
-      timedOut ? 504 : 502,
-      timedOut ? "Our payment provider took too long to respond." : "Our payment provider couldn't be reached. Please try again shortly.",
-      timedOut ? "provider_timeout" : "provider_unreachable",
-    );
+    throw error instanceof RazorpayError ? new ApiError(error.status, error.message, error.code) : error;
   }
-
-  const bodyText = await response.text().catch(() => "");
-  let body: unknown = null;
-  try {
-    body = bodyText ? JSON.parse(bodyText) : null;
-  } catch {
-    body = null;
-  }
-
-  if (!response.ok) {
-    console.error("provider request", { provider: "razorpay", status: response.status, responseKind: bodyText ? "body" : "empty" });
-    throw new ApiError(502, "Our payment provider couldn't complete that action.", "provider_error");
-  }
-  return body as Json;
 }
 
 async function requireCaller(sb: SupabaseClient, token: string): Promise<User> {

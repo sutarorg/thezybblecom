@@ -67,6 +67,8 @@ const WorkspaceDetailPage = lazy(() => import("./app/pages/WorkspaceDetail").the
 const BillingPage = lazy(() => import("./app/pages/Billing").then((m) => ({ default: m.BillingPage })));
 const UsagePage = lazy(() => import("./app/pages/Usage").then((m) => ({ default: m.UsagePage })));
 const SettingsPage = lazy(() => import("./app/pages/Settings").then((m) => ({ default: m.SettingsPage })));
+/* The admin console is its own chunk: customers never download it. */
+const AdminRoutes = lazy(() => import("./app/admin").then((m) => ({ default: m.AdminRoutes })));
 
 /* ------------------------------------------------------------------ */
 /* Marketing home                                                      */
@@ -179,6 +181,25 @@ VITE_SUPABASE_PUBLISHABLE_KEY`}
         </a>
       </div>
     </div>
+  );
+}
+
+/**
+ * The admin console lives outside the customer shell: its own layout, its own
+ * chunk, and its own gate. Authorization itself is decided by the server
+ * (GET /api/admin/me) inside <AdminRoutes>, so an unauthorised visitor gets
+ * the same answer whether they navigate, refresh or paste the URL.
+ */
+function AdminArea() {
+  if (!BACKEND_ENABLED) return <BackendMissing />;
+  return (
+    <ErrorBoundary>
+      <ToastProvider>
+        <Suspense fallback={<Splash label="Loading the admin console…" />}>
+          <AdminRoutes />
+        </Suspense>
+      </ToastProvider>
+    </ErrorBoundary>
   );
 }
 
@@ -298,6 +319,9 @@ export function RoutedApp() {
         <Route path="/billing" element={<Protected><BillingPage /></Protected>} />
         <Route path="/usage" element={<Protected><UsagePage /></Protected>} />
         <Route path="/settings" element={<Protected><SettingsPage /></Protected>} />
+
+        {/* admin console (server-authorised) */}
+        <Route path="/admin/*" element={<AdminArea />} />
 
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
