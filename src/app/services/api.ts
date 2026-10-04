@@ -1,7 +1,7 @@
 /* ------------------------------------------------------------------ */
 /* Zybble — production service layer.                                  */
 /* No mock data, no simulated success. Reads go through RLS-guarded    */
-/* PostgREST; provider/money actions go through Edge Functions.        */
+/* PostgREST; provider/money actions go through server functions.      */
 /* ------------------------------------------------------------------ */
 import { getSupabase, BACKEND_ENABLED } from "./supabase";
 import { planFromId, planLabel } from "../data/plans";
@@ -1438,16 +1438,74 @@ export async function getBilling(workspaceId: string): Promise<BillingState> {
   };
 }
 
+type BillingAction = "checkout" | "sync" | "cancel";
+type BillingActionBody =
+  | { action: "checkout"; plan: "growth" | "agency" | "scale" }
+  | { action: "sync" }
+  | { action: "cancel" };
+
+function canFallbackFromBillingRoute(code?: string, shouldFallback = false) {
+  // 404/HTML means this deployment simply does not have the same-origin
+  // function. Config errors happen before any Razorpay request is made, so an
+  // already-deployed Supabase Edge Function is still safe to try. Provider and
+  // DB-write errors are not retried because they may represent a request that
+  // has already touched Razorpay.
+  return shouldFallback || code === "supabase_config" || code === "billing_config";
+}
+
+async function billingRequest(
+  sb: NonNullable<ReturnType<typeof getSupabase>>,
+  sessionToken: string,
+  body: BillingActionBody,
+): Promise<{ data?: Record<string, unknown>; error?: string }> {
+  let routeConfigError = "";
+  let routeError = "";
+
+  try {
+    const response = await fetch("/api/billing", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${sessionToken}`,
+      },
+      body: JSON.stringify(body),
+    });
+    const parsed = await parseApiResponse<Record<string, unknown>>(response, "billing");
+    if (parsed.data) return { data: parsed.data };
+    routeError = parsed.error ?? "";
+    if (parsed.code === "supabase_config" || parsed.code === "billing_config") routeConfigError = routeError;
+    if (!canFallbackFromBillingRoute(parsed.code, parsed.shouldFallback)) {
+      return { error: routeError || "Billing couldn't complete that action. Please try again." };
+    }
+  } catch {
+    // Same-origin route unavailable (plain Vite/non-Vercel deployment); use the
+    // Supabase Edge Function below.
+  }
+
+  try {
+    const { data, error } = await sb.functions.invoke("billing", {
+      body,
+      headers: { Authorization: `Bearer ${sessionToken}` },
+    });
+    if (error) {
+      const edgeError = await readBillingError(error, body.action as BillingAction);
+      return { error: routeConfigError || edgeError || routeError || "Billing couldn't complete that action. Please try again." };
+    }
+    if (data?.error) return { error: String(data.error) };
+    return { data: (data ?? {}) as Record<string, unknown> };
+  } catch (e) {
+    console.error("billing request failed", e);
+    const edgeError = await readBillingError(e, body.action as BillingAction);
+    return { error: routeConfigError || edgeError || routeError || "Billing couldn't complete that action. Please try again." };
+  }
+}
+
 /**
- * Billing is a Supabase-Edge-Function-only path by design: checkout/sync/
- * cancel must write authoritative subscription state with the service-role
- * key, which the Vercel `/api/*` routes deliberately refuse to hold (they
- * only ever run with the caller's JWT under RLS — see api/_lib/supabase-server.ts
- * and README "Architecture notes"). There is intentionally no same-origin
- * fallback here, so the Edge Function *must* be deployed
- * (`supabase functions deploy billing`) with its Razorpay secrets set
- * (`supabase secrets set RAZORPAY_KEY_ID=… RAZORPAY_KEY_SECRET=… …`) for
- * production billing to work at all.
+ * Billing prefers the same-origin `/api/billing` server function so production
+ * checkout does not depend on browser-to-Supabase Edge networking/CORS. If a
+ * deployment has not picked up that route yet, we fall back to the existing
+ * Supabase Edge Function with the same request contract. Both paths keep
+ * Razorpay keys and Supabase write credentials server-side only.
  */
 export async function startCheckout(planId: "growth" | "agency" | "scale") {
   const sb = getSupabase();
@@ -1456,12 +1514,9 @@ export async function startCheckout(planId: "growth" | "agency" | "scale") {
     data: { session },
   } = await sb.auth.getSession();
   if (!session) return { error: "Your session expired — sign in again." };
-  const { data, error } = await sb.functions.invoke("billing", {
-    body: { action: "checkout", plan: planId },
-    headers: { Authorization: `Bearer ${session.access_token}` },
-  });
-  if (error) return { error: await readBillingError(error, "checkout") };
-  if (data?.error) return { error: data.error };
+
+  const { data, error } = await billingRequest(sb, session.access_token, { action: "checkout", plan: planId });
+  if (error) return { error };
   if (!data?.url) return { error: "The payment provider didn't return a checkout link. Please try again." };
   return { url: data.url as string };
 }
@@ -1473,12 +1528,9 @@ export async function cancelSubscription() {
     data: { session },
   } = await sb.auth.getSession();
   if (!session) return { error: "Your session expired — sign in again." };
-  const { data, error } = await sb.functions.invoke("billing", {
-    body: { action: "cancel" },
-    headers: { Authorization: `Bearer ${session.access_token}` },
-  });
-  if (error) return { error: await readBillingError(error, "cancel") };
-  if (data?.error) return { error: data.error };
+
+  const { error } = await billingRequest(sb, session.access_token, { action: "cancel" });
+  if (error) return { error };
   return { ok: true as const };
 }
 
@@ -1497,18 +1549,10 @@ export async function syncBilling(): Promise<{ ok: boolean; error?: string }> {
     data: { session },
   } = await sb.auth.getSession();
   if (!session) return { ok: false, error: "Your session expired — sign in again." };
-  try {
-    const { data, error } = await sb.functions.invoke("billing", {
-      body: { action: "sync" },
-      headers: { Authorization: `Bearer ${session.access_token}` },
-    });
-    if (error) return { ok: false, error: await readBillingError(error, "sync") };
-    if (data?.error) return { ok: false, error: String(data.error) };
-    return { ok: true };
-  } catch (e) {
-    console.error("billing sync failed", e);
-    return { ok: false, error: await readBillingError(e, "sync") };
-  }
+
+  const { error } = await billingRequest(sb, session.access_token, { action: "sync" });
+  if (error) return { ok: false, error };
+  return { ok: true };
 }
 
 /* ------------------------------------------------------------------ */

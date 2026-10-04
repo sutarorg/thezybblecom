@@ -51,16 +51,17 @@ describe("Vercel routing", () => {
     expect(routePattern.test("/api/ai-interpret")).toBe(false);
     expect(routePattern.test("/api/ai-analyze")).toBe(false);
     expect(routePattern.test("/api/ai-chat")).toBe(false);
+    expect(routePattern.test("/api/billing")).toBe(false);
   });
 
-  it("routes every browser AI surface to a deployed same-origin function", () => {
-    // The browser must never leave the site for AI: interpret, analyze, and
-    // the Ask Zybble chat all POST to same-origin /api routes. If one of
-    // these files disappears the matching UI falls back to the Edge Function
-    // or breaks, so keep the routing contract explicit.
+  it("routes every browser AI and billing surface to a deployed same-origin function", () => {
+    // The browser must never leave the site for AI. Billing also prefers a
+    // same-origin route so checkout/sync/cancel are not blocked by browser ↔
+    // Supabase Edge networking, with the Edge Function kept as a fallback.
     expect(deployedApiFunctions).toContain("ai-interpret.ts");
     expect(deployedApiFunctions).toContain("ai-analyze.ts");
     expect(deployedApiFunctions).toContain("ai-chat.ts");
+    expect(deployedApiFunctions).toContain("billing.ts");
   });
 
   it("passes /api through the SPA fallback file untouched", () => {
