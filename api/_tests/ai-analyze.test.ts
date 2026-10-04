@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import handler from "../ai-analyze.js";
 import { getOpenRouterModel } from "../_lib/openrouter.js";
+import { resetRateLimits } from "../_lib/rate-limit.js";
 
 /** Minimal Vercel-shaped req/res pair (same pattern as the sibling suites). */
 function createMockReqRes(options: { method?: string; headers?: Record<string, string>; body?: unknown }) {
@@ -126,6 +127,8 @@ const savedEnv: Record<string, string | undefined> = {};
 const ENV_KEYS = ["SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODEL"] as const;
 
 beforeEach(() => {
+  // The abuse governor is module-level state shared by every case in this file.
+  resetRateLimits();
   for (const key of ENV_KEYS) savedEnv[key] = process.env[key];
   process.env.SUPABASE_URL = "https://api.test";
   process.env.SUPABASE_PUBLISHABLE_KEY = "publishable-key";
@@ -427,5 +430,76 @@ describe("POST /api/ai-analyze", () => {
     const { req, res, getStatus } = createMockReqRes({ method: "GET" });
     await handler(req, res);
     expect(getStatus()).toBe(405);
+  });
+});
+
+describe("POST /api/ai-analyze abuse controls", () => {
+  it("stops a single account from looping refresh:true against the paid model", async () => {
+    /* Regression: `refresh: true` bypasses the ai_insights cache and nothing
+       metered it, so one signed-in Free account could spend OpenRouter credit
+       in a loop. Lead analysis is now governed per user. */
+    let providerCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes("openrouter.ai")) {
+          providerCalls += 1;
+          return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(ANALYSIS) } }] }), {
+            status: 200,
+            headers: FALLBACK_DB.headers,
+          });
+        }
+        return supabaseStub({})(input, init);
+      }),
+    );
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const statuses: number[] = [];
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      const { req, res, getStatus } = createMockReqRes({
+        method: "POST",
+        body: { leadId: LEAD_ID, workspaceId: WORKSPACE_ID, refresh: true },
+        headers: { authorization: "Bearer user-token-1" },
+      });
+      await handler(req, res);
+      statuses.push(getStatus());
+    }
+
+    expect(statuses.filter((status) => status === 200).length).toBe(20);
+    expect(statuses.filter((status) => status === 429).length).toBe(5);
+    // The provider is never reached once the governor trips.
+    expect(providerCalls).toBe(20);
+  });
+
+  it("answers a throttled caller with a retryable message and no internals", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes("openrouter.ai")) {
+          return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(ANALYSIS) } }] }), {
+            status: 200,
+            headers: FALLBACK_DB.headers,
+          });
+        }
+        return supabaseStub({})(input, init);
+      }),
+    );
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    let last: Record<string, unknown> = {};
+    for (let attempt = 0; attempt < 22; attempt += 1) {
+      const { req, res, getBody } = createMockReqRes({
+        method: "POST",
+        body: { leadId: LEAD_ID, workspaceId: WORKSPACE_ID, refresh: true },
+        headers: { authorization: "Bearer user-token-1" },
+      });
+      await handler(req, res);
+      last = getBody() as Record<string, unknown>;
+    }
+    expect(last.code).toBe("rate_limited");
+    expect(String(last.error)).toMatch(/try again/i);
+    expect(JSON.stringify(last)).not.toMatch(/sk-or-|publishable-key|service-key/);
   });
 });

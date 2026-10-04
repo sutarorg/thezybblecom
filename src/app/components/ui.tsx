@@ -110,7 +110,7 @@ export function Badge({
         tone === "neutral" && "bg-neutral-100 text-ink-soft",
         tone === "green" && "bg-brand-50 text-brand-700",
         tone === "amber" && "bg-amber-50 text-amber-700",
-        tone === "red" && "bg-red-50 text-red-650 text-red-700",
+        tone === "red" && "bg-red-50 text-red-700",
         tone === "sky" && "bg-sky-50 text-sky-700",
         tone === "violet" && "bg-violet-50 text-violet-700",
         className

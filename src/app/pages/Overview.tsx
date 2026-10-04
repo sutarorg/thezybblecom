@@ -24,6 +24,7 @@ import {
   Skel,
   relative,
 } from "../components/ui";
+import { PendingInvitations } from "../components/PendingInvitations";
 import { OverviewSkeleton } from "../components/skeletons";
 import type { ActivityItem, LeadList, SearchRecord } from "../data/types";
 import { useAppSeo } from "../hooks";
@@ -110,6 +111,10 @@ export function OverviewPage() {
       }
       wide
     >
+      {/* An invited teammate lands here first — this is where they can
+          actually join the workspace they were invited to. */}
+      <PendingInvitations onAccepted={load} />
+
       {error ? (
         <Card className="mb-3 flex items-start gap-3 p-4">
           <span className="grid size-8 shrink-0 place-items-center rounded-md bg-red-50 text-red-600">

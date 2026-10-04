@@ -4,7 +4,6 @@
 import { useEffect, useState } from "react";
 import {
   Building2,
-  Clock,
   Download,
   Globe,
   Key,
@@ -26,20 +25,18 @@ import {
   FieldLabel,
   Input,
   SectionTitle,
-  Switch,
   useToast,
 } from "../components/ui";
 import { SettingsSkeleton } from "../components/skeletons";
 import { planFromId } from "../data/plans";
 import { navigate, useAppSeo } from "../hooks";
-import { getUserPreferences, listAppSessions, revokeAppSession, saveUserPreferences, signOut, updateProfile, updatePassword, type AppSessionRecord, type UserPreferences } from "../services/api";
+import { getUserPreferences, renameWorkspace, listAppSessions, revokeAppSession, saveUserPreferences, signOut, updateProfile, updatePassword, type AppSessionRecord, type UserPreferences } from "../services/api";
 import { useWorkspaceContext } from "../services/hooks";
 
 const TABS = [
   { id: "profile", label: "Profile", icon: User },
   { id: "account", label: "Account", icon: Shield },
   { id: "workspace", label: "Workspace", icon: Building2 },
-  { id: "notifications", label: "Notifications", icon: Clock },
   { id: "security", label: "Security", icon: Key },
   { id: "preferences", label: "Preferences", icon: Monitor },
   { id: "danger", label: "Danger zone", icon: TriangleAlert },
@@ -47,27 +44,6 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]["id"];
 
-function PrefRow({
-  title,
-  description,
-  checked,
-  onChange,
-}: {
-  title: string;
-  description: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-4 border-b border-black/[0.04] py-3 last:border-0">
-      <div className="min-w-0">
-        <p className="text-xs font-medium text-ink">{title}</p>
-        <p className="mt-0.5 text-[11px] leading-4.5 text-ink-mute">{description}</p>
-      </div>
-      <Switch checked={checked} onChange={onChange} label={title} />
-    </div>
-  );
-}
 
 function SelectField({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: string[] }) {
   return (
@@ -106,6 +82,7 @@ export function SettingsPage() {
 
   /* workspace */
   const [wsName, setWsName] = useState("");
+  const [savingWs, setSavingWs] = useState(false);
   useEffect(() => {
     if (workspace) setWsName(workspace.name);
   }, [workspace]);
@@ -114,11 +91,6 @@ export function SettingsPage() {
   const [pw, setPw] = useState("");
   const [pw2, setPw2] = useState("");
   const [savingPw, setSavingPw] = useState(false);
-  /* notifications */
-  const [nSearch, setNSearch] = useState(true);
-  const [nExport, setNExport] = useState(true);
-  const [nDigest, setNDigest] = useState(false);
-  const [nProduct, setNProduct] = useState(false);
   /* preferences — the interface is permanently light mode, so appearance is
      not a preference anymore; only locale formatting is configurable. */
   const [prefs, setPrefs] = useState<UserPreferences>({ timezone: "UTC", language: "en", date_format: "MMM D, YYYY" });
@@ -156,6 +128,29 @@ export function SettingsPage() {
         toast((e as Error).message, "error");
       } finally {
         setSavingPrefs(false);
+      }
+      return;
+    }
+    if (section === "Workspace") {
+      if (!workspace) {
+        toast("Select a workspace first.", "error");
+        return;
+      }
+      setSavingWs(true);
+      try {
+        const updated = await renameWorkspace(workspace.id, wsName);
+        setWsName(updated.name);
+        /* Same event the switcher listens to, so the sidebar, header and
+           workspace context all show the new name immediately. */
+        window.dispatchEvent(new CustomEvent("zybble:workspace"));
+        toast("Workspace saved");
+      } catch (e) {
+        /* Put the stored name back so the field never shows a value the
+           database rejected. */
+        setWsName(workspace.name);
+        toast((e as Error).message, "error");
+      } finally {
+        setSavingWs(false);
       }
       return;
     }
@@ -318,27 +313,13 @@ export function SettingsPage() {
                   </p>
                 </div>
                 <div className="flex justify-end border-t border-black/[0.05] pt-4">
-                  <Btn variant="primary" size="sm" onClick={() => save("Workspace")}>
-                    Save changes
-                  </Btn>
-                </div>
-              </div>
-            </Card>
-          ) : null}
-
-          {tab === "notifications" ? (
-            <Card>
-              <div className="border-b border-black/[0.05] px-4 py-4 sm:px-5">
-                <SectionTitle title="Notifications" description="What Zybble emails you about." />
-              </div>
-              <div className="px-4 py-2 sm:px-5">
-                <PrefRow title="Search completion" description="Let me know when a large search finishes collecting." checked={nSearch} onChange={setNSearch} />
-                <PrefRow title="Exports ready" description="Email when a CSV finishes preparing." checked={nExport} onChange={setNExport} />
-                <PrefRow title="Weekly usage digest" description="A short summary of leads, lists, and limits every Monday." checked={nDigest} onChange={setNDigest} />
-                <PrefRow title="Product updates" description="Occasional feature releases — no marketing drip." checked={nProduct} onChange={setNProduct} />
-                <div className="flex justify-end py-4">
-                  <Btn variant="primary" size="sm" onClick={() => save("Notification preferences")}>
-                    Save preferences
+                  <Btn
+                    variant="primary"
+                    size="sm"
+                    onClick={() => save("Workspace")}
+                    disabled={savingWs || wsName.trim().length < 2 || wsName.trim() === (workspace?.name ?? "")}
+                  >
+                    {savingWs ? "Saving…" : "Save changes"}
                   </Btn>
                 </div>
               </div>

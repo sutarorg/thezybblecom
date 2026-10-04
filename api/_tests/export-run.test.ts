@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import handler, { csvEscape } from "../export-run";
+import handler, { csvEscape, neutralizeCsvFormula } from "../export-run";
 
 function createMockReqRes(options: { method?: string; headers?: Record<string, string>; body?: unknown }) {
   const req = {
@@ -35,6 +35,28 @@ describe("csvEscape", () => {
     expect(csvEscape("ACME, Inc.")).toBe('"ACME, Inc."');
     expect(csvEscape('He said "hi"')).toBe('"He said ""hi"""');
     expect(csvEscape("line1\nline2")).toBe('"line1\nline2"');
+  });
+
+  it("neutralizes spreadsheet formulas so an exported lead cannot execute", () => {
+    /* Business names and tags are third-party/teammate controlled text, and
+       Excel, LibreOffice and Sheets all evaluate a cell starting with these
+       characters. The apostrophe prefix keeps the cell literal. */
+    expect(csvEscape("=cmd|'/c calc'!A1")).toBe("'=cmd|'/c calc'!A1");
+    expect(csvEscape("=HYPERLINK(\"http://evil\",\"click\")")).toBe('"\'=HYPERLINK(""http://evil"",""click"")"');
+    expect(csvEscape("@SUM(1+9)*cmd")).toBe("'@SUM(1+9)*cmd");
+    expect(csvEscape("+SUM(A1)")).toBe("'+SUM(A1)");
+    expect(csvEscape("-2+3+cmd|' /C calc'!A0")).toBe("'-2+3+cmd|' /C calc'!A0");
+    expect(csvEscape("\tTabLead")).toBe("'\tTabLead");
+    expect(neutralizeCsvFormula("=1+1")).toBe("'=1+1");
+  });
+
+  it("leaves real numbers and international phone numbers untouched", () => {
+    /* Over-escaping would corrupt every phone column in the product. */
+    expect(csvEscape("+91 98765 43210")).toBe("+91 98765 43210");
+    expect(csvEscape("+1 (415) 555-0123")).toBe("+1 (415) 555-0123");
+    expect(csvEscape(-12)).toBe("-12");
+    expect(csvEscape("-4.5")).toBe("-4.5");
+    expect(csvEscape("4.7")).toBe("4.7");
   });
 
   it("serializes arrays and unicode", () => {

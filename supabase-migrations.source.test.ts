@@ -18,12 +18,14 @@ import { join } from "node:path";
 const DIR = join(process.cwd(), "supabase", "migrations");
 const files = readdirSync(DIR).filter((f) => f.endsWith(".sql")).sort();
 const repair = readFileSync(join(DIR, "0006_team_workspace_billing_repair.sql"), "utf8");
+const membership = readFileSync(join(DIR, "0007_membership_security_and_invitations.sql"), "utf8");
 const all = files.map((f) => readFileSync(join(DIR, f), "utf8")).join("\n");
 
 describe("migration set", () => {
-  it("adds the repair as a NEW migration rather than editing deployed ones", () => {
+  it("adds every repair as a NEW migration rather than editing deployed ones", () => {
     expect(files).toContain("0006_team_workspace_billing_repair.sql");
-    expect(files[files.length - 1]).toBe("0006_team_workspace_billing_repair.sql");
+    expect(files).toContain("0007_membership_security_and_invitations.sql");
+    expect(files[files.length - 1]).toBe("0007_membership_security_and_invitations.sql");
   });
 
   it("never disables row level security", () => {
@@ -85,5 +87,63 @@ describe("billing schema", () => {
     expect(repair).toContain("create or replace function effective_plan_for_user(u uuid)");
     expect(repair).toMatch(/s\.status in \('active', 'trialing'\)/);
     expect(repair).toMatch(/s\.current_period_end > now\(\)/);
+  });
+});
+
+describe("membership privilege escalation fix (0007)", () => {
+  it("removes the self-insert escape hatch that let anyone join any workspace", () => {
+    expect(membership).toContain('create policy "members owner admin insert" on workspace_members');
+    expect(membership).toMatch(/for insert with check \(can_manage_workspace\(workspace_id\)\);/);
+    // the dangerous clause must not come back on insert/update
+    // Only the executable statements, not the header comment that quotes the
+    // vulnerable policy it replaces.
+    const statements = membership
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("--"))
+      .join("\n");
+    const insertUpdate = statements.slice(
+      statements.indexOf('"members owner admin insert"'),
+      statements.indexOf('"members remove or self remove"'),
+    );
+    expect(insertUpdate).not.toMatch(/user_id = auth\.uid\(\)/);
+  });
+
+  it("keeps self-removal possible but protects the owner's own membership row", () => {
+    expect(membership).toMatch(/for delete using \(\s*\(user_id = auth\.uid\(\) or can_manage_workspace\(workspace_id\)\)/);
+    expect(membership).toContain("owner_role_immutable");
+  });
+
+  it("does not widen any policy to everyone", () => {
+    expect(membership).not.toMatch(/using \(true\)/i);
+    expect(membership).not.toMatch(/with check \(true\)/i);
+  });
+});
+
+describe("invitation lifecycle (0007)", () => {
+  it("ships the invitee-facing RPCs the application needs to accept or decline", () => {
+    expect(membership).toContain("create or replace function list_my_invitations()");
+    expect(membership).toContain("create or replace function accept_invitation(invitation_id uuid)");
+    expect(membership).toContain("create or replace function decline_invitation(invitation_id uuid)");
+  });
+
+  it("authorizes every invitee RPC on the caller's verified email", () => {
+    for (const fn of ["list_my_invitations", "accept_invitation", "decline_invitation"]) {
+      expect(membership).toContain(`revoke execute on function ${fn}`);
+      expect(membership).toContain(`to authenticated;`);
+    }
+    expect(membership.match(/invitation_email_mismatch/g)?.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("locks the invitation row so two tabs cannot both consume the last seat", () => {
+    expect(membership).toMatch(/from workspace_invitations where id = invitation_id for update/);
+    expect(membership).toContain("seat_limit_reached");
+  });
+
+  it("is idempotent for a teammate who is already a member", () => {
+    expect(membership).toMatch(/if already then[\s\S]{0,160}return inv\.workspace_id;/);
+  });
+
+  it("drops the invitee update policy that could never be satisfied", () => {
+    expect(membership).toContain('drop policy if exists "invitations invitee update" on workspace_invitations;');
   });
 });

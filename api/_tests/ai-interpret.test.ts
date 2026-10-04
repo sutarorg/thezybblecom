@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { resetRateLimits } from "../_lib/rate-limit.js";
 import handler from "../ai-interpret";
 
 /**
@@ -28,6 +29,7 @@ const OPENROUTER_VARS = ["OPENROUTER_API_KEY", "OPENROUTER_MODEL", "OPENROUTER_A
 const saved = new Map<string, string | undefined>();
 
 beforeEach(() => {
+  resetRateLimits();
   for (const name of [...SUPABASE_VARS, ...OPENROUTER_VARS]) saved.set(name, process.env[name]);
   for (const name of [...SUPABASE_VARS, ...OPENROUTER_VARS]) delete process.env[name];
   process.env.SUPABASE_URL = SUPABASE_URL;

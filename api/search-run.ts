@@ -572,6 +572,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   let refundAttempted = false;
 
   try {
+    const body = requestBody(req);
+    workspaceId = String(body.workspaceId ?? "");
+    if (!/^[0-9a-f-]{36}$/i.test(workspaceId)) throw new ApiError(400, "A valid workspace is required.", "workspace_invalid");
+    const filters = parseFilters(body.filters);
+    /* Authentication is checked before any server-configuration probe: an
+       anonymous caller must get 401, not a 500 that reports which provider
+       secrets this deployment is missing. */
+    const token = bearerToken(req);
+
     const apiKey = readServerEnv("SERPAPI_API_KEY", "SERPAPI_KEY", "SERP_API_KEY");
     if (!apiKey) {
       throw new ApiError(
@@ -581,11 +590,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       );
     }
 
-    const body = requestBody(req);
-    workspaceId = String(body.workspaceId ?? "");
-    if (!/^[0-9a-f-]{36}$/i.test(workspaceId)) throw new ApiError(400, "A valid workspace is required.", "workspace_invalid");
-    const filters = parseFilters(body.filters);
-    const token = bearerToken(req);
     sb = serverClient(token);
 
     const { data: authData, error: userError } = await sb.auth.getUser(token);

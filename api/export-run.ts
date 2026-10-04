@@ -57,9 +57,36 @@ async function requireMember(sb: SupabaseClient, workspaceId: string, userId: st
   const { data, error } = await sb.from("workspace_members").select("role").eq("workspace_id", workspaceId).eq("user_id", userId).maybeSingle();
   if (error || !data) throw new ApiError(403, "You don't have access to that workspace.", "workspace_forbidden");
 }
+/*
+ * Spreadsheet formula injection (CSV injection).
+ *
+ * Lead fields come from a third party (SerpApi / the business's own website)
+ * and from teammate-entered tags, so a cell can legitimately contain
+ * attacker-chosen text. Excel, LibreOffice and Google Sheets evaluate any
+ * cell whose text starts with = + - @ TAB or CR as a formula, which is how
+ * `=cmd|'/c calc'!A1` style payloads reach a customer's machine from an
+ * otherwise innocent lead export.
+ *
+ * Such cells are prefixed with an apostrophe, which every spreadsheet reads
+ * as "treat the rest as literal text". Plain numbers (`-12`, `+4.5`) and
+ * international phone numbers (`+91 98765 43210`) are left untouched: they
+ * cannot name a function, open a DDE channel, or reference another cell, so
+ * neutralizing them would only corrupt real data.
+ */
+const FORMULA_LEAD = /^[=+\-@\t\r]/;
+const PLAIN_NUMBER = /^[+-]?\d+(\.\d+)?$/;
+const PHONE_LIKE = /^\+\d[\d\s().-]*$/;
+
+export function neutralizeCsvFormula(text: string): string {
+  if (!FORMULA_LEAD.test(text)) return text;
+  if (PLAIN_NUMBER.test(text) || PHONE_LIKE.test(text)) return text;
+  return `'${text}`;
+}
+
 export function csvEscape(value: unknown): string {
   if (value == null) return "";
-  const text = Array.isArray(value) ? value.join("; ") : typeof value === "object" ? JSON.stringify(value) : String(value);
+  const raw = Array.isArray(value) ? value.join("; ") : typeof value === "object" ? JSON.stringify(value) : String(value);
+  const text = neutralizeCsvFormula(raw);
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 async function leadsForExport(sb: SupabaseClient, workspaceId: string, opts: { leadIds: string[]; searchId: string | null; listId: string | null }) {

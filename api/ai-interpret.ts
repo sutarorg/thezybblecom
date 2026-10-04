@@ -6,6 +6,7 @@ import {
   extractJsonObject,
 } from "./_lib/interpret.js";
 import { OpenRouterError, getOpenRouterModel, openRouterChatJson } from "./_lib/openrouter.js";
+import { consumeRateLimit } from "./_lib/rate-limit.js";
 import {
   createUserSupabaseClient,
   requireSupabaseServerConfig,
@@ -33,6 +34,8 @@ type VercelRequest = IncomingMessage & { body?: unknown };
 type VercelResponse = ServerResponse & { status(code: number): VercelResponse; json(body: unknown): void };
 
 export const maxDuration = 30;
+
+const INTERPRET_MAX_PER_MINUTE = 20;
 
 class ApiError extends Error {
   readonly status: number;
@@ -132,6 +135,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const sb = userClient(token);
     const { data: auth, error: authError } = await sb.auth.getUser(token);
     if (authError || !auth.user) throw new ApiError(401, "Your session expired — sign in again.", "auth_invalid");
+
+    /* One interpretation per typed request is the normal shape; this bounds
+       a scripted retry storm against a paid model. Best-effort per warm
+       instance — see api/_lib/rate-limit.ts. */
+    if (consumeRateLimit("ai-interpret", auth.user.id, { max: INTERPRET_MAX_PER_MINUTE, windowMs: 60_000 })) {
+      throw new ApiError(429, "You're sending requests to Zybble AI faster than it can answer. Try again in a minute.", "rate_limited");
+    }
 
     const { data: membership, error: membershipError } = await sb
       .from("workspace_members")
