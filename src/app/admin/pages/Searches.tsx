@@ -195,7 +195,10 @@ export function AdminSearches({ identity }: { identity: AdminIdentity }) {
           value={range || "all"}
           from={get("from")}
           to={get("to")}
-          onChange={(patch) => set(patch as Record<string, string | null>)}
+          /* "All time" here means no date filter at all, not a wide window. */
+          onChange={(patch) =>
+            set({ ...patch, range: patch.range === "all" ? null : patch.range } as Record<string, string | null>)
+          }
         />
       }
     >
