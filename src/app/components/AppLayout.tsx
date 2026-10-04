@@ -321,9 +321,9 @@ export function AppLayout({
       ) : null}
 
       {/* content column */}
-      <div className={cn("flex min-h-dvh flex-col transition-[padding] duration-200", collapsed ? "lg:pl-16" : "lg:pl-[264px]")}>
+      <div className={cn("flex min-h-dvh min-w-0 flex-col transition-[padding] duration-200", collapsed ? "lg:pl-16" : "lg:pl-[264px]")}>
         {/* topbar */}
-        <header className="sticky top-0 z-30 flex h-12 shrink-0 items-center gap-2 border-b border-black/[0.06] bg-paper/90 px-3 backdrop-blur-md sm:px-4">
+        <header className="sticky top-0 z-30 flex h-12 w-full shrink-0 items-center gap-2 border-b border-black/[0.06] bg-paper/90 px-3 backdrop-blur-md sm:px-4">
           <button
             type="button"
             aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
@@ -351,7 +351,7 @@ export function AppLayout({
             <span className="truncate font-medium text-ink">{heading}</span>
           </div>
 
-          <div className="ml-auto flex items-center gap-1.5">
+          <div className="ml-auto flex min-w-0 items-center gap-1.5">
             <Popover
               align="end"
               width="w-64"
@@ -360,7 +360,7 @@ export function AppLayout({
                   variant="outline"
                   size="sm"
                   onClick={toggle}
-                  className="max-w-[190px]"
+                  className="max-w-[120px] min-[420px]:max-w-[190px]"
                   label={`Workspace: ${workspaceLabel}`}
                 >
                   <Building2 className="size-3.5 shrink-0 text-neutral-400" aria-hidden="true" />
@@ -447,7 +447,7 @@ export function AppLayout({
         </header>
 
         {/* page header */}
-        <div className={cn("mx-auto w-full px-3 sm:px-5 lg:px-7", wide ? "max-w-[1380px]" : "max-w-[1120px]")}>
+        <div className={cn("mx-auto w-full min-w-0 px-3 sm:px-5 lg:px-7", wide ? "max-w-[1380px]" : "max-w-[1120px]")}>
           <div className="flex flex-wrap items-end justify-between gap-3 pt-5 sm:pt-6">
             <div className="min-w-0">
               <h1 className="font-display text-lg font-semibold tracking-[-0.02em] text-ink sm:text-xl">{heading}</h1>
@@ -455,7 +455,7 @@ export function AppLayout({
             </div>
             {aside ? <div className="flex flex-wrap items-center gap-2">{aside}</div> : null}
           </div>
-          <main className="pb-16 pt-5 sm:pt-6">{children}</main>
+          <main className="min-w-0 pb-16 pt-5 sm:pt-6">{children}</main>
         </div>
       </div>
     </div>

@@ -45,10 +45,59 @@ html {
   color-scheme: light;
 }
 
+/* ------------------------------------------------------------------ */
+/* Never scroll sideways.                                              */
+/*                                                                     */
+/* `clip` rather than `hidden` on purpose: `overflow-x: hidden` turns   */
+/* the root into a scroll container, which silently breaks every        */
+/* `position: sticky` element on the page (the marketing navbar, the    */
+/* app topbar, the settings tab rail). `clip` trims horizontal          */
+/* overflow without creating a scroll port, so sticky keeps working     */
+/* and vertical scrolling stays on the root.                            */
+/* ------------------------------------------------------------------ */
+html,
+body {
+  max-width: 100%;
+  overflow-x: clip;
+}
+
 body {
   @apply bg-paper text-ink font-sans antialiased;
   text-rendering: optimizeLegibility;
   font-feature-settings: "cv11", "ss01";
+}
+
+/* Reusable: scrollable region with no visible scrollbar (used by the
+   settings tab rail and other horizontal rails on small screens). */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+/* ------------------------------------------------------------------ */
+/* Landing page on mobile: no scrollbars at all.                       */
+/*                                                                     */
+/* `data-route="home"` is set on <html> by the marketing home route.   */
+/* The page still scrolls vertically — only the scrollbar chrome is    */
+/* hidden, matching the chromeless look of native mobile browsers.     */
+/* ------------------------------------------------------------------ */
+@media (max-width: 1023px) {
+  html[data-route="home"],
+  html[data-route="home"] body {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  html[data-route="home"]::-webkit-scrollbar,
+  html[data-route="home"] body::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
+  }
 }
 
 ::selection {

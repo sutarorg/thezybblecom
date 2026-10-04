@@ -343,3 +343,51 @@ describe("Vercel Analytics", () => {
     expect(appSource.match(/<Analytics\s*\/>/g)?.length).toBe(1);
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* Mobile layout — nothing scrolls sideways                            */
+/* ------------------------------------------------------------------ */
+describe("mobile: no horizontal scroll", () => {
+  const heroSource = readFileSync(`${projectRoot}/src/sections/Hero.tsx`, "utf8");
+  const settingsSource = readFileSync(`${projectRoot}/src/app/pages/Settings.tsx`, "utf8");
+  const appSource = readFileSync(`${projectRoot}/src/App.tsx`, "utf8");
+
+  it("clips horizontal overflow at the document root without killing sticky", () => {
+    expect(indexCss).toMatch(/html,\s*body\s*{[^}]*overflow-x:\s*clip/);
+    // `hidden` would turn the root into a scroll container and break every
+    // position: sticky header in the product.
+    expect(indexCss).not.toMatch(/html,\s*body\s*{[^}]*overflow-x:\s*hidden/);
+  });
+
+  it("hides the landing page scrollbars on small screens only", () => {
+    expect(indexCss).toContain('html[data-route="home"]');
+    expect(indexCss).toMatch(/@media \(max-width: 1023px\)/);
+    expect(appSource).toContain('setAttribute("data-route", "home")');
+    expect(appSource).toContain('removeAttribute("data-route")');
+  });
+
+  it("exposes a reusable hidden-scrollbar utility", () => {
+    expect(indexCss).toContain(".no-scrollbar");
+    expect(indexCss).toMatch(/\.no-scrollbar::-webkit-scrollbar\s*{[^}]*display:\s*none/);
+  });
+
+  it("frames the hero landscape with the same inset on all four sides below sm", () => {
+    // One uniform padding value per breakpoint — no `pb-*`/`items-end`
+    // override that would make the bottom border longer than the top.
+    expect(heroSource).toContain("p-5 min-[480px]:p-6 sm:absolute sm:inset-0 sm:p-9");
+    expect(heroSource).not.toContain("items-end");
+    // No mobile aspect-ratio box: the stage is sized by the card, so the
+    // card can never be cropped and the frame stays even.
+    expect(heroSource).not.toContain("aspect-[5/6]");
+    expect(heroSource).toContain("sm:aspect-[16/10]");
+  });
+
+  it("lets the settings tab rail scroll without showing a scrollbar", () => {
+    expect(settingsSource).toContain("no-scrollbar");
+    expect(settingsSource).toMatch(/grid min-w-0 gap-3 lg:grid-cols-\[200px_minmax\(0,1fr\)\]/);
+  });
+
+  it("lets long settings values wrap instead of widening the page", () => {
+    expect(settingsSource).toContain("break-words");
+  });
+});

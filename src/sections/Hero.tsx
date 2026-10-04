@@ -84,15 +84,25 @@ export function Hero() {
 
         {/* large product visualization — intentionally not animated */}
         <div className="mt-12 sm:mt-16">
-          <div className="relative w-full">
+          <div className="relative w-full max-w-full">
+            {/*
+              Mobile (< sm): no fixed aspect ratio. The stage is sized by the
+              app card plus one uniform padding value, so the landscape frame
+              around the card is exactly the same length on all four sides —
+              and it matches the page gutter (`px-5`), so the image's own left
+              and right margins are identical too. Nothing can overflow the
+              viewport, and nothing gets cropped off the bottom.
+              ≥ sm: unchanged — fixed cinematic aspect with the card
+              absolutely centred inside it.
+            */}
             <LandscapeStage
               eager
               alt={LANDSCAPE_ALT}
               position="center 55%"
-              className="aspect-[5/6] shadow-panel min-[480px]:aspect-[16/12] sm:aspect-[16/10] lg:aspect-[16/9.5]"
+              className="shadow-panel sm:aspect-[16/10] lg:aspect-[16/9.5]"
             >
-              <div className="absolute inset-0 flex items-end justify-center p-3.5 pb-6 min-[480px]:items-center min-[480px]:p-6 sm:p-9">
-                <HeroAppCard className="max-w-[680px] min-[480px]:-translate-y-1" />
+              <div className="relative flex items-center justify-center p-5 min-[480px]:p-6 sm:absolute sm:inset-0 sm:p-9">
+                <HeroAppCard className="max-w-[680px] sm:-translate-y-1" />
               </div>
             </LandscapeStage>
             <p className="mt-4 text-center text-[11.5px] text-ink-mute">
