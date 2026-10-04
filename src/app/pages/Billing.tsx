@@ -48,6 +48,7 @@ export function BillingPage() {
   const [usage, setUsage] = useState<UsageData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [syncWarning, setSyncWarning] = useState<string | null>(null);
   const [switching, setSwitching] = useState<string | null>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
 
@@ -55,8 +56,16 @@ export function BillingPage() {
     if (!workspace) return;
     setLoading(true);
     setError(null);
+    setSyncWarning(null);
     syncBilling()
-      .then(() => Promise.all([getBilling(workspace.id), getUsage(workspace.id, planId)]))
+      .then((sync) => {
+        // A failed refresh must never block the page — the tables below still
+        // reflect the last known-good state — but it also must not be hidden:
+        // surface a soft, non-blocking notice instead of silently presenting
+        // potentially stale data as if it were just confirmed.
+        if (!sync.ok && sync.error) setSyncWarning(sync.error);
+        return Promise.all([getBilling(workspace.id), getUsage(workspace.id, planId)]);
+      })
       .then(([b, u]) => {
         setBilling(b);
         setUsage(u);
@@ -107,6 +116,21 @@ export function BillingPage() {
           <div>
             <p className="text-[13px] font-medium text-ink">We couldn't load your billing details</p>
             <p className="mt-0.5 text-xs leading-5 text-ink-mute">{error}</p>
+            <Btn variant="outline" size="sm" className="mt-3" onClick={load}>
+              Try again
+            </Btn>
+          </div>
+        </Card>
+      ) : null}
+
+      {!error && syncWarning ? (
+        <Card className="mb-3 flex items-start gap-3 border-amber-200 bg-amber-50/60 p-4">
+          <span className="grid size-8 shrink-0 place-items-center rounded-md bg-amber-100 text-amber-700">
+            <TriangleAlert className="size-4" aria-hidden="true" />
+          </span>
+          <div>
+            <p className="text-[13px] font-medium text-ink">Showing your last known billing status</p>
+            <p className="mt-0.5 text-xs leading-5 text-ink-mute">{syncWarning}</p>
             <Btn variant="outline" size="sm" className="mt-3" onClick={load}>
               Try again
             </Btn>

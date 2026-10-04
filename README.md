@@ -261,6 +261,29 @@ npm run dev
 
 All of these return HTTP 500 with a `code` of `supabase_config`/`serpapi_config`; the frontend surfaces the message directly and does **not** retry through the Supabase Edge Function, so the real backend problem is never masked.
 
+### Troubleshooting billing ("The requested Edge Function \"billing\" couldn't be reached")
+
+Billing (`checkout` / `sync` / `cancel`) is **intentionally** a Supabase Edge
+Function-only path — see "Architecture notes" below. Unlike search, AI,
+export, and invite, it has **no same-origin `/api/*` fallback on Vercel**,
+because writing authoritative subscription state requires the Supabase
+service-role key, which the Vercel routes deliberately refuse to hold. That
+means `billing` has no safety net: if the Edge Function isn't deployed (or
+its secrets aren't set), every checkout/sync/cancel call fails with exactly
+this message — it is not a frontend bug, it's a deployment/config gap.
+
+| Symptom | Meaning | Fix |
+| --- | --- | --- |
+| `The requested Edge Function "billing" couldn't be reached. Check that it is deployed and try again.` | The function was never deployed to the linked Supabase project (most common — `supabase/config.toml` only configures JWT verification at deploy time; it does not deploy anything by itself, and nothing in this repo's CI deploys Edge Functions automatically), or the Supabase project's Edge Functions have never been provisioned at all. | Run `supabase link --project-ref <ref>` then `supabase functions deploy billing` (see exact command below). |
+| `The requested Edge Function "billing" is not deployed.` | The function responded with an explicit 404 from Supabase. | Same fix — deploy it. |
+| `Razorpay isn't configured on the server. Missing server environment variable(s): RAZORPAY_KEY_ID and/or RAZORPAY_KEY_SECRET…` | The function **is** deployed but its secrets were never set (or were set on the wrong linked project). | `supabase secrets set RAZORPAY_KEY_ID=… RAZORPAY_KEY_SECRET=…`, then redeploy. |
+| `The growth/agency/scale plan isn't available in payments yet.` | `RAZORPAY_PLAN_GROWTH_ID` / `_AGENCY_ID` / `_SCALE_ID` wasn't set as a secret. | Set the missing plan secret(s), then redeploy. |
+
+To confirm deployment status: **Supabase Dashboard → Edge Functions** should
+list `billing` with a recent deployment, and **Edge Functions → billing →
+Secrets** should show every `RAZORPAY_*` key set (values are never shown back,
+only names).
+
 ### Writing imports inside `api/`
 
 Vercel compiles each traced `api/**/*.ts` file to `.js` **without rewriting import
