@@ -5,6 +5,7 @@
   "framework": "vite",
   "trailingSlash": false,
   "rewrites": [
+    { "source": "/api/admin/:path*", "destination": "/api/admin?path=:path*" },
     { "source": "/((?!api(?:/|$)).*)", "destination": "/app.html" }
   ],
   "functions": {
@@ -24,7 +25,7 @@
       ]
     },
     {
-      "source": "/(login|signup|reset|overview|find|search-history|leads|lists|exports|team|workspaces|billing|usage|settings)(/.*)?",
+      "source": "/(login|signup|reset|overview|find|search-history|leads|lists|exports|team|workspaces|billing|usage|settings|admin)(/.*)?",
       "headers": [
         { "key": "X-Robots-Tag", "value": "noindex" }
       ]
