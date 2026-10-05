@@ -10,7 +10,7 @@
 //   5. sanitized result — exactly what the UI needs, nothing else
 //
 // A failure never produces a success response: the UI only shows "done" when
-// the database (or Razorpay) actually confirmed the change.
+// the database (or Paddle) actually confirmed the change.
 //
 // NOTE: imported with the emitted ".js" extension (see
 // api/_tests/module-resolution.test.ts).
@@ -23,8 +23,14 @@ import {
   type AdminContext,
   type Json,
 } from "./admin-core.js";
-import { epochToIso, mapSubscriptionStatus } from "./billing-core.js";
-import { razorpayRequest, RazorpayError } from "./razorpay.js";
+import { paddleGetSubscription, paddlePriceMap, PaddleError } from "./paddle.js";
+import { applyPaddleSubscription, effectivePlanOf } from "./paddle-apply.js";
+import { normalizePaddleSubscription } from "./paddle-core.js";
+
+/** The server-side price map for entitlement mapping in admin actions. */
+function priceMapForAdmin() {
+  return paddlePriceMap();
+}
 
 function requireReason(body: Json, min = 3): string {
   const reason = String(body.reason ?? "").trim();
@@ -171,10 +177,11 @@ export async function setUserSuspension(ctx: AdminContext, userId: string, body:
 /* ------------------------------------------------------------------ */
 
 /**
- * Re-read a customer's subscription from Razorpay and store the provider's
+ * Re-read a customer's subscription from Paddle and store the provider's
  * answer. This is the read-then-reconcile half of /api/billing `sync` — it
  * never creates, cancels or charges anything, so it is safe to run while a
- * customer is on the phone.
+ * customer is on the phone. Legacy Razorpay rows have no live provider to
+ * re-read; their recorded state stands until the paid period ends.
  */
 export async function syncSubscription(ctx: AdminContext, body: Json) {
   const userId = requireUuid(body.userId, "user");
@@ -187,23 +194,23 @@ export async function syncSubscription(ctx: AdminContext, body: Json) {
     .maybeSingle();
   if (error) throw new AdminApiError(500, "We couldn't read that subscription. Please try again.", "query_failed");
   if (!sub) throw notFound("That subscription");
-  if (!sub.razorpay_subscription_id) {
-    throw new AdminApiError(400, "That customer has no Razorpay subscription to reconcile.", "no_provider_subscription");
+  if (!sub.provider_subscription_id || sub.billing_provider !== "paddle") {
+    throw new AdminApiError(400, "That customer has no Paddle subscription to reconcile.", "no_provider_subscription");
   }
 
   let remote: Record<string, unknown>;
   try {
-    remote = await razorpayRequest(`/subscriptions/${sub.razorpay_subscription_id}`, {}, "admin");
+    remote = await paddleGetSubscription(String(sub.provider_subscription_id), "admin");
   } catch (providerError) {
     const mapped =
-      providerError instanceof RazorpayError
+      providerError instanceof PaddleError
         ? new AdminApiError(providerError.status, providerError.message, providerError.code)
         : new AdminApiError(502, "Our payment provider couldn't be reached.", "provider_unreachable");
     await writeAudit(ctx, {
       action: "subscription.sync",
       targetType: "subscription",
       targetId: String(sub.id),
-      targetLabel: String(sub.razorpay_subscription_id),
+      targetLabel: String(sub.provider_subscription_id),
       summary: "Provider reconciliation failed",
       metadata: { reason, userId },
       result: "failure",
@@ -212,71 +219,57 @@ export async function syncSubscription(ctx: AdminContext, body: Json) {
     throw mapped;
   }
 
-  const providerStatus = String(remote.status ?? "");
-  const status = mapSubscriptionStatus(providerStatus, String(sub.status ?? "created"));
-  const currentEnd = epochToIso(remote.current_end);
+  const remoteSub = normalizePaddleSubscription(remote);
+  if (!remoteSub) throw new AdminApiError(502, "Our payment provider returned an unreadable subscription.", "provider_malformed");
 
-  const patch: Record<string, unknown> = {
-    status,
-    current_period_start: epochToIso(remote.current_start),
-    current_period_end: currentEnd,
-    charge_at: epochToIso(remote.charge_at),
-    cancel_at: epochToIso(remote.ended_at) ?? (remote.end_at ? epochToIso(remote.end_at) : null),
-    last_event_at: new Date().toISOString(),
+  const before = {
+    status: sub.status,
+    plan_id: sub.plan_id,
+    current_period_end: sub.current_period_end,
+    cancel_at_cycle_end: sub.cancel_at_cycle_end,
   };
 
-  // Same lapse rule as /api/billing: a finished paid period falls back to Free.
-  if (
-    ["cancelled", "completed", "expired"].includes(status) &&
-    (!currentEnd || new Date(currentEnd).getTime() <= Date.now())
-  ) {
-    patch.plan_id = "free";
-    patch.status = "expired";
-    patch.cancel_at_cycle_end = false;
-  }
-
-  const { error: updateError } = await ctx.sb.from("subscriptions").update(patch).eq("id", sub.id);
-  if (updateError) {
-    await writeAudit(ctx, {
-      action: "subscription.sync",
-      targetType: "subscription",
-      targetId: String(sub.id),
-      summary: "Provider state read but the local write failed",
-      metadata: { reason, userId, providerStatus },
-      result: "failure",
-      error: "subscription_write_failed",
-    });
+  const result = await applyPaddleSubscription(ctx.sb, {
+    userId,
+    sub: remoteSub,
+    priceMap: priceMapForAdmin(),
+    eventAt: new Date().toISOString(),
+    skipDuplicateGuard: true,
+  });
+  if (!result.applied) {
     throw new AdminApiError(500, "We read the provider but couldn't save the result.", "subscription_write_failed");
   }
+
+  const { data: afterRow } = await ctx.sb
+    .from("subscriptions")
+    .select("status, plan_id, current_period_end, cancel_at_cycle_end")
+    .eq("user_id", userId)
+    .maybeSingle();
 
   await writeAudit(ctx, {
     action: "subscription.sync",
     targetType: "subscription",
     targetId: String(sub.id),
-    targetLabel: String(sub.razorpay_subscription_id),
-    summary: `Reconciled with Razorpay (provider status: ${providerStatus || "unknown"})`,
-    before: {
-      status: sub.status,
-      plan_id: sub.plan_id,
-      current_period_end: sub.current_period_end,
-      cancel_at_cycle_end: sub.cancel_at_cycle_end,
-    },
+    targetLabel: String(sub.provider_subscription_id),
+    summary: `Reconciled with Paddle (provider status: ${remoteSub.paddleStatus || "unknown"})`,
+    before,
     after: {
-      status: patch.status,
-      plan_id: patch.plan_id ?? sub.plan_id,
-      current_period_end: patch.current_period_end,
-      cancel_at_cycle_end: patch.cancel_at_cycle_end ?? sub.cancel_at_cycle_end,
+      status: afterRow?.status ?? result.status,
+      plan_id: afterRow?.plan_id ?? result.planId,
+      current_period_end: afterRow?.current_period_end ?? null,
+      cancel_at_cycle_end: afterRow?.cancel_at_cycle_end ?? false,
     },
-    metadata: { reason, userId, providerStatus },
+    metadata: { reason, userId, providerStatus: remoteSub.paddleStatus },
   });
 
   return {
     ok: true,
     userId,
-    providerStatus,
-    status: String(patch.status ?? status),
-    planId: String(patch.plan_id ?? sub.plan_id),
-    currentPeriodEnd: patch.current_period_end ?? null,
+    providerStatus: remoteSub.paddleStatus,
+    status: String(afterRow?.status ?? result.status ?? remoteSub.status),
+    planId: String(afterRow?.plan_id ?? result.planId ?? sub.plan_id),
+    currentPeriodEnd: afterRow?.current_period_end ?? remoteSub.currentPeriodEnd,
+    effectivePlan: effectivePlanOf(afterRow ?? null),
   };
 }
 
@@ -331,8 +324,9 @@ function parsePlanPatch(body: Json): PlanPatch {
  *    this period is reported back and refused unless `force` is set, so an
  *    edit cannot silently lock paying customers out mid-cycle;
  *  • changing `price_cents` only changes what Zybble displays and charges for
- *    NEW checkouts — the Razorpay plan amount lives at the provider, so the
- *    response flags the drift instead of pretending they are in sync.
+ *    NEW checkouts — the actual billed amount lives on the Paddle price
+ *    (pri_…), so the response flags the drift instead of pretending they are
+ *    in sync.
  */
 export async function updatePlan(ctx: AdminContext, planId: string, body: Json) {
   const id = String(planId ?? "").trim().toLowerCase();

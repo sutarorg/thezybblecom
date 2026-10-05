@@ -4,6 +4,8 @@ export type ParsedApiResponse<T> = {
   data?: T;
   error?: string;
   code?: string;
+  /** Extra machine-readable fields from a structured error body, if any. */
+  payload?: Record<string, unknown>;
   /** True only when the route itself is unavailable and an Edge fallback is safe to try. */
   shouldFallback: boolean;
 };
@@ -72,6 +74,7 @@ export async function parseApiResponse<T = Record<string, unknown>>(
       return {
         error: safeMessage(errorValue, fallback),
         code,
+        payload: body,
         shouldFallback: response.status === 404,
       };
     }

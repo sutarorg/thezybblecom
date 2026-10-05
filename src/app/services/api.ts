@@ -247,8 +247,9 @@ export type SubscriptionRow = {
  *  • cancelled or completed, but the paid period has not ended yet
  *                                 → still the subscribed plan
  *  • anything else                → free
- * A Razorpay subscription that has merely been *created* (checkout prepared,
- * nothing paid) never appears in `subscriptions`, so it can never entitle.
+ * A Paddle subscription only reaches this table once the provider confirmed
+ * it (webhook or server-side sync), so a merely-opened checkout can never
+ * entitle.
  */
 export function effectivePlanId(sub: SubscriptionRow | null | undefined): string {
   if (!sub?.plan_id) return "free";
@@ -668,7 +669,7 @@ export type SearchRunResult = {
 export async function runSearch(
   workspaceId: string,
   filters: SearchFilters
-): Promise<{ result?: SearchRunResult; error?: string }> {
+): Promise<{ result?: SearchRunResult; error?: string; limit?: MonthlyLeadLimit }> {
   const sb = getSupabase();
   if (!sb) return { error: CONFIG_ERROR };
 
@@ -700,7 +701,15 @@ export async function runSearch(
     });
     const parsed = await parseApiResponse<Record<string, unknown>>(response, "search");
     if (parsed.data) return searchRunResponse(parsed.data);
-    if (!parsed.shouldFallback) return { error: parsed.error ?? "The search couldn't complete." };
+    // The dedicated monthly-lead-limit error carries a machine-readable
+    // payload (plan, used, allowance, next plan) so /find can render the
+    // upgrade UX instead of a generic failure.
+    const limit = limitFromPayload(parsed.payload ?? { code: parsed.code });
+    if (!parsed.shouldFallback) {
+      if (limit) return { error: parsed.error ?? "Monthly lead limit reached.", limit };
+      return { error: parsed.error ?? "The search couldn't complete." };
+    }
+    if (limit) return { error: parsed.error ?? "Monthly lead limit reached.", limit };
     sameOriginError = parsed.error ?? "";
   } catch {
     // The same-origin route may be unavailable; use the Edge Function below.
@@ -718,7 +727,12 @@ export async function runSearch(
     const fallbackError = await readFunctionError(error, "search-run", "search");
     return { error: fallbackError || sameOriginError || "The search couldn't complete." };
   }
-  if (data?.error) return { error: String(data.error) };
+  if (data?.error) {
+    // The Edge Function mirrors the same structured quota payload.
+    const limit = limitFromPayload(data as Record<string, unknown>);
+    if (limit) return { error: String(data.error), limit };
+    return { error: String(data.error) };
+  }
   return searchRunResponse(data);
 }
 
@@ -1658,8 +1672,9 @@ export async function getBilling(workspaceId: string): Promise<BillingState> {
       ? formatAppDate(sub.current_period_end)
       : null,
     cancelAtCycleEnd: Boolean(sub?.cancel_at_cycle_end),
-    /* Razorpay reports money in the smallest unit of the subscription
-       currency. Zybble bills in INR only, so `amount_cents` is paise. */
+    /* The provider reports money in the smallest unit of the billed
+       currency (cents for USD). Each row carries the currency Paddle (or,
+       historically, the legacy provider) actually billed in. */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     invoices: (invoices ?? []).map((i: any) => ({
       id: i.number,
@@ -1673,24 +1688,55 @@ export async function getBilling(workspaceId: string): Promise<BillingState> {
   };
 }
 
-type BillingAction = "checkout" | "verify" | "sync" | "cancel";
+/* ------------------------------------------------------------------ */
+/* Paddle Billing actions                                              */
+/* ------------------------------------------------------------------ */
+
+export type PaidPlanName = "growth" | "agency" | "scale";
+
+/**
+ * The dedicated machine-readable monthly-lead-limit error. The server (not
+ * the browser) computes every number from the same `reserve_leads()`
+ * accounting that blocked the search. `nextPlan` is the immediate upgrade
+ * target on the ladder, or null when there is no higher plan.
+ */
+export type MonthlyLeadLimit = {
+  planId: string;
+  planLabel: string;
+  used: number;
+  allowance: number;
+  nextPlan: PaidPlanName | null;
+};
+
+/** Read a structured monthly_lead_limit_reached body, or null. */
+function limitFromPayload(payload: unknown): MonthlyLeadLimit | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const body = payload as Record<string, unknown>;
+  if (body.code !== "monthly_lead_limit_reached") return null;
+  const nextPlan = body.nextPlan;
+  return {
+    planId: String(body.planId ?? "free"),
+    planLabel: String(body.planLabel ?? "Free"),
+    used: Number(body.used ?? 0),
+    allowance: Number(body.allowance ?? 0),
+    nextPlan:
+      nextPlan === "growth" || nextPlan === "agency" || nextPlan === "scale" ? nextPlan : null,
+  };
+}
+
+type BillingAction = "checkout" | "upgrade" | "sync" | "cancel";
 type BillingActionBody =
-  | { action: "checkout"; plan: "growth" | "agency" | "scale" }
-  | {
-      action: "verify";
-      razorpay_payment_id: string;
-      razorpay_subscription_id: string;
-      razorpay_signature: string;
-    }
-  | { action: "sync" }
+  | { action: "checkout"; plan: PaidPlanName }
+  | { action: "upgrade"; plan: PaidPlanName }
+  | { action: "sync"; transactionId?: string }
   | { action: "cancel" };
 
 function canFallbackFromBillingRoute(code?: string, shouldFallback = false) {
   // 404/HTML means this deployment simply does not have the same-origin
-  // function. Config errors happen before any Razorpay request is made, so an
+  // function. Config errors happen before any Paddle request is made, so an
   // already-deployed Supabase Edge Function is still safe to try. Provider and
   // DB-write errors are not retried because they may represent a request that
-  // has already touched Razorpay.
+  // has already touched Paddle.
   return shouldFallback || code === "supabase_config" || code === "billing_config";
 }
 
@@ -1745,64 +1791,58 @@ async function billingRequest(
  * Billing prefers the same-origin `/api/billing` server function so production
  * checkout does not depend on browser-to-Supabase Edge networking/CORS. If a
  * deployment has not picked up that route yet, we fall back to the existing
- * Supabase Edge Function with the same request contract. Both paths keep
- * Razorpay keys and Supabase write credentials server-side only.
+ * Supabase Edge Function with the same request contract. Both paths keep the
+ * Paddle API key, webhook secret and price-id mapping server-side only.
  */
 
 /**
- * Everything the browser needs to open Razorpay Standard Checkout ON the
- * Zybble page. Deliberately contains NO hosted-page URL: the server never
- * returns `short_url` / `auth_link` / `/v1/l/...`, so there is nothing to
- * redirect to even by accident. `keyId` is the PUBLIC Razorpay key id — the
- * key secret never leaves the server.
+ * Everything the browser needs to open Paddle Checkout on the Zybble page:
+ * the PUBLIC price id for the plan, the server-generated checkout token,
+ * the display amount and which Paddle environment to load. The browser
+ * never chooses a price itself — it can only open the price the server
+ * resolved for the requested plan. No server credential is ever in here.
  */
-export type CheckoutSession = {
-  keyId: string;
-  subscriptionId: string;
-  planId: "growth" | "agency" | "scale";
+export type CheckoutIntent = {
+  checkoutToken: string;
+  priceId: string;
+  planId: PaidPlanName;
   planLabel: string;
-  amount: number; // paise, display only — Razorpay charges the plan amount
+  amount: number; // minor units, display only — Paddle charges the price
   currency: string;
-  name: string;
   description: string;
-  prefill: { name?: string; email?: string; contact?: string };
-  /** Payment methods the merchant account actually allows for this flow. */
-  method: Record<string, boolean>;
-  notes: Record<string, string>;
-  themeColor: string;
+  customerEmail: string;
+  environment: string;
 };
 
-function asCheckoutSession(data: Record<string, unknown>): CheckoutSession | null {
-  const keyId = typeof data.keyId === "string" ? data.keyId : "";
-  const subscriptionId = typeof data.subscriptionId === "string" ? data.subscriptionId : "";
+function asCheckoutIntent(data: Record<string, unknown>): CheckoutIntent | null {
+  const checkoutToken = typeof data.checkoutToken === "string" ? data.checkoutToken : "";
+  const priceId = typeof data.priceId === "string" ? data.priceId : "";
   const planId = String(data.planId ?? "");
-  if (!keyId || !subscriptionId) return null;
+  if (!checkoutToken || !priceId) return null;
   if (planId !== "growth" && planId !== "agency" && planId !== "scale") return null;
   return {
-    keyId,
-    subscriptionId,
+    checkoutToken,
+    priceId,
     planId,
     planLabel: String(data.planLabel ?? planLabel(planId)),
     amount: Number(data.amount ?? 0),
     currency: String(data.currency ?? BILLING_CURRENCY),
-    name: String(data.name ?? "Zybble"),
     description: String(data.description ?? `${planLabel(planId)} plan · monthly`),
-    prefill: (data.prefill as CheckoutSession["prefill"]) ?? {},
-    method: (data.method as Record<string, boolean>) ?? {},
-    notes: (data.notes as Record<string, string>) ?? {},
-    themeColor: String(data.themeColor ?? "#0e7a52"),
+    customerEmail: String(data.customerEmail ?? ""),
+    environment: String(data.environment ?? "production"),
   };
 }
 
 /**
- * Prepare an on-site checkout. The server authenticates the caller, creates
- * (or reuses) the Razorpay subscription with the server-only key secret, and
- * returns only browser-safe data. NOTHING about the user's plan changes here:
- * entitlement is granted later, from a verified payment or a signed webhook.
+ * Prepare a checkout for the FIRST paid subscription (Free → Growth). The
+ * server authenticates the caller, validates the upgrade ladder, creates (or
+ * reuses) a server-generated checkout intent, and returns only browser-safe
+ * data. NOTHING about the user's plan changes here: entitlement is granted
+ * later, from the signed webhook or a server-side provider read.
  */
 export async function startCheckout(
-  planId: "growth" | "agency" | "scale",
-): Promise<{ session?: CheckoutSession; error?: string }> {
+  planId: PaidPlanName,
+): Promise<{ intent?: CheckoutIntent; error?: string }> {
   const sb = getSupabase();
   if (!sb) return { error: CONFIG_ERROR };
   const {
@@ -1812,24 +1852,46 @@ export async function startCheckout(
 
   const { data, error } = await billingRequest(sb, session.access_token, { action: "checkout", plan: planId });
   if (error) return { error };
-  const checkout = data ? asCheckoutSession(data) : null;
-  if (!checkout) {
+  const intent = data ? asCheckoutIntent(data) : null;
+  if (!intent) {
     return { error: "The payment provider didn't return a usable checkout. Please try again." };
   }
-  return { session: checkout };
+  return { intent };
 }
 
 /**
- * Hand the Razorpay success callback back to the server for verification.
- * The server re-computes the HMAC signature with the key secret AND re-reads
- * the subscription/payment from Razorpay before any entitlement is written —
- * a forged callback from the browser can never upgrade an account.
+ * Upgrade an EXISTING Paddle subscription to the next plan. The server
+ * re-reads the subscription from Paddle and PATCHes it to the new plan's
+ * price (prorated immediately, refused entirely when the payment fails), so
+ * the user never ends up on the wrong plan or double-subscribed.
  */
-export async function verifyCheckout(result: {
-  razorpay_payment_id: string;
-  razorpay_subscription_id: string;
-  razorpay_signature: string;
-}): Promise<{ planId?: string; status?: string; error?: string }> {
+export async function upgradePlan(
+  planId: PaidPlanName,
+): Promise<{ planId?: string; status?: string; error?: string }> {
+  const sb = getSupabase();
+  if (!sb) return { error: CONFIG_ERROR };
+  const {
+    data: { session },
+  } = await sb.auth.getSession();
+  if (!session) return { error: "Your session expired — sign in again." };
+
+  const { data, error } = await billingRequest(sb, session.access_token, { action: "upgrade", plan: planId });
+  if (error) return { error };
+  return {
+    planId: typeof data?.planId === "string" ? data.planId : undefined,
+    status: typeof data?.status === "string" ? data.status : undefined,
+  };
+}
+
+/**
+ * Ask the server to reconcile billing state with Paddle. After a completed
+ * checkout the browser passes the transaction id it saw — the SERVER re-reads
+ * the transaction and subscription from Paddle with its API key and applies
+ * the entitlement. A browser claim never grants anything by itself.
+ */
+export async function completeCheckout(
+  transactionId: string,
+): Promise<{ planId?: string; status?: string; error?: string }> {
   const sb = getSupabase();
   if (!sb) return { error: CONFIG_ERROR };
   const {
@@ -1838,10 +1900,8 @@ export async function verifyCheckout(result: {
   if (!session) return { error: "Your session expired — sign in again." };
 
   const { data, error } = await billingRequest(sb, session.access_token, {
-    action: "verify",
-    razorpay_payment_id: result.razorpay_payment_id,
-    razorpay_subscription_id: result.razorpay_subscription_id,
-    razorpay_signature: result.razorpay_signature,
+    action: "sync",
+    transactionId,
   });
   if (error) return { error };
   return {
@@ -1864,11 +1924,11 @@ export async function cancelSubscription() {
 }
 
 /**
- * Best-effort refresh of subscription state from Razorpay before the
- * Billing page reads the (RLS-guarded) `subscriptions`/`invoices` tables.
- * A failure here must never block the page — the tables still reflect the
- * last known-good state — but it must not be swallowed silently either, so
- * the caller can show a soft "couldn't refresh" notice instead of silently
+ * Best-effort refresh of subscription state from Paddle before the Billing
+ * page reads the (RLS-guarded) `subscriptions`/`invoices` tables. A failure
+ * here must never block the page — the tables still reflect the last
+ * known-good state — but it must not be swallowed silently either, so the
+ * caller can show a soft "couldn't refresh" notice instead of silently
  * presenting stale data as if it were current.
  */
 export async function syncBilling(): Promise<{ ok: boolean; error?: string }> {

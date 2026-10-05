@@ -95,6 +95,16 @@ function SidebarBody({
   leadsLimit?: number;
 }) {
   const usagePct = leadsLimit > 0 ? Math.min(100, Math.round((leadsUsed / leadsLimit) * 100)) : 0;
+  /* Meter thresholds match /find: brand-green normally, amber at 80%,
+     orange at 90%, red + "limit reached" copy at 100%. */
+  const usageTone =
+    usagePct >= 100
+      ? { bar: "bg-red-500", text: "text-red-700" }
+      : usagePct >= 90
+        ? { bar: "bg-orange-500", text: "text-orange-700" }
+        : usagePct >= 80
+          ? { bar: "bg-amber-500", text: "text-amber-700" }
+          : { bar: "bg-brand-600", text: "text-brand-700/80" };
   return (
     <div className="flex h-full flex-col">
       {/* logo */}
@@ -172,13 +182,30 @@ function SidebarBody({
             </div>
             <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-black/[0.07]">
               <div
-                className="h-full rounded-full bg-brand-600 transition-[width] duration-500"
+                className={cn("h-full rounded-full transition-[width] duration-500", usageTone.bar)}
                 style={{ width: `${usagePct}%` }}
               />
             </div>
-            <p className="mt-1 text-[10px] text-brand-700/80">
-              {leadsUsed.toLocaleString()} of {leadsLimit.toLocaleString()} leads
+            <p className={cn("mt-1 text-[10px]", usageTone.text)}>
+              {usagePct >= 100
+                ? `Monthly lead limit reached — ${leadsUsed.toLocaleString()} of ${leadsLimit.toLocaleString()} leads`
+                : `${leadsUsed.toLocaleString()} of ${leadsLimit.toLocaleString()} leads`}
             </p>
+            {usagePct >= 100 ? (
+              <a
+                href="/billing"
+                className="mt-1.5 inline-flex h-6 w-full items-center justify-center rounded bg-brand-600 text-[10px] font-medium text-white transition-colors hover:bg-brand-700"
+              >
+                Upgrade for more leads
+              </a>
+            ) : usagePct >= 80 ? (
+              <a
+                href="/billing"
+                className="mt-1 block text-center text-[10px] font-medium text-brand-700 underline decoration-brand-600/30 underline-offset-2 hover:text-brand-800"
+              >
+                See upgrade options
+              </a>
+            ) : null}
           </div>
         ) : null}
       </div>

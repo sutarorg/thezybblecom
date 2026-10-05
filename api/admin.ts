@@ -13,7 +13,7 @@
 // Mutations additionally require a reason and write an immutable audit row.
 //
 // Nothing secret ever crosses this boundary: responses carry sanitized rows
-// and presence booleans ("Razorpay is configured"), never keys, tokens or raw
+// and presence booleans ("Paddle is configured"), never keys, tokens or raw
 // provider payloads.
 // ============================================================================
 import {

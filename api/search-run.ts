@@ -66,12 +66,15 @@ type LeadRow = Record<string, unknown> & { dedupe_key: string; email?: string | 
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
+  /** Optional machine-readable payload (e.g. quota details for the UI). */
+  readonly details?: Record<string, unknown>;
 
-  constructor(status: number, message: string, code = "api_error") {
+  constructor(status: number, message: string, code = "api_error", details?: Record<string, unknown>) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -184,7 +187,38 @@ async function reserveLeads(sb: SupabaseClient, workspaceId: string, delta: numb
   const { data, error } = await sb.rpc("reserve_leads", { ws: workspaceId, delta });
   if (error) throw new ApiError(500, "Usage accounting failed — try again.", "usage_failed");
   if (data === -1) throw new ApiError(403, "You don't have access to that workspace.", "workspace_forbidden");
-  if (data === -2) throw new ApiError(429, "You've reached your monthly lead limit.", "quota_exceeded");
+  if (data === -2) throw await monthlyLeadLimitError(sb, workspaceId);
+}
+
+/**
+ * Build the dedicated machine-readable quota error. `reserve_leads()` is the
+ * authoritative enforcement (the row was NOT incremented); this only explains
+ * the refusal so the frontend can render the upgrade UX instead of a generic
+ * failure. Falls back to plan-catalog defaults if the RPC isn't deployed.
+ */
+async function monthlyLeadLimitError(sb: SupabaseClient, workspaceId: string): Promise<ApiError> {
+  let planId = "free";
+  let allowance = 50;
+  let used = allowance;
+  try {
+    const { data } = await sb.rpc("lead_quota_state", { ws: workspaceId });
+    const row = Array.isArray(data) ? (data[0] as Record<string, unknown> | undefined) : (data as Record<string, unknown> | undefined);
+    if (row) {
+      planId = String(row.plan_id ?? "free");
+      allowance = Number(row.allowance ?? 50);
+      used = Number(row.used ?? allowance);
+    }
+  } catch {
+    /* keep catalog defaults */
+  }
+  const nextPlan = planId === "free" ? "growth" : planId === "growth" ? "agency" : planId === "agency" ? "scale" : null;
+  const planLabel = planId === "free" ? "Free" : planId === "growth" ? "Growth" : planId === "agency" ? "Agency" : "Scale";
+  return new ApiError(
+    429,
+    `You've used all ${allowance.toLocaleString("en-US")} leads included in the ${planLabel} plan this month.`,
+    "monthly_lead_limit_reached",
+    { planId, planLabel, used, allowance, nextPlan },
+  );
 }
 
 async function refundLeads(sb: SupabaseClient, workspaceId: string, count: number) {
@@ -857,6 +891,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       durationMs: Date.now() - startedAt,
     };
     console.error("api request", diagnostics);
-    return res.status(apiError.status).json({ error: apiError.message, code: apiError.code });
+    return res.status(apiError.status).json({ error: apiError.message, code: apiError.code, ...(apiError.details ?? {}) });
   }
 }

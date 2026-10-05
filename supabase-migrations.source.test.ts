@@ -11,7 +11,8 @@ import { join } from "node:path";
  *    PostgREST's embed resolver;
  *  • the Workspaces fix must NOT make `workspaces` publicly readable or
  *    disable RLS;
- *  • billing must be INR everywhere;
+ *  • billing is USD under Paddle (0009), with legacy rows keeping their
+ *    recorded currency;
  *  • migrations must be additive (0006 is new; older files untouched).
  */
 
@@ -19,15 +20,18 @@ const DIR = join(process.cwd(), "supabase", "migrations");
 const files = readdirSync(DIR).filter((f) => f.endsWith(".sql")).sort();
 const repair = readFileSync(join(DIR, "0006_team_workspace_billing_repair.sql"), "utf8");
 const membership = readFileSync(join(DIR, "0007_membership_security_and_invitations.sql"), "utf8");
+const paddle = readFileSync(join(DIR, "0009_paddle_billing.sql"), "utf8");
 const all = files.map((f) => readFileSync(join(DIR, f), "utf8")).join("\n");
 
 describe("migration set", () => {
   it("adds every repair as a NEW migration rather than editing deployed ones", () => {
     expect(files).toContain("0006_team_workspace_billing_repair.sql");
     expect(files).toContain("0007_membership_security_and_invitations.sql");
-    // The admin console shipped as 0008 — a new file, not an edit of 0001-0007.
+    // The admin console shipped as 0008; the Paddle migration is 0009 — new
+    // files, not edits of deployed migrations.
     expect(files).toContain("0008_admin_console.sql");
-    expect(files[files.length - 1]).toBe("0008_admin_console.sql");
+    expect(files).toContain("0009_paddle_billing.sql");
+    expect(files[files.length - 1]).toBe("0009_paddle_billing.sql");
   });
 
   it("never disables row level security", () => {
@@ -69,11 +73,18 @@ describe("workspace authorization fix", () => {
 });
 
 describe("billing schema", () => {
-  it("is INR only", () => {
+  it("was INR under the legacy provider (0006, historical)", () => {
     expect(repair).toMatch(/alter table payments alter column currency set default 'INR'/);
     expect(repair).toMatch(/alter table invoices alter column currency set default 'INR'/);
     expect(repair).toMatch(/update payments set currency = 'INR'/);
     expect(repair).toMatch(/update invoices set currency = 'INR'/);
+  });
+
+  it("moves the plan catalog to USD under Paddle without rewriting history (0009)", () => {
+    // The plan catalog bills in USD under Paddle; historical rows keep the
+    // currency they recorded — the migration must NOT touch payments/invoices.
+    expect(paddle).toMatch(/update plans set currency = 'USD'/);
+    expect(paddle).not.toMatch(/update (payments|invoices|subscriptions) set currency/i);
   });
 
   it("parks pending checkouts outside the entitlement table", () => {
@@ -147,5 +158,62 @@ describe("invitation lifecycle (0007)", () => {
 
   it("drops the invitee update policy that could never be satisfied", () => {
     expect(membership).toContain('drop policy if exists "invitations invitee update" on workspace_invitations;');
+  });
+});
+
+describe("Paddle migration (0009)", () => {
+  it("adds the provider-neutral columns every new billing write uses", () => {
+    for (const column of [
+      "billing_provider",
+      "provider_customer_id",
+      "provider_subscription_id",
+      "provider_price_id",
+      "provider_payment_id",
+      "provider_invoice_id",
+      "provider_transaction_id",
+      "checkout_token",
+    ]) {
+      expect(paddle).toContain(`add column if not exists ${column}`);
+    }
+  });
+
+  it("keeps the legacy razorpay columns for history and never drops them", () => {
+    expect(paddle).not.toMatch(/drop column[^;]*razorpay/i);
+    expect(paddle).not.toMatch(/drop table[^;]*razorpay/i);
+  });
+
+  it("backs up provider ids with partial unique indexes (NULLs allowed)", () => {
+    expect(paddle).toMatch(/create unique index if not exists subscriptions_provider_sub_uidx[\s\S]{0,160}where provider_subscription_id is not null/);
+    expect(paddle).toMatch(/create unique index if not exists payments_provider_payment_uidx[\s\S]{0,160}where provider_payment_id is not null/);
+    expect(paddle).toMatch(/create unique index if not exists invoices_provider_invoice_uidx[\s\S]{0,160}where provider_invoice_id is not null/);
+    expect(paddle).toMatch(/create unique index if not exists subscription_checkouts_token_uidx[\s\S]{0,160}where checkout_token is not null/);
+  });
+
+  it("preserves one-subscription-per-user and one-user-per-provider-subscription", () => {
+    // The 0001 UNIQUE(user_id) stays untouched; 0009 adds the provider-side
+    // uniqueness WITHOUT dropping anything.
+    expect(paddle).not.toMatch(/drop[^;]*subscriptions_user_id_key/i);
+  });
+
+  it("marks legacy rows instead of fabricating Paddle ids", () => {
+    expect(paddle).toMatch(/set billing_provider = 'razorpay'[\s\S]{0,200}where razorpay_subscription_id is not null/);
+    // Never invent a provider id: backfills only set the provider LABEL.
+    expect(paddle).not.toMatch(/set provider_[a-z_]+_id = '(?!)/);
+    expect(paddle).not.toMatch(/set provider_subscription_id = 'sub_/i);
+  });
+
+  it("adds the quota-state RPC and grants it to authenticated users only", () => {
+    expect(paddle).toContain("create or replace function lead_quota_state(ws uuid)");
+    expect(paddle).toContain("revoke execute on function lead_quota_state(uuid) from public, anon;");
+    expect(paddle).toContain("grant execute on function lead_quota_state(uuid) to authenticated;");
+  });
+
+  it("never widens table access", () => {
+    expect(paddle).not.toMatch(/grant[^;]*to (public|anon)/i);
+    expect(paddle).not.toMatch(/using \\(true\\)/i);
+    expect(paddle).not.toMatch(/with check \\(true\\)/i);
+    // Admin RPCs stay service-role only.
+    expect(paddle).toContain("revoke execute on function admin_billing_overview(timestamptz, timestamptz) from public, anon, authenticated;");
+    expect(paddle).toContain("grant execute on function admin_billing_overview(timestamptz, timestamptz) to service_role;");
   });
 });

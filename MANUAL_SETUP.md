@@ -1,5 +1,18 @@
 # MANUAL CHANGES REQUIRED FROM MY SIDE
 
+> ## ⚠️ HISTORICAL DOCUMENT — SUPERSEDED BY THE PADDLE MIGRATION
+>
+> This runbook documents the **Razorpay-era** fixes (Team / Workspaces /
+> Razorpay, and later the admin console). Zybble now bills through **Paddle
+> Billing** — see `README.md` → “4 · Paddle Billing setup” for the current,
+> authoritative setup walkthrough. Everything Razorpay below is kept **for
+> historical record only**: migration `0009_paddle_billing.sql` retained the
+> legacy `razorpay_*` columns and existing subscribers' recorded entitlement,
+> and the application no longer contains any Razorpay code or makes any
+> Razorpay API call. Do **not** follow sections B2, the Razorpay env vars, or
+> the `razorpay-webhook` deployment steps — the equivalents are
+> `PADDLE_*` variables and the `paddle-webhook` function.
+
 This file is the operator runbook for the Team / Workspaces / Razorpay fix.
 Everything under "Already completed in code" is done and committed — do **not**
 redo it. Everything under "Manual setup" has to be done by a human in the

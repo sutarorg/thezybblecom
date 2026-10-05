@@ -3,6 +3,12 @@
 Repository: `sutarorg/thezybblecom` · Branch: `arena/01a105f4-thezybblecom` · Base: `dbcca81`
 Date: 2026-10-04
 
+> **Note (2026-10-05):** this audit reflects the repository state *before* the
+> Razorpay → Paddle Billing migration. Razorpay findings below are historical:
+> Zybble now bills through Paddle Billing (see `README.md` → “4 · Paddle
+> Billing setup”), and migration `0009_paddle_billing.sql` retained the legacy
+> Razorpay columns and existing subscribers' recorded entitlements.
+
 ---
 
 ## A. Launch verdict

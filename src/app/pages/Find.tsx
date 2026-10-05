@@ -21,8 +21,10 @@ import {
   Send,
   Sparkles,
   Star,
+  TrendingUp,
   TriangleAlert,
   Wand2,
+  Zap,
 } from "lucide-react";
 import { cn } from "../../utils/cn";
 import { AppLayout } from "../components/AppLayout";
@@ -47,16 +49,21 @@ import {
   QUANTITY_PRESETS,
   RATING_OPTIONS,
   SORT_OPTIONS,
+  nextPlan,
+  planFromId,
 } from "../data/plans";
 import type { Lead } from "../data/types";
 import { useAppSeo } from "../hooks";
 import {
   EMPTY_FILTERS,
   downloadCsv,
+  getUsage,
   interpretRequest,
   runExport,
   runSearch,
+  type MonthlyLeadLimit,
   type SearchFilters,
+  type UsageData,
 } from "../services/api";
 import { useWorkspaceContext } from "../services/hooks";
 
@@ -175,7 +182,7 @@ function SearchRunAnimation({ category, location, stage }: { category: string; l
 export function FindPage() {
   useAppSeo("Find Leads — Zybble", "Describe the businesses you need and collect them as leads.", "/find");
   const toast = useToast();
-  const { workspace, loading: ctxLoading, error: ctxError, refresh } = useWorkspaceContext();
+  const { workspace, loading: ctxLoading, error: ctxError, refresh, planId } = useWorkspaceContext();
 
   /* ------------ manual filters (the source of truth) ------------ */
   const [filters, setFilters] = useState<SearchFilters>(EMPTY_FILTERS);
@@ -191,6 +198,12 @@ export function FindPage() {
   const [stats, setStats] = useState<{ savedCount: number; message?: string; insights: string[] } | null>(null);
   const [searchId, setSearchId] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
+  /* Structured quota refusal from the server (code=monthly_lead_limit_reached):
+     carries the real plan, used, allowance and next-plan ladder from the same
+     reserve_leads() accounting that blocked the search. */
+  const [limitInfo, setLimitInfo] = useState<MonthlyLeadLimit | null>(null);
+  /* Usage meter data for the always-visible progress card. */
+  const [usage, setUsage] = useState<UsageData | null>(null);
   const timers = useRef<number[]>([]);
   /* The search-run animation card — scrolled into view as soon as a search
      starts so the user immediately sees the progress checklist. */
@@ -220,6 +233,24 @@ export function FindPage() {
     runCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [phase]);
 
+  /* Usage meter — the same numbers the server enforces through
+     reserve_leads(); refreshed after every completed search so the meter
+     moves as soon as leads land. A read failure never blocks searching. */
+  const refreshUsage = useCallback(() => {
+    if (!workspace) return;
+    getUsage(workspace.id, planId)
+      .then(setUsage)
+      .catch(() => undefined);
+  }, [workspace, planId]);
+
+  useEffect(() => {
+    refreshUsage();
+  }, [refreshUsage]);
+
+  useEffect(() => {
+    if (phase === "done") refreshUsage();
+  }, [phase, refreshUsage]);
+
   /* The button stays clickable unless a search is already in flight (or the
      workspace context is still loading) — missing input is reported with a
      toast inside onFindLeads instead of silently disabling the button. */
@@ -242,13 +273,14 @@ export function FindPage() {
     setPhase("running");
     setRunStage(0);
     setRunError(null);
+    setLimitInfo(null);
 
     RUN_STAGES.forEach((_, i) => {
       if (i === 0) return;
       timers.current.push(window.setTimeout(() => setRunStage(i), i * 900));
     });
 
-    const { result, error } = await runSearch(workspace.id, filters);
+    const { result, error, limit } = await runSearch(workspace.id, filters);
 
     timers.current.forEach((t) => window.clearTimeout(t));
     timers.current = [];
@@ -256,6 +288,10 @@ export function FindPage() {
     if (error || !result) {
       setPhase("idle");
       setRunError(error ?? "The search couldn't complete.");
+      if (limit) {
+        setLimitInfo(limit);
+        refreshUsage();
+      }
       return;
     }
 
@@ -587,8 +623,97 @@ export function FindPage() {
             </form>
           </Card>
 
+          {/* usage meter — the server-enforced monthly lead allowance */}
+          {!ctxLoading && usage ? (
+            usage.used >= usage.allowance ? (
+              <Card className="flex items-start gap-3 border-red-200 bg-red-50/50 p-4">
+                <span className="grid size-8 shrink-0 place-items-center rounded-md bg-red-100 text-red-600">
+                  <Zap className="size-4" aria-hidden="true" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[13px] font-semibold text-ink">
+                    Monthly lead limit reached
+                  </p>
+                  <p className="mt-0.5 text-xs leading-5 text-ink-mute">
+                    You've used {usage.used.toLocaleString()} of {usage.allowance.toLocaleString()} leads
+                    included in the {planFromId(limitInfo?.planId ?? planId).label} plan this month. Your
+                    existing leads stay fully available — only new searches are paused.
+                  </p>
+                  {limitInfo?.nextPlan || nextPlan(limitInfo?.planId ?? planId) ? (
+                    <Btn
+                      size="sm"
+                      className="mt-3"
+                      href="/billing"
+                    >
+                      <TrendingUp className="size-3.5" aria-hidden="true" />
+                      Upgrade to {planFromId(limitInfo?.nextPlan ?? nextPlan(limitInfo?.planId ?? planId)).label} for{" "}
+                      {planFromId(limitInfo?.nextPlan ?? nextPlan(limitInfo?.planId ?? planId)).leadAllowance.toLocaleString()} leads/month
+                    </Btn>
+                  ) : (
+                    <p className="mt-2 text-[11px] font-medium text-ink-soft">
+                      No higher plan is currently available.
+                    </p>
+                  )}
+                </div>
+              </Card>
+            ) : (
+              <Card className="p-3.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="flex items-center gap-2 text-xs font-medium text-ink">
+                    <Zap
+                      className={cn(
+                        "size-3.5",
+                        usage.allowance > 0 && usage.used / usage.allowance >= 0.9
+                          ? "text-orange-500"
+                          : usage.allowance > 0 && usage.used / usage.allowance >= 0.8
+                            ? "text-amber-500"
+                            : "text-brand-600"
+                      )}
+                      aria-hidden="true"
+                    />
+                    {usage.used.toLocaleString()} / {usage.allowance.toLocaleString()} leads used
+                  </p>
+                  <span
+                    className={cn(
+                      "text-[11px] font-medium",
+                      usage.allowance > 0 && usage.used / usage.allowance >= 0.9
+                        ? "text-orange-600"
+                        : usage.allowance > 0 && usage.used / usage.allowance >= 0.8
+                          ? "text-amber-600"
+                          : "text-neutral-400"
+                    )}
+                  >
+                    {usage.allowance > 0 ? Math.min(Math.round((usage.used / usage.allowance) * 100), 100) : 0}% of your monthly allowance
+                  </span>
+                </div>
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-black/[0.06]">
+                  <div
+                    className={cn(
+                      "h-full rounded-full transition-colors",
+                      usage.allowance > 0 && usage.used / usage.allowance >= 0.9
+                        ? "bg-orange-500"
+                        : usage.allowance > 0 && usage.used / usage.allowance >= 0.8
+                          ? "bg-amber-500"
+                          : "bg-brand-600"
+                    )}
+                    style={{ width: `${usage.allowance > 0 ? Math.min((usage.used / usage.allowance) * 100, 100) : 0}%` }}
+                  />
+                </div>
+                {usage.allowance > 0 && usage.used / usage.allowance >= 0.8 ? (
+                  <p className="mt-2 text-[10.5px] text-ink-mute">
+                    You're close to this month's limit —{" "}
+                    <a className="font-medium text-brand-700 underline decoration-brand-600/30 underline-offset-2" href="/billing">
+                      see upgrade options
+                    </a>
+                    .
+                  </p>
+                ) : null}
+              </Card>
+            )
+          ) : null}
+
           {/* run error */}
-          {runError ? (
+          {runError && !limitInfo ? (
             <Card className="flex items-start gap-3 p-4">
               <span className="grid size-8 shrink-0 place-items-center rounded-md bg-red-50 text-red-600">
                 <TriangleAlert className="size-4" aria-hidden="true" />
@@ -612,7 +737,7 @@ export function FindPage() {
 
           {/* idle — while the workspace context resolves, mirror the empty-state
               card exactly so nothing shifts once the real state renders */}
-          {phase === "idle" && !runError ? (
+          {phase === "idle" && !runError && !limitInfo ? (
             <>
               {ctxLoading ? (
                 <Card className="p-5" aria-hidden="true">

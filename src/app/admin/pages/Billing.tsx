@@ -100,8 +100,8 @@ export function AdminBilling({ identity }: { identity: AdminIdentity }) {
   const records = obj(query.data?.records);
   const rows = arr(records.rows);
   const total = num(records.total);
-  const currency = str(revenue.currency) || "INR";
-  const razorpayConfigured = bool(obj(query.data?.provider).razorpayConfigured);
+  const currency = str(revenue.currency) || "USD";
+  const paddleConfigured = bool(obj(query.data?.provider).paddleConfigured);
 
   const [syncTarget, setSyncTarget] = useState<Row | null>(null);
   const [busy, setBusy] = useState(false);
@@ -116,7 +116,7 @@ export function AdminBilling({ identity }: { identity: AdminIdentity }) {
         userId: str(syncTarget.user_id),
         reason,
       });
-      toast(`Razorpay reports “${result.providerStatus || "unknown"}” — saved as ${result.status}.`, "success");
+      toast(`Paddle reports “${result.providerStatus || "unknown"}” — saved as ${result.status}.`, "success");
       setSyncTarget(null);
       query.refresh();
     } catch (caught) {
@@ -150,7 +150,7 @@ export function AdminBilling({ identity }: { identity: AdminIdentity }) {
           { key: "at", header: "Issued", render: (row: Row) => formatDateTime(row.at) },
           {
             key: "provider",
-            header: "Razorpay id",
+            header: "Paddle id",
             render: (row: Row) => <CopyValue value={str(row.provider_id)} label="invoice id" />,
           },
         ]
@@ -168,14 +168,20 @@ export function AdminBilling({ identity }: { identity: AdminIdentity }) {
             { key: "at", header: "Updated", render: (row: Row) => timeAgo(row.at) },
             {
               key: "provider",
-              header: "Razorpay id",
+              header: "Paddle id",
               render: (row: Row) => <CopyValue value={str(row.provider_id)} label="subscription id" />,
+            },
+            {
+              key: "provider_kind",
+              header: "Provider",
+              render: (row: Row) =>
+                str(row.billing_provider) ? <StatusBadge value={str(row.billing_provider)} /> : "—",
             },
             {
               key: "actions",
               header: "",
               render: (row: Row) =>
-                str(row.provider_id) && razorpayConfigured ? (
+                str(row.provider_id) && str(row.billing_provider) === "paddle" && paddleConfigured ? (
                   <Btn variant="outline" size="sm" onClick={() => setSyncTarget(row)}>
                     <RefreshCw className="size-3" aria-hidden="true" />
                     Reconcile
@@ -196,8 +202,18 @@ export function AdminBilling({ identity }: { identity: AdminIdentity }) {
             { key: "at", header: "When", render: (row: Row) => formatDateTime(row.at) },
             {
               key: "provider",
-              header: "Razorpay id",
+              header: "Paddle id",
               render: (row: Row) => <CopyValue value={str(row.provider_id)} label="payment id" />,
+            },
+            {
+              key: "txn",
+              header: "Transaction",
+              render: (row: Row) =>
+                str(row.provider_transaction_id) ? (
+                  <CopyValue value={str(row.provider_transaction_id)} label="transaction id" />
+                ) : (
+                  "—"
+                ),
             },
           ];
 
@@ -205,7 +221,7 @@ export function AdminBilling({ identity }: { identity: AdminIdentity }) {
     <AdminLayout
       identity={identity}
       title="Billing"
-      description="Subscriptions, payments and invoices exactly as Razorpay and the database recorded them."
+      description="Subscriptions, payments and invoices exactly as Paddle and the database recorded them."
       aside={<RangeFilter value={range} from={get("from")} to={get("to")} onChange={(patch) => set(patch as Record<string, string | null>)} />}
     >
       {query.error ? (
@@ -244,7 +260,7 @@ export function AdminBilling({ identity }: { identity: AdminIdentity }) {
             Committed MRR = plan price × subscriptions in <strong>active</strong> or <strong>trialing</strong> state.
             Collected = captured payments in the window. They are different measures on purpose; neither is an accrual
             MRR, which Zybble can't derive because discounts and prorations aren't stored.
-            {razorpayConfigured ? "" : " Razorpay credentials aren't configured on this deployment, so reconciliation is unavailable."}
+            {paddleConfigured ? "" : " Paddle credentials aren't configured on this deployment, so reconciliation is unavailable."}
           </Caveat>
 
           <div className="grid gap-2.5 lg:grid-cols-3">
@@ -406,7 +422,7 @@ export function AdminBilling({ identity }: { identity: AdminIdentity }) {
                 rows={arr(summary.recent_webhooks)}
                 rowKey={(row) => str(row.id)}
                 minWidth="min-w-[520px]"
-                empty={<Nothing title="No webhook events" description="Razorpay hasn't delivered an event yet." />}
+                empty={<Nothing title="No webhook events" description="Paddle hasn't delivered an event yet." />}
               />
             </Panel>
           </div>
@@ -419,10 +435,10 @@ export function AdminBilling({ identity }: { identity: AdminIdentity }) {
         onConfirm={reconcile}
         busy={busy}
         error={actionError}
-        title="Reconcile subscription with Razorpay"
+        title="Reconcile subscription with Paddle"
         description={
           syncTarget
-            ? `Reads ${str(syncTarget.provider_id)} from Razorpay and stores the provider's status and period. Nothing is charged, cancelled or created.`
+            ? `Reads ${str(syncTarget.provider_id)} from Paddle and stores the provider's status and period. Nothing is charged, cancelled or created.`
             : undefined
         }
         confirmLabel="Reconcile now"

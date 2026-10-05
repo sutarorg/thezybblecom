@@ -87,7 +87,7 @@ function isDeploymentClassification(message: string): boolean {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function readBillingError(
   error: any,
-  action: "checkout" | "verify" | "sync" | "cancel",
+  action: "checkout" | "upgrade" | "sync" | "cancel",
 ): Promise<string> {
   const detail = await readFunctionError(error, "billing", "billing");
   if (isDeploymentClassification(detail)) {

@@ -13,7 +13,7 @@ describe("parseApiResponse", () => {
     });
   });
 
-  it("surfaces safe problem JSON errors and codes", async () => {
+  it("surfaces safe problem JSON errors and codes, carrying the structured payload", async () => {
     const response = new Response(JSON.stringify({ detail: "The provider is rate-limited.", code: "rate_limited" }), {
       status: 429,
       headers: { "content-type": "application/problem+json" },
@@ -21,8 +21,27 @@ describe("parseApiResponse", () => {
     await expect(parseApiResponse(response, "search")).resolves.toEqual({
       error: "The provider is rate-limited.",
       code: "rate_limited",
+      payload: { detail: "The provider is rate-limited.", code: "rate_limited" },
       shouldFallback: false,
     });
+  });
+
+  it("carries the machine-readable monthly_lead_limit_reached payload for the UI", async () => {
+    const response = new Response(
+      JSON.stringify({
+        error: "You've used all 5,000 leads included in the Growth plan this month.",
+        code: "monthly_lead_limit_reached",
+        planId: "growth",
+        planLabel: "Growth",
+        used: 5000,
+        allowance: 5000,
+        nextPlan: "agency",
+      }),
+      { status: 429, headers: { "content-type": "application/json" } },
+    );
+    const parsed = await parseApiResponse(response, "search");
+    expect(parsed.code).toBe("monthly_lead_limit_reached");
+    expect(parsed.payload).toMatchObject({ planId: "growth", used: 5000, allowance: 5000, nextPlan: "agency" });
   });
 
   it.each([

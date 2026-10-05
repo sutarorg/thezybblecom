@@ -47,9 +47,9 @@ const CAPABILITY_COPY: Record<string, { label: string; yes: string; no: string }
     no: "Unavailable on this deployment.",
   },
   subscriptionSync: {
-    label: "Reconcile with Razorpay",
+    label: "Reconcile with Paddle",
     yes: "Reads a subscription from the provider and stores the result.",
-    no: "Razorpay credentials aren't configured on the server.",
+    no: "Paddle credentials aren't configured on the server.",
   },
   webhookReplay: {
     label: "Replay webhooks",

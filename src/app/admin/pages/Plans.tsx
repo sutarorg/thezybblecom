@@ -89,7 +89,7 @@ export function AdminPlans({ identity }: { identity: AdminIdentity }) {
       });
       toast(
         result.changed.length
-          ? `Plan updated: ${result.changed.join(", ")}.${result.priceDrift ? " Update the Razorpay plan amount too." : ""}`
+          ? `Plan updated: ${result.changed.join(", ")}.${result.priceDrift ? " Update the Paddle price too — the billed amount lives on the Paddle price object." : ""}`
           : "No changes to apply.",
         "success",
       );
@@ -172,7 +172,7 @@ export function AdminPlans({ identity }: { identity: AdminIdentity }) {
                 },
                 {
                   key: "provider",
-                  header: "Razorpay plan",
+                  header: "Paddle price",
                   render: (row) =>
                     str(row.id) === "free" ? (
                       <span className="text-[11px] text-ink-mute">Not billed</span>
@@ -203,9 +203,9 @@ export function AdminPlans({ identity }: { identity: AdminIdentity }) {
 
           <Caveat>
             Prices are stored in the minor unit (paise) and are what Zybble displays and sends to checkout. The amount a
-            customer is actually charged on renewal comes from the Razorpay plan object, so if you change a price here
-            you must change the matching Razorpay plan too — this console deliberately won't pretend to do that for you.
-            “Razorpay plan: configured” only reports whether the server has an id for that plan; the id itself is never
+            customer is actually charged on renewal comes from the Paddle price object (pri_…), so if you change a price here
+            you must change the matching Paddle price too — this console deliberately won't pretend to do that for you.
+            “Paddle price: configured” only reports whether the server has a price id for that plan; the id itself is never
             sent to the browser.
           </Caveat>
         </div>

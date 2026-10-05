@@ -1,8 +1,10 @@
 /* ------------------------------------------------------------------ */
-/* Zybble app — Billing (subscription state comes from the server)     */
+/* Zybble app — Billing (Paddle Billing; entitlement comes from the    */
+/* server only).                                                       */
 /* ------------------------------------------------------------------ */
 import { useCallback, useEffect, useState } from "react";
 import {
+  ArrowUpRight,
   Check,
   CheckCircle2,
   Clock,
@@ -26,21 +28,30 @@ import {
 } from "../components/ui";
 import { BillingInvoicesSkeleton, BillingSummarySkeleton } from "../components/skeletons";
 import { PLANS } from "../../lib/site";
-import { planFromId } from "../data/plans";
+import { nextPlan, planFromId } from "../data/plans";
 import { useAppSeo } from "../hooks";
 import {
   cancelSubscription,
+  completeCheckout,
   getBilling,
   getUsage,
   startCheckout,
   syncBilling,
-  verifyCheckout,
+  upgradePlan,
   type BillingState,
   type UsageData,
 } from "../services/api";
-import { openRazorpayCheckout } from "../services/razorpay";
+import { openPaddleCheckout } from "../services/paddle";
 import { formatDollars, formatMoney, LIST_CURRENCY } from "../lib/money";
 import { useWorkspaceContext } from "../services/hooks";
+
+/** Usage-bar states: normal, warning (≥80%), critical (≥90%), blocked (100%). */
+function usageTone(pct: number) {
+  if (pct >= 100) return { bar: "bg-red-500", text: "text-red-600" };
+  if (pct >= 90) return { bar: "bg-orange-500", text: "text-orange-600" };
+  if (pct >= 80) return { bar: "bg-amber-500", text: "text-amber-600" };
+  return { bar: "bg-brand-600", text: "text-ink" };
+}
 
 export function BillingPage() {
   useAppSeo("Billing — Zybble", "Your plan, usage, and invoices.", "/billing");
@@ -83,65 +94,90 @@ export function BillingPage() {
   }, [load, ctxLoading, workspace]);
 
   const busy = loading || ctxLoading;
-  const currentPlan = billing?.plan ?? planFromId(planId).label;
-  const plan = planFromId(billing?.planId ?? planId);
-  const pct = usage && usage.allowance > 0 ? Math.round((usage.used / usage.allowance) * 100) : 0;
+  const currentPlanId = billing?.planId ?? planId;
+  const plan = planFromId(currentPlanId);
+  const target = nextPlan(currentPlanId);
+  const usageAllowance = usage?.allowance ?? plan.leadAllowance;
+  const usageUsed = usage?.used ?? 0;
+  const pct = usageAllowance > 0 ? Math.round((usageUsed / usageAllowance) * 100) : 0;
+  const tone = usageTone(pct);
+  /* An existing Paddle subscription upgrades in place; a Free user opens a
+     first checkout. past_due can't upgrade until the payment recovers. */
+  const hasActiveSubscription =
+    billing?.status === "active" || billing?.status === "trialing";
 
   /**
-   * Upgrade — entirely on zybble.com.
+   * Upgrade — exactly one plan at a time, via Paddle.
    *
-   * 1. the server prepares the Razorpay subscription with its secret key and
-   *    returns only browser-safe checkout data (no hosted-page URL exists in
-   *    the response, so none can be opened);
-   * 2. Razorpay Standard Checkout opens as an overlay on this page;
-   * 3. the success callback is verified SERVER-SIDE (signature + a fresh read
-   *    of the subscription and payment from Razorpay) before any plan change;
-   * 4. plan, usage, seats and workspace entitlements are refreshed in place.
+   * FIRST subscription (Free → Growth):
+   *   1. the server validates the ladder and returns the PUBLIC price id, a
+   *      server-generated checkout token and its Paddle environment;
+   *   2. Paddle Checkout opens as an overlay on this page (Paddle.js with the
+   *      public client-side token — no server credential is in the browser);
+   *   3. on completion the browser hands the transaction id back to the
+   *      SERVER, which re-reads it from Paddle and applies the entitlement.
+   *
+   * Upgrade (Growth → Agency → Scale):
+   *   the server PATCHes the EXISTING Paddle subscription to the next plan's
+   *   price — prorated immediately, and refused entirely when the payment
+   *   fails, so a failed charge never changes the plan.
    *
    * Dismissal and failure leave the current plan untouched and simply allow a
-   * retry — nothing is granted from a browser callback alone.
+   * retry — nothing is ever granted from a browser callback alone.
    */
-  const onSwitch = async (planName: string) => {
-    if (planName === currentPlan) {
-      toast("You're already on that plan", "info");
-      return;
-    }
-    if (planName === "Free") {
-      setConfirmCancel(true);
+  const onUpgrade = async () => {
+    if (!target) return;
+    setSwitching(target);
+
+    if (hasActiveSubscription) {
+      const upgraded = await upgradePlan(target);
+      setSwitching(null);
+      if (upgraded.error) {
+        toast(upgraded.error, "error");
+        load();
+        return;
+      }
+      toast(`Upgrade confirmed — you're on the ${planFromId(upgraded.planId ?? target).label} plan. The difference is prorated on this cycle's bill.`);
+      refresh();
+      load();
       return;
     }
 
-    setSwitching(planName);
-    const { session, error: checkoutError } = await startCheckout(
-      planName.toLowerCase() as "growth" | "agency" | "scale"
-    );
-    if (checkoutError || !session) {
+    const { intent, error: checkoutError } = await startCheckout(target);
+    if (checkoutError || !intent) {
       setSwitching(null);
       toast(checkoutError ?? "Checkout couldn't start right now.", "error");
       return;
     }
 
-    const outcome = await openRazorpayCheckout(session);
+    const outcome = await openPaddleCheckout({
+      priceId: intent.priceId,
+      customerEmail: intent.customerEmail,
+      checkoutToken: intent.checkoutToken,
+      environment: intent.environment,
+    });
 
-    if (outcome.kind === "dismissed") {
+    if (outcome.status === "closed") {
       setSwitching(null);
       toast("Checkout closed — your plan hasn't changed. You can try again anytime.", "info");
       return;
     }
-    if (outcome.kind === "failed") {
+    if (outcome.status === "error") {
       setSwitching(null);
       toast(outcome.message, "error");
       return;
     }
 
-    const verified = await verifyCheckout(outcome.result);
+    /* Completed ≠ granted: the server verifies with Paddle before any plan
+       change is stored. */
+    const verified = await completeCheckout(outcome.transactionId);
     setSwitching(null);
     if (verified.error) {
       toast(verified.error, "error");
       load();
       return;
     }
-    toast(`Payment confirmed — you're on ${planFromId(verified.planId ?? planName.toLowerCase()).label}.`);
+    toast(`Payment confirmed — you're on the ${planFromId(verified.planId ?? target).label} plan.`);
     // Plan, seats, allowances and client-workspace entitlement all follow the
     // refreshed server state; no sign-out/sign-in required.
     refresh();
@@ -194,36 +230,56 @@ export function BillingPage() {
                   <div>
                     <div className="flex flex-wrap items-center gap-2">
                       <h2 className="font-display text-base font-semibold tracking-[-0.02em] text-ink">
-                        {currentPlan} plan
+                        {plan.label} plan
                       </h2>
-                      <Badge tone={billing?.status === "active" ? "green" : "amber"}>
+                      <Badge tone={billing?.status === "active" ? "green" : billing?.status === "past_due" ? "red" : "amber"}>
                         {billing?.status === "active" ? (
                           <CheckCircle2 className="size-2.5" aria-hidden="true" />
                         ) : null}
                         {billing?.status ?? "active"}
                       </Badge>
+                      {billing?.cancelAtCycleEnd ? (
+                        <Badge tone="amber">
+                          <Clock className="size-2.5" aria-hidden="true" />
+                          Cancels {billing.renewalDate ?? "at period end"}
+                        </Badge>
+                      ) : null}
                     </div>
                     <p className="mt-0.5 text-xs text-ink-mute">
-                      {formatMoney(plan.priceCents, LIST_CURRENCY)}/month · billed monthly
+                      {plan.id === "free"
+                        ? "No renewal — free forever"
+                        : `${formatMoney(plan.priceCents, LIST_CURRENCY)}/month · billed monthly through Paddle`}
                     </p>
                   </div>
                 </div>
                 {plan.id !== "free" ? (
-                  <Btn variant="outline" size="sm" onClick={() => setConfirmCancel(true)}>
-                    Cancel subscription
-                  </Btn>
+                  billing?.cancelAtCycleEnd ? (
+                    <Badge tone="neutral">Cancellation scheduled</Badge>
+                  ) : (
+                    <Btn variant="outline" size="sm" onClick={() => setConfirmCancel(true)}>
+                      Cancel subscription
+                    </Btn>
+                  )
                 ) : null}
               </div>
 
               <div className="mt-4 grid gap-4 border-t border-black/[0.05] pt-4 sm:grid-cols-3">
                 <div>
                   <p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-neutral-400">
-                    {plan.id === "free" ? "Plan" : "Renews"}
+                    {plan.id === "free" ? "Plan" : billing?.cancelAtCycleEnd ? "Access until" : "Renews"}
                   </p>
                   <p className="mt-1 flex items-center gap-1.5 text-xs font-medium text-ink">
                     <Clock className="size-3.5 text-neutral-300" aria-hidden="true" />
-                    {plan.id === "free" ? "No renewal — free forever" : billing?.renewalDate ?? "—"}
+                    {plan.id === "free"
+                      ? "No renewal — free forever"
+                      : billing?.renewalDate ?? "—"}
                   </p>
+                  {billing?.cancelAtCycleEnd ? (
+                    <p className="mt-1 text-[10.5px] leading-4 text-ink-mute">
+                      Your cancellation takes effect at the end of the current billing period. You keep
+                      every feature until then.
+                    </p>
+                  ) : null}
                 </div>
                 <div className="sm:col-span-2">
                   <p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-neutral-400">
@@ -231,13 +287,16 @@ export function BillingPage() {
                   </p>
                   <div className="mt-1.5 flex items-center gap-2">
                     <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-black/[0.06]">
-                      <div className="h-full rounded-full bg-brand-600" style={{ width: `${pct}%` }} />
+                      <div
+                        className={cn("h-full rounded-full transition-colors", tone.bar)}
+                        style={{ width: `${Math.min(pct, 100)}%` }}
+                      />
                     </div>
-                    <span className="text-xs font-medium text-ink">{pct}%</span>
+                    <span className={cn("text-xs font-medium", tone.text)}>{Math.min(pct, 100)}%</span>
                   </div>
                   <p className="mt-1 text-[10.5px] text-neutral-400">
-                    {(usage?.used ?? 0).toLocaleString()} of {(usage?.allowance ?? plan.leadAllowance).toLocaleString()}{" "}
-                    leads · {(usage?.remaining ?? plan.leadAllowance).toLocaleString()} remaining
+                    {usageUsed.toLocaleString()} / {usageAllowance.toLocaleString()} leads used ·{" "}
+                    {Math.max(usageAllowance - usageUsed, 0).toLocaleString()} remaining
                   </p>
                 </div>
               </div>
@@ -252,7 +311,7 @@ export function BillingPage() {
                 <span className="text-sm font-medium text-ink-mute"> / {billing?.seats.limit ?? plan.maxUsers}</span>
               </p>
               <p className="mt-1 text-[11px] text-ink-mute">
-                Team members included on the {currentPlan} plan.
+                Team members included on the {plan.label} plan.
               </p>
               <Btn variant="outline" size="sm" className="mt-3 w-full" href="/team">
                 Manage team
@@ -262,15 +321,26 @@ export function BillingPage() {
       </div>
       )}
 
-      {/* plans */}
+      {/* plans — one-step upgrade ladder, no downgrades, no add-ons */}
       <div className="mt-6">
-        <SectionTitle title="Plans" description="Monthly plans — no long commitments." className="mb-3" />
+        <SectionTitle
+          title="Plans"
+          description={
+            target
+              ? `Upgrade one step at a time — the next plan from ${plan.label} is ${planFromId(target).label}.`
+              : "You're on the highest available plan."
+          }
+          className="mb-3"
+        />
         <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           {PLANS.map((p) => {
-            const current = p.name === currentPlan;
-            const isSwitching = switching === p.name;
+            const pId = p.name.toLowerCase();
+            const current = pId === currentPlanId;
+            const isTarget = target !== null && pId === target;
+            const isSwitching = switching === pId;
+            const beyondTarget = !current && !isTarget && pId !== "free";
             return (
-              <li key={p.name}>
+              <li key={pId}>
                 <Card
                   className={cn(
                     "flex h-full flex-col p-4",
@@ -279,7 +349,11 @@ export function BillingPage() {
                 >
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-[13px] font-medium text-ink">{p.name}</p>
-                    {current ? <Badge tone="green">Current plan</Badge> : null}
+                    {current ? (
+                      <Badge tone="green">Current plan</Badge>
+                    ) : pId === "scale" && target === null ? (
+                      <Badge tone="neutral">Highest plan</Badge>
+                    ) : null}
                   </div>
                   <p className="mt-1.5">
                     <span className="font-display text-[26px] font-semibold tracking-[-0.03em] text-ink">
@@ -296,28 +370,36 @@ export function BillingPage() {
                       </li>
                     ))}
                   </ul>
-                  <button
-                    type="button"
-                    disabled={current || Boolean(switching) || busy}
-                    onClick={() => onSwitch(p.name)}
-                    className={cn(
-                      "mt-4 inline-flex h-8 items-center justify-center rounded text-xs font-medium transition-all",
-                      current
-                        ? "cursor-default bg-neutral-100 text-neutral-400"
-                        : "bg-brand-600 text-white hover:bg-brand-700 active:scale-[0.98]",
-                      switching && !isSwitching && "opacity-50"
-                    )}
-                  >
-                    {isSwitching ? (
-                      <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-                    ) : current ? (
-                      "Current plan"
-                    ) : p.name === "Free" ? (
-                      "Downgrade"
-                    ) : (
-                      `Switch to ${p.name}`
-                    )}
-                  </button>
+                  {current ? (
+                    <span className="mt-4 inline-flex h-8 cursor-default items-center justify-center rounded bg-neutral-100 text-xs font-medium text-neutral-400">
+                      {pId === "scale" ? "Highest available plan" : "Current plan"}
+                    </span>
+                  ) : isTarget ? (
+                    <button
+                      type="button"
+                      disabled={Boolean(switching) || busy}
+                      onClick={onUpgrade}
+                      className={cn(
+                        "mt-4 inline-flex h-8 items-center justify-center gap-1 rounded bg-brand-600 text-xs font-medium text-white transition-all hover:bg-brand-700 active:scale-[0.98]",
+                        switching && !isSwitching && "opacity-50"
+                      )}
+                    >
+                      {isSwitching ? (
+                        <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                      ) : (
+                        <ArrowUpRight className="size-3.5" aria-hidden="true" />
+                      )}
+                      Upgrade to {p.name}
+                    </button>
+                  ) : pId === "free" ? (
+                    <span className="mt-4 inline-flex h-8 cursor-default items-center justify-center rounded bg-neutral-100 text-xs font-medium text-neutral-400">
+                      Plan downgrades aren't available
+                    </span>
+                  ) : beyondTarget ? (
+                    <span className="mt-4 inline-flex h-8 cursor-default items-center justify-center rounded bg-neutral-100 text-xs font-medium text-neutral-400">
+                      One step at a time
+                    </span>
+                  ) : null}
                 </Card>
               </li>
             );
@@ -388,7 +470,8 @@ export function BillingPage() {
           </div>
         )}
         <MetaText className="mt-3 block">
-          Payments are processed by our payment provider — card details never touch Zybble's servers.
+          Payments are processed by Paddle — card details go directly to Paddle and never touch
+          Zybble's servers.
         </MetaText>
       </div>
 
@@ -407,7 +490,11 @@ export function BillingPage() {
           load();
         }}
         title="Cancel your subscription?"
-        description="You'll keep access until the end of the current billing period, then move to the Free plan. Your leads and lists are kept."
+        description={
+          billing?.renewalDate
+            ? `Your ${plan.label} plan stays active until the end of the current billing period (${billing.renewalDate}), then moves to the Free plan. Your leads and lists are kept.`
+            : "You'll keep access until the end of the current billing period, then move to the Free plan. Your leads and lists are kept."
+        }
         confirmLabel="Cancel subscription"
       />
     </AppLayout>

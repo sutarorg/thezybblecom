@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 /**
  * Billing request-path tests.
  *
- * Billing now prefers the same-origin Vercel function (`/api/billing`) so the
+ * Billing prefers the same-origin Vercel function (`/api/billing`) so the
  * browser does not have to call the Supabase Edge Function cross-origin for
  * money-moving actions. Deployments that have not picked up that route yet
  * still fall back to the existing `billing` Edge Function. These tests pin
@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  *   4. An unreachable/undeployed Edge Function still produces plain-language
  *      copy, never raw Supabase SDK/deployment wording.
  *   5. A missing session short-circuits before any network call.
+ *   6. checkout/upgrade/sync/cancel map onto the Paddle action contract.
  */
 
 const h = vi.hoisted(() => {
@@ -29,7 +30,7 @@ vi.mock("./supabase", () => ({
   BACKEND_ENABLED: true,
 }));
 
-import { cancelSubscription, startCheckout, syncBilling, verifyCheckout } from "./api";
+import { cancelSubscription, completeCheckout, startCheckout, syncBilling, upgradePlan } from "./api";
 
 const SESSION = { data: { session: { access_token: "caller-token", user: { id: "u1" } } } };
 
@@ -57,18 +58,15 @@ afterEach(() => {
 });
 
 const CHECKOUT_PAYLOAD = {
-  keyId: "rzp_test_public",
-  subscriptionId: "sub_route",
+  checkoutToken: "a".repeat(48),
+  priceId: "pri_growth_1",
   planId: "growth",
   planLabel: "Growth",
   amount: 4900,
-  currency: "INR",
-  name: "Zybble",
+  currency: "USD",
   description: "Growth plan · monthly",
-  prefill: { email: "founder@zybble.com" },
-  method: { card: true, wallet: true, upi: false },
-  notes: { user_id: "u1", plan: "growth" },
-  themeColor: "#0e7a52",
+  customerEmail: "founder@zybble.com",
+  environment: "production",
 };
 
 describe("startCheckout", () => {
@@ -76,11 +74,12 @@ describe("startCheckout", () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(CHECKOUT_PAYLOAD));
     vi.stubGlobal("fetch", fetchMock);
 
-    const { session, error } = await startCheckout("growth");
+    const { intent, error } = await startCheckout("growth");
     expect(error).toBeUndefined();
-    expect(session?.subscriptionId).toBe("sub_route");
-    expect(session?.keyId).toBe("rzp_test_public");
-    expect(session?.currency).toBe("INR");
+    expect(intent?.priceId).toBe("pri_growth_1");
+    expect(intent?.checkoutToken).toBe("a".repeat(48));
+    expect(intent?.currency).toBe("USD");
+    expect(intent?.environment).toBe("production");
     expect(fetchMock).toHaveBeenCalledWith("/api/billing", expect.objectContaining({
       method: "POST",
       headers: expect.objectContaining({ Authorization: "Bearer caller-token" }),
@@ -89,28 +88,33 @@ describe("startCheckout", () => {
     expect(h.invoke).not.toHaveBeenCalled();
   });
 
-  it("never exposes a Razorpay hosted-page URL to the browser", async () => {
+  it("carries only browser-safe values: the PUBLIC price id and checkout token", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
       ...CHECKOUT_PAYLOAD,
-      // Even if a server were to leak these, the typed session must not carry
-      // them: there is nothing for the UI to redirect to.
-      short_url: "https://rzp.io/i/abc",
-      auth_link: "https://api.razorpay.com/v1/l/subscriptions/sub_route",
+      // Even if a server were to leak these, the typed intent must not carry
+      // them: the browser never gets (or needs) server credentials.
+      apiKey: "pdl_srbx_live_secret",
+      PADDLE_API_KEY: "pdl_srbx_live_secret",
+      webhookSecret: "pdl_ntfset_live_secret",
     })));
 
-    const { session } = await startCheckout("growth");
-    expect(session).toBeTruthy();
-    expect(JSON.stringify(session)).not.toContain("rzp.io");
-    expect(JSON.stringify(session)).not.toContain("/v1/l/");
-    expect(session).not.toHaveProperty("url");
+    const { intent } = await startCheckout("growth");
+    expect(intent).toBeTruthy();
+    const serialized = JSON.stringify(intent);
+    expect(serialized).not.toContain("pdl_srbx");
+    expect(serialized).not.toContain("ntfset");
+    expect(intent).not.toHaveProperty("apiKey");
+    expect(intent).not.toHaveProperty("webhookSecret");
+    // The PUBLIC pri_ price id is fine — that's the one thing the browser opens.
+    expect(serialized).toContain("pri_growth_1");
   });
 
   it("falls back to the Edge Function when the same-origin billing route is missing", async () => {
-    h.invoke.mockResolvedValue({ data: { ...CHECKOUT_PAYLOAD, subscriptionId: "sub_edge" }, error: null });
+    h.invoke.mockResolvedValue({ data: { ...CHECKOUT_PAYLOAD, checkoutToken: "b".repeat(48) }, error: null });
 
-    const { session, error } = await startCheckout("growth");
+    const { intent, error } = await startCheckout("growth");
     expect(error).toBeUndefined();
-    expect(session?.subscriptionId).toBe("sub_edge");
+    expect(intent?.checkoutToken).toBe("b".repeat(48));
     expect(h.invoke).toHaveBeenCalledWith("billing", {
       body: { action: "checkout", plan: "growth" },
       headers: { Authorization: "Bearer caller-token" },
@@ -119,8 +123,8 @@ describe("startCheckout", () => {
 
   it("surfaces an application error returned by the same-origin route without falling back", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ error: "That plan doesn't exist." }, 400)));
-    const { session, error } = await startCheckout("growth");
-    expect(session).toBeUndefined();
+    const { intent, error } = await startCheckout("growth");
+    expect(intent).toBeUndefined();
     expect(error).toBe("That plan doesn't exist.");
     expect(h.invoke).not.toHaveBeenCalled();
   });
@@ -128,27 +132,27 @@ describe("startCheckout", () => {
   it("keeps route config errors actionable when the Edge fallback is also unavailable", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
-      error: "Razorpay isn't configured on the billing server. Missing server environment variable: RAZORPAY_KEY_ID.",
+      error: "Paddle isn't configured on the billing server. Missing server environment variable: PADDLE_API_KEY.",
       code: "billing_config",
     }, 500)));
     h.invoke.mockResolvedValue({ data: null, error: { message: "Failed to send a request to the Edge Function" } });
 
     const { error } = await startCheckout("growth");
-    expect(error).toContain("RAZORPAY_KEY_ID");
+    expect(error).toContain("PADDLE_API_KEY");
     expect(error).not.toContain("Edge Function");
   });
 
   it("never reports success without a usable checkout payload", async () => {
     h.invoke.mockResolvedValue({ data: {}, error: null });
-    const { session, error } = await startCheckout("growth");
-    expect(session).toBeUndefined();
+    const { intent, error } = await startCheckout("growth");
+    expect(intent).toBeUndefined();
     expect(error).toBe("The payment provider didn't return a usable checkout. Please try again.");
   });
 
-  it("rejects a checkout payload that is missing the public key id", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ ...CHECKOUT_PAYLOAD, keyId: "" })));
-    const { session, error } = await startCheckout("growth");
-    expect(session).toBeUndefined();
+  it("rejects a checkout payload that is missing the price id or token", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ ...CHECKOUT_PAYLOAD, priceId: "" })));
+    const { intent, error } = await startCheckout("growth");
+    expect(intent).toBeUndefined();
     expect(error).toContain("didn't return a usable checkout");
   });
 
@@ -157,8 +161,8 @@ describe("startCheckout", () => {
       data: null,
       error: { message: "Failed to send a request to the Edge Function" },
     });
-    const { session, error } = await startCheckout("growth");
-    expect(session).toBeUndefined();
+    const { intent, error } = await startCheckout("growth");
+    expect(intent).toBeUndefined();
     expect(error).toContain("Billing is temporarily unavailable");
     expect(error).not.toContain("Edge Function");
     expect(error).not.toContain("deployed");
@@ -191,37 +195,61 @@ describe("startCheckout", () => {
   });
 });
 
-describe("verifyCheckout", () => {
-  const RESULT = {
-    razorpay_payment_id: "pay_123",
-    razorpay_subscription_id: "sub_123",
-    razorpay_signature: "deadbeef",
-  };
+describe("upgradePlan", () => {
+  it("sends the upgrade action for the next plan on the ladder", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true, planId: "agency", status: "active" }));
+    vi.stubGlobal("fetch", fetchMock);
 
-  it("sends the Razorpay callback to the server for verification", async () => {
+    const result = await upgradePlan("agency");
+    expect(result).toEqual({ planId: "agency", status: "active" });
+    expect(fetchMock).toHaveBeenCalledWith("/api/billing", expect.objectContaining({
+      body: JSON.stringify({ action: "upgrade", plan: "agency" }),
+    }));
+    expect(h.invoke).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a ladder violation instead of pretending the plan changed", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
+      error: "Upgrade one step at a time — from the Growth plan the next plan is Agency.",
+      code: "plan_not_next",
+    }, 400)));
+    const result = await upgradePlan("scale");
+    expect(result.planId).toBeUndefined();
+    expect(result.error).toContain("one step at a time");
+  });
+
+  it("requires a session", async () => {
+    h.getSession.mockResolvedValue({ data: { session: null } });
+    const result = await upgradePlan("agency");
+    expect(result.error).toBe("Your session expired — sign in again.");
+  });
+});
+
+describe("completeCheckout (server-side verification after Paddle Checkout)", () => {
+  it("hands the transaction id to the SERVER for verification — never grants locally", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true, planId: "growth", status: "active" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await verifyCheckout(RESULT);
+    const result = await completeCheckout("txn_123");
     expect(result).toEqual({ planId: "growth", status: "active" });
     expect(fetchMock).toHaveBeenCalledWith("/api/billing", expect.objectContaining({
-      body: JSON.stringify({ action: "verify", ...RESULT }),
+      body: JSON.stringify({ action: "sync", transactionId: "txn_123" }),
     }));
   });
 
   it("surfaces a verification failure instead of pretending the plan changed", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
-      error: "We couldn't verify that payment. Nothing was changed on your account.",
-      code: "signature_invalid",
-    }, 400)));
-    const result = await verifyCheckout(RESULT);
+      error: "That payment doesn't belong to your account.",
+      code: "checkout_mismatch",
+    }, 403)));
+    const result = await completeCheckout("txn_123");
     expect(result.planId).toBeUndefined();
-    expect(result.error).toContain("couldn't verify that payment");
+    expect(result.error).toContain("doesn't belong to your account");
   });
 
   it("requires a session", async () => {
     h.getSession.mockResolvedValue({ data: { session: null } });
-    const result = await verifyCheckout(RESULT);
+    const result = await completeCheckout("txn_123");
     expect(result.error).toBe("Your session expired — sign in again.");
   });
 });
