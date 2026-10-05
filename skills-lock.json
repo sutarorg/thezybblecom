@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "skills": {
+    "paddle-billing-history": {
+      "source": "PaddleHQ/paddle-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/billing-history/SKILL.md",
+      "computedHash": "da635f4393053ca1b23b03214877c8b2ce63bd3e4418a7aa547a90d66708debc"
+    },
+    "paddle-catalog-setup": {
+      "source": "PaddleHQ/paddle-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/catalog-setup/SKILL.md",
+      "computedHash": "7b1408ee57ae385840d6f23dde58b9f9a47db68c0d9e45f85f6765dce06d812f"
+    },
+    "paddle-checkout-web": {
+      "source": "PaddleHQ/paddle-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/checkout-web/SKILL.md",
+      "computedHash": "c5be8c6cd8e578c187643c4d22a04ecf2c28cb14109f716e234aa21b7e742d40"
+    },
+    "paddle-customer-portal": {
+      "source": "PaddleHQ/paddle-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/customer-portal/SKILL.md",
+      "computedHash": "3df491b8044f5fdc789c01c36a0158829374a0deaf7a0b134a89aeeabe54b8c0"
+    },
+    "paddle-pricing-pages": {
+      "source": "PaddleHQ/paddle-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/pricing-pages/SKILL.md",
+      "computedHash": "95a7bde82e7008b7db8fdbac4e41c19039d02fc1bc1621e39a187e24e45ffa41"
+    },
+    "paddle-sandbox-testing": {
+      "source": "PaddleHQ/paddle-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/sandbox-testing/SKILL.md",
+      "computedHash": "23760461444c8fde6e1f973fa0074054c0d139ece1b8e2564b20a3269e3c08c4"
+    },
+    "paddle-subscription-cancel": {
+      "source": "PaddleHQ/paddle-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/subscription-cancel/SKILL.md",
+      "computedHash": "3529c0d26eb75def7eedfb1c9c9001e373d4eded358fea67ff1fd0155c5fbdda"
+    },
+    "paddle-subscription-sync": {
+      "source": "PaddleHQ/paddle-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/subscription-sync/SKILL.md",
+      "computedHash": "d32ecc6a3ef79f88ae03d8d87cee79003bc141cdcd8649f6b6741058eb4ab5ea"
+    },
+    "paddle-subscription-update": {
+      "source": "PaddleHQ/paddle-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/subscription-update/SKILL.md",
+      "computedHash": "5f1dd5705cd1a9c7cea9973b340ea7e250cdc43c2b86495a0aaf77d2ea97c94a"
+    },
+    "paddle-webhooks": {
+      "source": "PaddleHQ/paddle-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/webhooks/SKILL.md",
+      "computedHash": "d44b76f2e9a89b8a532abb1befe6973e1232303f2195daf8ea9f5129db442141"
+    }
+  }
+}
