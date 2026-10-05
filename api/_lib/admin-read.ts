@@ -28,7 +28,7 @@ import {
   type Json,
 } from "./admin-core.js";
 import { readServerEnv } from "./supabase-server.js";
-import { hasRazorpayCredentials } from "./razorpay.js";
+import { hasPaddleCredentials, hasPaddleWebhookSecret, paddleEnvironment, paddlePricePresence } from "./paddle.js";
 
 type Params = URLSearchParams;
 
@@ -145,7 +145,7 @@ export async function billing(ctx: AdminContext, params: Params) {
       p_status: readEnum(params, "status", statusAllowed as readonly string[]),
       p_plan: readEnum(params, "plan", PLAN_IDS),
       // A record search by provider id must look across all time, otherwise
-      // "find this Razorpay payment" fails for anything older than the range.
+      // "find this payment" fails for anything older than the range.
       p_from: params.get("q") ? null : range.from,
       p_to: params.get("q") ? null : range.to,
       p_limit: pageSize,
@@ -158,7 +158,7 @@ export async function billing(ctx: AdminContext, params: Params) {
     kind,
     summary,
     records: { page, pageSize, total: records?.total ?? 0, rows: records?.rows ?? [] },
-    provider: { razorpayConfigured: hasRazorpayCredentials() },
+    provider: { paddleConfigured: hasPaddleCredentials() },
   };
 }
 
@@ -216,13 +216,9 @@ export async function plans(ctx: AdminContext) {
       paidSubscribers,
       freeUsers: Math.max((totalUsers ?? 0) - paidSubscribers, 0),
     },
-    // Razorpay plan ids are configuration, not data: show whether each paid
+    // Paddle price ids are configuration, not data: show whether each paid
     // plan is wired up without ever returning the id itself.
-    providerPlans: {
-      growth: Boolean(readServerEnv("RAZORPAY_PLAN_GROWTH_ID")),
-      agency: Boolean(readServerEnv("RAZORPAY_PLAN_AGENCY_ID")),
-      scale: Boolean(readServerEnv("RAZORPAY_PLAN_SCALE_ID")),
-    },
+    providerPlans: paddlePricePresence(),
   };
 }
 
@@ -352,8 +348,8 @@ export async function webhooks(ctx: AdminContext, params: Params) {
     pageSize,
     ...data,
     provider: {
-      razorpayConfigured: hasRazorpayCredentials(),
-      webhookSecretConfigured: Boolean(readServerEnv("RAZORPAY_WEBHOOK_SECRET")),
+      paddleConfigured: hasPaddleCredentials(),
+      webhookSecretConfigured: hasPaddleWebhookSecret(),
     },
   };
 }
@@ -464,13 +460,10 @@ export async function system(ctx: AdminContext, params: Params) {
       serpApi: Boolean(readServerEnv("SERPAPI_API_KEY")),
       openRouter: Boolean(readServerEnv("OPENROUTER_API_KEY")),
       resend: Boolean(readServerEnv("RESEND_API_KEY")),
-      razorpay: hasRazorpayCredentials(),
-      razorpayWebhookSecret: Boolean(readServerEnv("RAZORPAY_WEBHOOK_SECRET")),
-      razorpayPlans: {
-        growth: Boolean(readServerEnv("RAZORPAY_PLAN_GROWTH_ID")),
-        agency: Boolean(readServerEnv("RAZORPAY_PLAN_AGENCY_ID")),
-        scale: Boolean(readServerEnv("RAZORPAY_PLAN_SCALE_ID")),
-      },
+      paddle: hasPaddleCredentials(),
+      paddleEnvironment: paddleEnvironment(),
+      paddleWebhookSecret: hasPaddleWebhookSecret(),
+      paddlePlans: paddlePricePresence(),
       appUrl: Boolean(readServerEnv("APP_URL")),
     },
   };
@@ -501,7 +494,7 @@ export async function settings(ctx: AdminContext) {
       roleManagement: true,
       planEditing: true,
       quotaOverride: true,
-      subscriptionSync: hasRazorpayCredentials(),
+      subscriptionSync: hasPaddleCredentials(),
       webhookReplay: false,
       impersonation: false,
       featureFlags: false,

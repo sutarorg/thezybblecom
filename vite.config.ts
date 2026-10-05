@@ -61,6 +61,32 @@ function vercelApiDev(mode: string): Plugin {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           (req as any).body = raw ? safeJson(raw) : undefined;
 
+          const mod = await server.ssrLoadModule(file);
+
+          /* Web-standard handlers (Request → Response), used by routes that
+             need the RAW request body for signature verification (e.g.
+             /api/paddle-webhook). The raw bytes are never re-serialized. */
+          if (typeof mod.default !== "function") {
+            const method = (req.method ?? "POST").toUpperCase();
+            const handler = mod[method] ?? mod.POST ?? mod.default;
+            if (typeof handler !== "function") return next();
+            const headers = new Headers();
+            for (const [key, value] of Object.entries(req.headers)) {
+              if (typeof value === "string") headers.set(key, value);
+              else if (Array.isArray(value)) headers.set(key, value.join(", "));
+            }
+            const request = new Request(`http://${req.headers.host ?? "localhost"}${req.url ?? "/"}`, {
+              method: req.method ?? "POST",
+              headers,
+              body: ["GET", "HEAD"].includes((req.method ?? "").toUpperCase()) ? undefined : raw,
+            });
+            const response = await handler(request);
+            res.statusCode = response.status;
+            response.headers.forEach((value: string, key: string) => res.setHeader(key, value));
+            res.end(await response.text());
+            return;
+          }
+
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const response = res as any;
           response.status = (code: number) => {
@@ -74,7 +100,6 @@ function vercelApiDev(mode: string): Plugin {
             res.end(JSON.stringify(body));
           };
 
-          const mod = await server.ssrLoadModule(file);
           await mod.default(req, response);
         } catch (error) {
           server.config.logger.error(`[api] ${url} failed: ${String(error)}`);

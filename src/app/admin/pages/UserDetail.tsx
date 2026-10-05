@@ -77,7 +77,7 @@ export function AdminUserDetail({ identity }: { identity: AdminIdentity }) {
         toast(action === "suspend" ? "Account suspended." : "Account restored.", "success");
       } else if (action === "sync") {
         await adminPost("billing/sync", { userId: id, reason });
-        toast("Subscription reconciled with Razorpay.", "success");
+        toast("Subscription reconciled with Paddle.", "success");
       }
       setAction(null);
       query.refresh();
@@ -115,9 +115,9 @@ export function AdminUserDetail({ identity }: { identity: AdminIdentity }) {
       confirm: "Restore account",
     },
     sync: {
-      title: "Reconcile with Razorpay",
+      title: "Reconcile with Paddle",
       description:
-        "Reads the subscription from Razorpay and stores the provider's answer (status, period, cancellation). Nothing is charged or cancelled.",
+        "Reads the subscription from Paddle and stores the provider's answer (status, period, cancellation). Nothing is charged or cancelled. Legacy subscriptions from the previous provider have no live source to re-read.",
       confirm: "Reconcile now",
     },
   };
@@ -254,10 +254,10 @@ export function AdminUserDetail({ identity }: { identity: AdminIdentity }) {
             title="Subscription"
             description={hasSubscription ? "The row the app reads to decide entitlements." : undefined}
             aside={
-              hasSubscription && str(subscription.razorpay_subscription_id) ? (
+              hasSubscription && str(subscription.provider_subscription_id) ? (
                 <Btn variant="outline" size="sm" onClick={() => setAction("sync")}>
                   <RefreshCw className="size-3.5" aria-hidden="true" />
-                  Reconcile with Razorpay
+                  Reconcile with Paddle
                 </Btn>
               ) : null
             }
@@ -274,13 +274,18 @@ export function AdminUserDetail({ identity }: { identity: AdminIdentity }) {
                     value: bool(subscription.cancel_at_cycle_end) ? "Yes" : "No",
                   },
                   { label: "Cancelled at", value: subscription.cancel_at ? formatDateTime(subscription.cancel_at) : "—" },
+                  { label: "Billing provider", value: str(subscription.billing_provider) || "—" },
                   {
-                    label: "Razorpay subscription",
-                    value: <CopyValue value={str(subscription.razorpay_subscription_id)} label="subscription id" />,
+                    label: "Paddle subscription",
+                    value: <CopyValue value={str(subscription.provider_subscription_id)} label="subscription id" />,
                   },
                   {
-                    label: "Razorpay customer",
-                    value: <CopyValue value={str(subscription.razorpay_customer_id)} label="customer id" />,
+                    label: "Paddle customer",
+                    value: <CopyValue value={str(subscription.provider_customer_id)} label="customer id" />,
+                  },
+                  {
+                    label: "Paddle price",
+                    value: str(subscription.provider_price_id) || "—",
                   },
                   { label: "Last provider event", value: formatDateTime(subscription.last_event_at) },
                   { label: "Updated", value: formatDateTime(subscription.updated_at) },
@@ -303,13 +308,13 @@ export function AdminUserDetail({ identity }: { identity: AdminIdentity }) {
                     key: "amount",
                     header: "Amount",
                     numeric: true,
-                    render: (row) => formatMoney(row.amount_cents, str(row.currency) || "INR"),
+                    render: (row) => formatMoney(row.amount_cents, str(row.currency) || "USD"),
                   },
                   { key: "method", header: "Method", render: (row) => str(row.method) || "—" },
                   {
                     key: "provider",
-                    header: "Razorpay id",
-                    render: (row) => <CopyValue value={str(row.razorpay_payment_id)} label="payment id" />,
+                    header: "Paddle id",
+                    render: (row) => <CopyValue value={str(row.provider_payment_id)} label="payment id" />,
                   },
                 ]}
                 rows={payments}
@@ -329,7 +334,7 @@ export function AdminUserDetail({ identity }: { identity: AdminIdentity }) {
                     key: "amount",
                     header: "Amount",
                     numeric: true,
-                    render: (row) => formatMoney(row.amount_cents, str(row.currency) || "INR"),
+                    render: (row) => formatMoney(row.amount_cents, str(row.currency) || "USD"),
                   },
                 ]}
                 rows={invoices}
@@ -351,7 +356,7 @@ export function AdminUserDetail({ identity }: { identity: AdminIdentity }) {
                     key: "amount",
                     header: "Amount",
                     numeric: true,
-                    render: (row) => formatMoney(row.amount_cents, str(row.currency) || "INR"),
+                    render: (row) => formatMoney(row.amount_cents, str(row.currency) || "USD"),
                   },
                   { key: "completed", header: "Completed", render: (row) => formatDateTime(row.completed_at) },
                 ]}

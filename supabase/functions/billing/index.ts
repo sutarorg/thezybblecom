@@ -1,167 +1,116 @@
 // ============================================================================
-// billing — Razorpay subscription lifecycle for the Supabase Edge fallback.
+// billing — Paddle Billing lifecycle for the Supabase Edge fallback.
 //
 // Contract is identical to the same-origin /api/billing route:
-//   checkout → prepare an ON-SITE Razorpay Standard Checkout (never a hosted
-//              page URL; `short_url` / `auth_link` are deliberately ignored)
-//   verify   → signature + provider re-read, THEN grant the plan
-//   sync     → reconcile from Razorpay
-//   cancel   → cancel at cycle end (access until current_period_end)
+//   checkout → validate the plan + upgrade ladder, create/reuse a
+//              server-generated checkout intent, return ONLY browser-safe
+//              data (public price id, checkout token, amount, environment).
+//              Nothing is granted here — Paddle Checkout only creates the
+//              subscription when the customer pays.
+//   upgrade  → PATCH the EXISTING Paddle subscription to the next plan's
+//              price (prorated_immediately + on_payment_failure=
+//              prevent_change). Never a second subscription.
+//   sync     → reconcile from the Paddle API (optionally seeded with the
+//              transaction id the browser saw at checkout completion).
+//   cancel   → cancel at period end (access until current_period_end).
 //
-// The browser is never the source of truth: a plan only changes after a
-// server-verified payment or a signature-verified webhook.
+// The browser is never the source of truth: a plan only changes after the
+// server verified provider state (webhook signature or a fresh API read).
 // ============================================================================
 import {
-  BILLING_CURRENCY,
   HttpError,
-  PLAN_LABELS,
   callerFromRequest,
-  checkoutMethodConfig,
   corsHeaders,
-  epochToIso,
   errorJson,
   handleError,
-  invoiceNumber,
   json,
   logActivity,
-  mapSubscriptionStatus,
-  razorpay,
   serviceClient,
-  statusEntitles,
-  verifySubscriptionSignature,
-  type PaidPlanId,
 } from "../_shared/index.ts";
-
-/* Plan → Razorpay plan id mapping lives server-side. */
-const RAZORPAY_PLANS: Record<string, string | undefined> = {
-  growth: Deno.env.get("RAZORPAY_PLAN_GROWTH_ID"),
-  agency: Deno.env.get("RAZORPAY_PLAN_AGENCY_ID"),
-  scale: Deno.env.get("RAZORPAY_PLAN_SCALE_ID"),
-};
+import {
+  applyPaddleSubscription,
+  effectivePlanOf,
+  hasPaddleCredentials,
+  normalizePaddleSubscription,
+  paddlePriceMap,
+  paddleRequest,
+  planForPriceId,
+  planLabel,
+  recordPaddleTransaction,
+  requirePriceIdForPlan,
+  resolveSubscriptionOwner,
+  statusEntitles,
+  type PaidPlanId,
+} from "../_shared/billing.ts";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Sb = any;
 
-function requireKeys() {
-  const keyId = Deno.env.get("RAZORPAY_KEY_ID") ?? "";
-  const secret = Deno.env.get("RAZORPAY_KEY_SECRET") ?? "";
-  if (!keyId || !secret) {
-    throw new HttpError(500, "Razorpay isn't configured on the server.", "billing_config");
-  }
-  return { keyId, secret };
+function planOf(raw: unknown): PaidPlanId {
+  const plan = String(raw ?? "").toLowerCase();
+  if (plan === "growth" || plan === "agency" || plan === "scale") return plan;
+  throw new HttpError(400, "That plan doesn't exist.", "plan_invalid");
 }
 
-async function applyActiveSubscription(
-  sb: Sb,
-  input: {
-    userId: string;
-    planId: PaidPlanId;
-    providerStatus: string;
-    status: string;
-    subscriptionId: string;
-    customerId: string | null;
-    razorpayPlanId: string | null;
-    currentStart: string | null;
-    currentEnd: string | null;
-    chargeAt: string | null;
-    paymentId: string | null;
-    amountMinor: number;
-    paymentMethod: string | null;
-    paymentStatus: string;
-  },
-) {
-  const entitled = input.providerStatus === "active" || input.providerStatus === "authenticated";
-  const { data: previous } = await sb
+function randomToken(): string {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function nextPlanFor(plan: string): PaidPlanId | null {
+  const ladder = ["free", "growth", "agency", "scale"];
+  const index = ladder.indexOf(plan);
+  if (index === -1 || index >= ladder.length - 1) return null;
+  return ladder[index + 1] as PaidPlanId;
+}
+
+async function subscriptionRow(sb: Sb, userId: string) {
+  const { data, error } = await sb
     .from("subscriptions")
-    .select("id, razorpay_subscription_id")
-    .eq("user_id", input.userId)
+    .select("id, plan_id, status, billing_provider, provider_subscription_id, current_period_end")
+    .eq("user_id", userId)
     .maybeSingle();
+  if (error) throw new HttpError(500, "Couldn't read your current subscription. Please try again.", "subscription_read_failed");
+  return data ?? null;
+}
 
-  const { error: upsertError } = await sb.from("subscriptions").upsert(
-    {
-      user_id: input.userId,
-      plan_id: input.planId,
-      status: entitled ? "active" : input.status,
-      currency: BILLING_CURRENCY,
-      razorpay_customer_id: input.customerId,
-      razorpay_subscription_id: input.subscriptionId,
-      razorpay_plan_id: input.razorpayPlanId,
-      current_period_start: input.currentStart,
-      current_period_end: input.currentEnd,
-      charge_at: input.chargeAt,
-      cancel_at: null,
-      cancel_at_cycle_end: false,
-      latest_payment_id: input.paymentId,
-      last_event_at: new Date().toISOString(),
-    },
-    { onConflict: "user_id" },
-  );
-  if (upsertError) {
-    throw new HttpError(500, "Your payment went through, but we couldn't update your plan. Contact support@zybble.com.", "subscription_write_failed");
-  }
+/**
+ * A checkout may only be prepared for the immediate next plan and only when
+ * no live Paddle subscription exists. Legacy Razorpay subscribers keep their
+ * recorded entitlement until the paid period ends; no Razorpay API call is
+ * ever made.
+ */
+async function assertCheckoutAllowed(sb: Sb, userId: string, planId: PaidPlanId) {
+  const sub = await subscriptionRow(sb, userId);
 
-  const { data: saved } = await sb.from("subscriptions").select("id").eq("user_id", input.userId).maybeSingle();
-
-  if (input.paymentId) {
-    await sb.from("payments").upsert(
-      {
-        user_id: input.userId,
-        subscription_id: saved?.id ?? null,
-        razorpay_payment_id: input.paymentId,
-        razorpay_subscription_id: input.subscriptionId,
-        amount_cents: input.amountMinor,
-        currency: BILLING_CURRENCY,
-        status: input.paymentStatus === "refunded" ? "refunded" : "captured",
-        method: input.paymentMethod,
-        captured_at: new Date().toISOString(),
-      },
-      { onConflict: "razorpay_payment_id" },
-    );
-    await sb.from("invoices").upsert(
-      {
-        user_id: input.userId,
-        subscription_id: saved?.id ?? null,
-        number: invoiceNumber(input.paymentId),
-        description: `${PLAN_LABELS[input.planId]} plan · monthly`,
-        amount_cents: input.amountMinor,
-        currency: BILLING_CURRENCY,
-        status: "paid",
-        razorpay_invoice_id: input.paymentId,
-        razorpay_payment_id: input.paymentId,
-        period_start: input.currentStart,
-        period_end: input.currentEnd,
-      },
-      { onConflict: "razorpay_invoice_id" },
+  if (sub?.billing_provider === "razorpay" && effectivePlanOf(sub) !== "free") {
+    throw new HttpError(
+      409,
+      "Your current subscription is on our legacy billing provider and runs until the end of its billing period. After that you can subscribe again here — nothing new was charged.",
+      "legacy_provider_active",
     );
   }
 
-  await sb
-    .from("subscription_checkouts")
-    .update({ status: "completed", completed_at: new Date().toISOString() })
-    .eq("razorpay_subscription_id", input.subscriptionId);
-
-  const replaced = previous?.razorpay_subscription_id;
-  if (replaced && replaced !== input.subscriptionId) {
-    await razorpay(`/subscriptions/${replaced}/cancel`, {
-      method: "POST",
-      body: JSON.stringify({ cancel_at_cycle_end: 0 }),
-    }).catch(() => undefined);
+  if (sub?.provider_subscription_id) {
+    const status = String(sub.status ?? "");
+    if (statusEntitles(status) || status === "past_due") {
+      throw new HttpError(
+        409,
+        "You already have an active subscription. Use the upgrade action to change your plan — you'll never be charged twice.",
+        "upgrade_required",
+      );
+    }
   }
 
-  const { data: workspace } = await sb
-    .from("workspaces")
-    .select("id")
-    .eq("owner_id", input.userId)
-    .order("created_at", { ascending: true })
-    .limit(1)
-    .maybeSingle();
-  if (workspace?.id) {
-    await logActivity(sb, {
-      workspaceId: workspace.id,
-      actorId: input.userId,
-      kind: "billing",
-      text: `${PLAN_LABELS[input.planId]} plan activated`,
-    });
+  const allowedTarget = nextPlanFor(effectivePlanOf(sub));
+  if (allowedTarget !== planId) {
+    if (allowedTarget === null) throw new HttpError(400, "You're already on the highest available plan.", "highest_plan");
+    throw new HttpError(
+      400,
+      `Upgrade one step at a time — from the ${planLabel(effectivePlanOf(sub))} plan the next plan is ${planLabel(allowedTarget)}.`,
+      "plan_not_next",
+    );
   }
 }
 
@@ -169,228 +118,240 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return errorJson("Method not allowed", 405);
 
+  const startedAt = Date.now();
   try {
     const sb = serviceClient();
-    const body = await req.json().catch(() => ({}));
+    const body = await req.json().catch(() => ({})) as Record<string, unknown>;
     const action = String(body.action ?? "");
     const user = await callerFromRequest(req, sb);
+    const priceMap = paddlePriceMap();
 
+    /* ---------------------------------------------------------------- */
     if (action === "checkout") {
-      const planId = String(body.plan ?? "").toLowerCase() as PaidPlanId;
-      const razorpayPlan = RAZORPAY_PLANS[planId];
-      if (!["growth", "agency", "scale"].includes(planId)) throw new HttpError(400, "That plan doesn't exist.");
-      if (!razorpayPlan) throw new HttpError(500, `The ${planId} plan isn't available in payments yet.`, "billing_config");
-      const { keyId } = requireKeys();
+      const planId = planOf(body.plan);
+      if (!hasPaddleCredentials()) {
+        throw new HttpError(
+          500,
+          "Paddle isn't configured on this server. Set the PADDLE_API_KEY secret (see README → Deploy the Edge Functions), then redeploy.",
+          "billing_config",
+        );
+      }
+      const priceId = requirePriceIdForPlan(planId, "billing");
+      const { data: plan } = await sb.from("plans").select("price_cents, currency").eq("id", planId).maybeSingle();
+      await assertCheckoutAllowed(sb, user.id, planId);
 
-      const { data: plan } = await sb.from("plans").select("price_cents").eq("id", planId).maybeSingle();
-
-      const { data: existingSub, error: existingSubError } = await sb
-        .from("subscriptions")
-        .select("razorpay_customer_id")
-        .eq("user_id", user.id)
-        .maybeSingle();
-      if (existingSubError) throw new HttpError(500, "Couldn't read your current subscription. Please try again.", "subscription_read_failed");
-
-      let customerId: string | null = existingSub?.razorpay_customer_id ?? null;
-
-      // Reuse an abandoned-but-still-`created` checkout so retries don't pile
-      // up orphan subscriptions at the provider.
+      // Reuse a pending intent from the last hour (same plan) so reopening
+      // the Paddle modal doesn't pile up intents.
       const { data: reusable } = await sb
         .from("subscription_checkouts")
-        .select("razorpay_subscription_id")
+        .select("checkout_token")
         .eq("user_id", user.id)
         .eq("plan_id", planId)
-        .eq("status", "created")
+        .eq("billing_provider", "paddle")
+        .eq("status", "pending")
         .gte("created_at", new Date(Date.now() - 60 * 60 * 1000).toISOString())
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
 
-      let subscriptionId = "";
-      if (reusable?.razorpay_subscription_id) {
-        const remote = await razorpay(`/subscriptions/${reusable.razorpay_subscription_id}`).catch(() => null);
-        if (remote && String(remote.status ?? "") === "created") {
-          subscriptionId = String(remote.id);
-          customerId = customerId ?? (typeof remote.customer_id === "string" ? remote.customer_id : null);
-        }
-      }
-
-      if (!subscriptionId) {
-        if (!customerId) {
-          const customer = await razorpay("/customers", {
-            method: "POST",
-            body: JSON.stringify({ email: user.email, fail_existing: 0 }),
-          });
-          customerId = typeof customer.id === "string" ? customer.id : null;
-          if (!customerId) throw new HttpError(502, "The payment provider didn't return a customer id. Please try again.", "provider_malformed");
-        }
-
-        const subscription = await razorpay("/subscriptions", {
-          method: "POST",
-          body: JSON.stringify({
-            plan_id: razorpayPlan,
-            total_count: 120,
-            quantity: 1,
-            customer_notify: 0,
-            customer_id: customerId,
-            notes: { user_id: user.id, plan: planId },
-          }),
+      let checkoutToken = typeof reusable?.checkout_token === "string" ? reusable.checkout_token : null;
+      if (!checkoutToken) {
+        checkoutToken = randomToken();
+        const { error: writeError } = await sb.from("subscription_checkouts").insert({
+          user_id: user.id,
+          plan_id: planId,
+          billing_provider: "paddle",
+          checkout_token: checkoutToken,
+          provider_price_id: priceId,
+          status: "pending",
+          amount_cents: plan?.price_cents ?? 0,
+          currency: plan?.currency ?? "USD",
         });
-        subscriptionId = typeof subscription.id === "string" ? subscription.id : "";
-        if (!subscriptionId) throw new HttpError(502, "The payment provider didn't return a subscription id. Please try again.", "provider_malformed");
-
-        const { error: writeError } = await sb.from("subscription_checkouts").upsert(
-          {
-            user_id: user.id,
-            plan_id: planId,
-            razorpay_subscription_id: subscriptionId,
-            razorpay_customer_id: customerId,
-            razorpay_plan_id: typeof subscription.plan_id === "string" ? subscription.plan_id : razorpayPlan,
-            status: "created",
-            amount_cents: plan?.price_cents ?? 0,
-            currency: BILLING_CURRENCY,
-          },
-          { onConflict: "razorpay_subscription_id" },
-        );
         if (writeError) throw new HttpError(500, "Couldn't start checkout. Please try again.", "checkout_write_failed");
       }
 
-      // Browser-safe payload ONLY. No short_url, no auth_link, no /v1/l/… .
+      // Browser-safe payload ONLY: the PUBLIC price id, the checkout intent
+      // token, display amount, and which Paddle environment to load. No
+      // server credentials ever appear here.
       return json({
-        keyId,
-        subscriptionId,
+        checkoutToken,
+        priceId,
         planId,
-        planLabel: PLAN_LABELS[planId],
+        planLabel: planLabel(planId),
         amount: plan?.price_cents ?? 0,
-        currency: BILLING_CURRENCY,
-        name: "Zybble",
-        description: `${PLAN_LABELS[planId]} plan · monthly`,
-        prefill: { email: user.email ?? "" },
-        method: checkoutMethodConfig(Deno.env.get("RAZORPAY_CHECKOUT_METHODS")),
-        notes: { user_id: user.id, plan: planId },
-        themeColor: "#0e7a52",
+        currency: plan?.currency ?? "USD",
+        description: `${planLabel(planId)} plan · monthly`,
+        customerEmail: user.email ?? "",
       });
     }
 
-    if (action === "verify") {
-      const { secret } = requireKeys();
-      const paymentId = String(body.razorpay_payment_id ?? "").trim();
-      const subscriptionId = String(body.razorpay_subscription_id ?? "").trim();
-      const signature = String(body.razorpay_signature ?? "").trim();
-      if (!paymentId || !subscriptionId || !signature) {
-        throw new HttpError(400, "That payment confirmation was incomplete.", "verify_invalid");
-      }
-      if (!(await verifySubscriptionSignature({ paymentId, subscriptionId, signature, secret }))) {
-        throw new HttpError(400, "We couldn't verify that payment. Nothing was changed on your account.", "signature_invalid");
-      }
-
-      const { data: pending } = await sb
-        .from("subscription_checkouts")
-        .select("*")
-        .eq("razorpay_subscription_id", subscriptionId)
-        .maybeSingle();
-      if (!pending || pending.user_id !== user.id) {
-        throw new HttpError(403, "That payment doesn't belong to your account.", "checkout_mismatch");
+    /* ---------------------------------------------------------------- */
+    if (action === "upgrade") {
+      const planId = planOf(body.plan);
+  const sub = await subscriptionRow(sb, user.id);
+  if (sub?.billing_provider === "razorpay" && effectivePlanOf(sub) !== "free") {
+    throw new HttpError(
+      409,
+      "Your current subscription is on our legacy billing provider and runs until the end of its billing period. After that you can subscribe again here — nothing new was charged.",
+      "legacy_provider_active",
+    );
+  }
+  if (!sub?.provider_subscription_id || sub.billing_provider !== "paddle") {
+    throw new HttpError(404, "You don't have an active subscription to upgrade. Start one from the plans below.", "subscription_missing");
+  }
+      if (!statusEntitles(String(sub.status ?? ""))) {
+        throw new HttpError(409, "Your subscription can't be upgraded right now. Refresh this page in a moment.", "subscription_not_upgradable");
       }
 
-      const remote = await razorpay(`/subscriptions/${subscriptionId}`);
-      const providerStatus = String(remote.status ?? "");
-      const status = mapSubscriptionStatus(providerStatus, "created");
-      if (!["authenticated", "active", "completed"].includes(providerStatus)) {
-        throw new HttpError(402, "That subscription isn't active yet. If you were charged, it will appear here shortly.", "subscription_not_active");
+      const allowedTarget = nextPlanFor(String(sub.plan_id ?? "free"));
+      if (allowedTarget === null) throw new HttpError(400, "Scale is the highest available plan.", "highest_plan");
+      if (allowedTarget !== planId) {
+        throw new HttpError(
+          400,
+          `Upgrade one step at a time — from the ${planLabel(String(sub.plan_id))} plan the next plan is ${planLabel(allowedTarget)}.`,
+          "plan_not_next",
+        );
+      }
+      const priceId = requirePriceIdForPlan(planId, "billing");
+
+      // Re-read from Paddle so the change applies to actual provider state.
+      const remote = await paddleRequest(`/subscriptions/${encodeURIComponent(sub.provider_subscription_id)}`, {}, "billing");
+      const remoteSub = normalizePaddleSubscription(remote);
+      if (!remoteSub) throw new HttpError(502, "Our payment provider returned an unreadable subscription.", "provider_malformed");
+      const remotePlan = planForPriceId(remoteSub.providerPriceId, priceMap);
+      if (!remotePlan || remotePlan !== sub.plan_id) {
+        throw new HttpError(409, "Your subscription changed recently. Refresh this page and try again.", "subscription_changed");
       }
 
-      const payment = await razorpay(`/payments/${paymentId}`);
-      const paymentStatus = String(payment.status ?? "");
-      if (!["captured", "authorized", "refunded"].includes(paymentStatus)) {
-        throw new HttpError(402, "That payment hasn't been captured. Nothing was changed on your account.", "payment_not_captured");
-      }
-      if (String(payment.currency ?? BILLING_CURRENCY).toUpperCase() !== BILLING_CURRENCY) {
-        throw new HttpError(400, "That payment used an unsupported currency.", "currency_invalid");
-      }
+      // The plan change itself: replace the base price on the EXISTING
+      // subscription, bill the prorated difference immediately, refuse the
+      // whole change when the payment fails (prevent_change).
+      const updated = await paddleRequest(
+        `/subscriptions/${encodeURIComponent(sub.provider_subscription_id)}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            items: [{ price_id: priceId, quantity: 1 }],
+            proration_billing_mode: "prorated_immediately",
+            on_payment_failure: "prevent_change",
+            scheduled_change: null,
+          }),
+        },
+        "billing",
+      );
+      const updatedSub = normalizePaddleSubscription(updated);
+      if (!updatedSub) throw new HttpError(502, "Our payment provider returned an unreadable subscription.", "provider_malformed");
 
-      const planId = String(pending.plan_id) as PaidPlanId;
-      await applyActiveSubscription(sb, {
+      const result = await applyPaddleSubscription(sb, {
         userId: user.id,
-        planId,
-        providerStatus,
-        status,
-        subscriptionId,
-        customerId: typeof remote.customer_id === "string" ? remote.customer_id : pending.razorpay_customer_id ?? null,
-        razorpayPlanId: typeof remote.plan_id === "string" ? remote.plan_id : pending.razorpay_plan_id ?? null,
-        currentStart: epochToIso(remote.current_start),
-        currentEnd: epochToIso(remote.current_end),
-        chargeAt: epochToIso(remote.charge_at),
-        paymentId,
-        amountMinor: Number(payment.amount ?? pending.amount_cents ?? 0),
-        paymentMethod: typeof payment.method === "string" ? payment.method : null,
-        paymentStatus,
+        sub: updatedSub,
+        priceMap,
+        skipDuplicateGuard: true,
       });
-
-      return json({ ok: true, planId, status, entitled: statusEntitles(status) });
-    }
-
-    if (action === "sync") {
-      const { data: sub, error: subError } = await sb
-        .from("subscriptions")
-        .select("*")
-        .eq("user_id", user.id)
-        .maybeSingle();
-      if (subError) throw new HttpError(500, "Couldn't read your current subscription. Please try again.", "subscription_read_failed");
-      if (!sub?.razorpay_subscription_id) return json({ ok: true, status: sub?.status ?? "free" });
-
-      const remote = await razorpay(`/subscriptions/${sub.razorpay_subscription_id}`);
-      const providerStatus = String(remote.status ?? "");
-      const status = mapSubscriptionStatus(providerStatus, sub.status);
-      const currentEnd = epochToIso(remote.current_end);
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const patch: Record<string, any> = {
-        status,
-        current_period_start: epochToIso(remote.current_start),
-        current_period_end: currentEnd,
-        charge_at: epochToIso(remote.charge_at),
-        cancel_at: epochToIso(remote.ended_at) ?? epochToIso(remote.end_at),
-        last_event_at: new Date().toISOString(),
-      };
-      if (
-        ["cancelled", "completed", "expired"].includes(status) &&
-        (!currentEnd || new Date(currentEnd).getTime() <= Date.now())
-      ) {
-        patch.plan_id = "free";
-        patch.status = "expired";
-        patch.cancel_at_cycle_end = false;
+      if (!result.applied) {
+        throw new HttpError(500, "Your payment went through, but we couldn't update your plan. Contact support@zybble.com.", "subscription_write_failed");
       }
 
-      const { error: updateError } = await sb.from("subscriptions").update(patch).eq("id", sub.id);
-      if (updateError) throw new HttpError(500, "Couldn't update your billing status. Please try again.", "subscription_write_failed");
+      const { data: workspace } = await sb
+        .from("workspaces")
+        .select("id")
+        .eq("owner_id", user.id)
+        .order("created_at", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (workspace?.id) {
+        await logActivity(sb, {
+          workspaceId: workspace.id,
+          actorId: user.id,
+          kind: "billing",
+          text: `${planLabel(planId)} plan upgrade confirmed`,
+        });
+      }
 
-      return json({ ok: true, status: String(patch.status ?? status) });
+      return json({ ok: true, planId: result.planId, status: result.status, currentPeriodEnd: updatedSub.currentPeriodEnd });
     }
 
-    if (action === "cancel") {
-      const { data: sub, error: subError } = await sb
-        .from("subscriptions")
-        .select("*")
-        .eq("user_id", user.id)
-        .maybeSingle();
-      if (subError) throw new HttpError(500, "Couldn't read your current subscription. Please try again.", "subscription_read_failed");
-      if (!sub?.razorpay_subscription_id) throw new HttpError(404, "You don't have an active paid subscription.");
+    /* ---------------------------------------------------------------- */
+    if (action === "sync") {
+      const sub = await subscriptionRow(sb, user.id);
 
-      await razorpay(`/subscriptions/${sub.razorpay_subscription_id}/cancel`, {
-        method: "POST",
-        body: JSON.stringify({ cancel_at_cycle_end: 1 }),
+      const transactionHint = typeof body.transactionId === "string" ? body.transactionId.trim() : "";
+      if (!sub?.provider_subscription_id) {
+        if (transactionHint.startsWith("txn_")) {
+          const txn = await paddleRequest(`/transactions/${encodeURIComponent(transactionHint)}`, {}, "billing");
+          const raw = txn as Record<string, unknown>;
+          const status = String(raw.status ?? "");
+          if (status === "paid" || status === "completed") {
+            const customData = (raw.custom_data ?? {}) as Record<string, unknown>;
+            const token = typeof customData.zybble_token === "string" ? customData.zybble_token : "";
+            const { userId } = await resolveSubscriptionOwner(sb, {
+              providerSubscriptionId: typeof raw.subscription_id === "string" ? String(raw.subscription_id) : null,
+              checkoutToken: token || null,
+            });
+            if (userId !== user.id) {
+              throw new HttpError(403, "That payment doesn't belong to your account.", "checkout_mismatch");
+            }
+            await recordPaddleTransaction(sb, { userId: user.id, entity: txn, settled: true });
+
+            const subscriptionId = typeof raw.subscription_id === "string" ? String(raw.subscription_id) : null;
+            if (subscriptionId) {
+              const remote = await paddleRequest(`/subscriptions/${encodeURIComponent(subscriptionId)}`, {}, "billing");
+              const remoteSub = normalizePaddleSubscription(remote);
+              if (remoteSub) {
+                const result = await applyPaddleSubscription(sb, { userId: user.id, sub: remoteSub, priceMap });
+                return json({ ok: true, planId: result.planId, status: result.status, entitled: statusEntitles(result.status ?? "") });
+              }
+            }
+          }
+          return json({ ok: true, status: "processing" });
+        }
+        return json({ ok: true, status: sub?.status ?? "free" });
+      }
+
+      if (sub.billing_provider !== "paddle") {
+        return json({ ok: true, status: sub?.status ?? "free" });
+      }
+
+      const remote = await paddleRequest(`/subscriptions/${encodeURIComponent(sub.provider_subscription_id)}`, {}, "billing");
+      const remoteSub = normalizePaddleSubscription(remote);
+      if (!remoteSub) throw new HttpError(502, "Our payment provider returned an unreadable subscription.", "provider_malformed");
+
+      const result = await applyPaddleSubscription(sb, {
+        userId: user.id,
+        sub: remoteSub,
+        priceMap,
+        skipDuplicateGuard: true,
       });
+      return json({ ok: true, planId: result.planId, status: result.status, entitled: statusEntitles(result.status ?? "") });
+    }
+
+    /* ---------------------------------------------------------------- */
+    if (action === "cancel") {
+      const sub = await subscriptionRow(sb, user.id);
+      if (!sub?.provider_subscription_id || sub.billing_provider !== "paddle") {
+        throw new HttpError(404, "You don't have an active paid subscription.", "subscription_missing");
+      }
+
+      const remote = await paddleRequest(`/subscriptions/${encodeURIComponent(sub.provider_subscription_id)}/cancel`, {
+        method: "POST",
+        body: JSON.stringify({ effective_from: "next_billing_period" }),
+      }, "billing");
+      const scheduled = (remote as Record<string, unknown>).scheduled_change as Record<string, unknown> | undefined;
+      const effectiveAt = typeof scheduled?.effective_at === "string"
+        ? scheduled.effective_at
+        : sub.current_period_end ?? null;
 
       const { error: updateError } = await sb
         .from("subscriptions")
         .update({
           cancel_at_cycle_end: true,
-          cancel_at: sub.current_period_end ?? new Date().toISOString(),
+          cancel_at: effectiveAt,
           last_event_at: new Date().toISOString(),
         })
         .eq("id", sub.id);
-      if (updateError) throw new HttpError(500, "Couldn't update your cancellation status. Please contact support@zybble.com.", "subscription_write_failed");
+      if (updateError) {
+        throw new HttpError(500, "Couldn't update your cancellation status. Please contact support@zybble.com.", "subscription_write_failed");
+      }
 
       const { data: workspace } = await sb
         .from("workspaces")
@@ -408,11 +369,11 @@ Deno.serve(async (req) => {
         });
       }
 
-      return json({ ok: true, cancelAtCycleEnd: true, accessUntil: sub.current_period_end ?? null });
+      return json({ ok: true, cancelAtCycleEnd: true, accessUntil: sub.current_period_end ?? effectiveAt });
     }
 
-    throw new HttpError(400, "Unknown billing action.");
+    throw new HttpError(400, "Unknown billing action.", "action_invalid");
   } catch (e) {
-    return handleError(e);
+    return handleError(e, { functionName: "billing", startedAt });
   }
 });

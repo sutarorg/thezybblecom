@@ -6,7 +6,6 @@ import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supa
 import { OpenRouterError, getOpenRouterModel, openRouterChatJson } from "./openrouter.ts";
 import { INTERPRET_SYSTEM_PROMPT, cleanInterpretResult, extractJsonObject } from "./interpret.ts";
 import { normalizeOpenState, type OpenState } from "./open-state.ts";
-import { webhookSignatureMatches } from "./billing.ts";
 
 export * from "./billing.ts";
 export { normalizeOpenState };
@@ -25,8 +24,16 @@ export function json(body: unknown, status = 200) {
   });
 }
 
-export function errorJson(message: string, status = 400, code?: string) {
-  return json({ error: message, ...(code ? { code } : {}) }, status);
+export function errorJson(
+  message: string,
+  status = 400,
+  code?: string,
+  details?: Record<string, unknown>,
+) {
+  return json(
+    { error: message, ...(code ? { code } : {}), ...(details ?? {}) },
+    status,
+  );
 }
 
 /** Server client — uses the secret key; bypasses RLS. NEVER NEXT_PUBLIC. */
@@ -76,13 +83,18 @@ export async function callerFromRequest(req: Request, sb: SupabaseClient) {
 }
 
 export class HttpError extends Error {
+  /** Optional machine-readable payload (e.g. quota details for the UI). */
+  details?: Record<string, unknown>;
+
   constructor(
     readonly status: number,
     message: string,
     readonly code = "edge_error",
+    details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "HttpError";
+    this.details = details;
   }
 }
 
@@ -100,7 +112,10 @@ export function handleError(
     providerCategory: code.startsWith("provider_") || code.startsWith("rate_") ? code : undefined,
     durationMs: meta ? Date.now() - meta.startedAt : undefined,
   });
-  if (apiError) return errorJson(apiError.message, apiError.status, apiError.code);
+  if (apiError) {
+    const details = apiError instanceof HttpError ? apiError.details : undefined;
+    return errorJson(apiError.message, apiError.status, apiError.code, details);
+  }
   return errorJson("The service couldn't complete that action. Please try again.", 500, "unknown");
 }
 
@@ -194,8 +209,54 @@ export async function reserveLeads(
   const { data, error } = await sb.rpc("reserve_leads", { ws: workspaceId, delta });
   if (error) throw new HttpError(500, "Usage accounting failed — try again.");
   if (data === -1) throw new HttpError(403, "You don't have access to that workspace.");
-  if (data === -2) throw new HttpError(429, "You've reached your monthly lead limit.");
+  if (data === -2) throw await monthlyLeadLimitError(sb, workspaceId);
   return data as number;
+}
+
+/**
+ * The dedicated machine-readable quota error. reserve_leads() is the
+ * authoritative enforcement (nothing was incremented); this only explains the
+ * refusal so the frontend can render the upgrade UX. Mirrors the Vercel
+ * route's payload exactly: code=monthly_lead_limit_reached +
+ * { planId, planLabel, used, allowance, nextPlan }.
+ */
+async function monthlyLeadLimitError(sb: SupabaseClient, workspaceId: string): Promise<HttpError> {
+  let planId = "free";
+  let allowance = 50;
+  let used = allowance;
+  try {
+    const { data } = await sb.rpc("lead_quota_state", { ws: workspaceId });
+    const row = Array.isArray(data)
+      ? (data[0] as Record<string, unknown> | undefined)
+      : (data as Record<string, unknown> | undefined);
+    if (row) {
+      planId = String(row.plan_id ?? "free");
+      allowance = Number(row.allowance ?? 50);
+      used = Number(row.used ?? allowance);
+    }
+  } catch {
+    /* keep catalog defaults */
+  }
+  const nextPlan = planId === "free"
+    ? "growth"
+    : planId === "growth"
+      ? "agency"
+      : planId === "agency"
+        ? "scale"
+        : null;
+  const planLabel = planId === "free"
+    ? "Free"
+    : planId === "growth"
+      ? "Growth"
+      : planId === "agency"
+        ? "Agency"
+        : "Scale";
+  return new HttpError(
+    429,
+    `You've used all ${allowance.toLocaleString("en-US")} leads included in the ${planLabel} plan this month.`,
+    "monthly_lead_limit_reached",
+    { planId, planLabel, used, allowance, nextPlan },
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -330,39 +391,6 @@ export { openRouterChatJson, extractJsonObject, cleanInterpretResult, INTERPRET_
 export const OPENROUTER_MODEL = getOpenRouterModel();
 
 /* ------------------------------------------------------------------ */
-/* Razorpay REST client (server-side only)                             */
-/* ------------------------------------------------------------------ */
-export async function razorpay(path: string, init: RequestInit = {}) {
-  const keyId = Deno.env.get("RAZORPAY_KEY_ID");
-  const secret = Deno.env.get("RAZORPAY_KEY_SECRET");
-  if (!keyId || !secret) {
-    const missing = [!keyId && "RAZORPAY_KEY_ID", !secret && "RAZORPAY_KEY_SECRET"].filter(Boolean);
-    throw new HttpError(500, `Razorpay isn't configured on the server. Missing server environment variable${missing.length > 1 ? "s" : ""}: ${missing.join(" and ")}. Set them as Supabase Edge Function secrets, then redeploy the function.`);
-  }
-  const res = await fetch(`https://api.razorpay.com/v1${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Basic ${btoa(`${keyId}:${secret}`)}`,
-      ...(init.headers ?? {}),
-    },
-  });
-  const bodyText = await res.text();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let body: any = null;
-  try {
-    body = JSON.parse(bodyText);
-  } catch {
-    /* non-JSON */
-  }
-  if (!res.ok) {
-    console.error("provider request", { provider: "razorpay", status: res.status, responseKind: bodyText ? "body" : "empty" });
-    throw new HttpError(502, "Our payment provider couldn't complete that action.");
-  }
-  return body;
-}
-
-/* ------------------------------------------------------------------ */
 /* Resend email                                                        */
 /* ------------------------------------------------------------------ */
 const FROM = Deno.env.get("RESEND_FROM_EMAIL") ?? "Zybble <hello@updates.zybble.app>";
@@ -396,18 +424,6 @@ export async function sendEmail(opts: {
 function unsent(_subject: string) {
   console.info("provider request", { provider: "resend", status: 0, code: "email_not_configured" });
   return { sent: false as const, noop: true };
-}
-
-/* ------------------------------------------------------------------ */
-/* HMAC webhook verification (Razorpay)                                */
-/* ------------------------------------------------------------------ */
-export async function verifyRazorpaySignature(rawBody: string, signature: string | null) {
-  const secret = Deno.env.get("RAZORPAY_WEBHOOK_SECRET");
-  if (!secret) throw new HttpError(500, "Webhook secret isn't configured. Missing server environment variable: RAZORPAY_WEBHOOK_SECRET. Set it as a Supabase Edge Function secret, then redeploy the function.");
-  if (!signature) throw new HttpError(400, "Missing webhook signature.");
-  if (!(await webhookSignatureMatches(rawBody, signature, secret))) {
-    throw new HttpError(401, "Invalid webhook signature.");
-  }
 }
 
 /* ------------------------------------------------------------------ */

@@ -105,11 +105,11 @@ function tableMock(table: string, role: string | null) {
     maybeSingle: vi.fn().mockResolvedValue({
       data:
         table === "plans"
-          ? { id: "growth", price_cents: 4900, lead_allowance: 5000, max_lists: -1, max_users: 1, has_ai: true, client_workspaces: false, priority_processing: true, currency: "INR" }
+          ? { id: "growth", price_cents: 4900, lead_allowance: 5000, max_lists: -1, max_users: 1, has_ai: true, client_workspaces: false, priority_processing: true, currency: "USD" }
           : table === "workspaces"
             ? { id: "ws_1", name: "Acme" }
             : table === "subscriptions"
-              ? { id: "sub_1", user_id: "11111111-1111-4111-8111-111111111111", status: "active", plan_id: "growth", razorpay_subscription_id: "sub_rzp_1" }
+              ? { id: "sub_1", user_id: "11111111-1111-4111-8111-111111111111", status: "active", plan_id: "growth", billing_provider: "paddle", provider_subscription_id: "sub_pdl_1", provider_price_id: "pri_growth_1", current_period_end: "2099-01-01T00:00:00Z" }
               : { leads_used: 10, searches: 2, exports: 1, ai_runs: 0 },
       error: null,
     }),
@@ -132,15 +132,15 @@ function asAdmin(role: string | null = "admin") {
 const ADMIN_ID = "99999999-9999-4999-8999-999999999999";
 const USER_ID = "11111111-1111-4111-8111-111111111111";
 
-const ENV_KEYS = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"] as const;
+const ENV_KEYS = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "PADDLE_API_KEY", "PADDLE_PRICE_GROWTH_ID"] as const;
 const savedEnv = new Map<string, string | undefined>();
 
 beforeEach(() => {
   for (const key of ENV_KEYS) savedEnv.set(key, process.env[key]);
   process.env.SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "sb_secret_service";
-  delete process.env.RAZORPAY_KEY_ID;
-  delete process.env.RAZORPAY_KEY_SECRET;
+  process.env.PADDLE_PRICE_GROWTH_ID = "pri_growth_1";
+  delete process.env.PADDLE_API_KEY;
 
   auditRows = [];
   updates = [];
@@ -397,7 +397,7 @@ describe("mutations", () => {
     expect(updates.find((entry) => entry.table === "plans")).toBeUndefined();
   });
 
-  it("refuses to reconcile when Razorpay isn't configured, and records the failure", async () => {
+  it("refuses to reconcile when Paddle isn't configured, and records the failure", async () => {
     const { req, res, getStatus, getBody } = createMockReqRes({
       method: "POST",
       url: "/api/admin?path=billing/sync",
@@ -406,7 +406,36 @@ describe("mutations", () => {
     await handler(req, res);
     expect(getStatus()).toBe(500);
     expect(getBody().code).toBe("billing_config");
-    expect(String(getBody().error)).not.toMatch(/sb_secret|KEY_SECRET=/);
+    expect(String(getBody().error)).not.toMatch(/sb_secret|API_KEY=/);
     expect(auditRows[0]).toMatchObject({ action: "subscription.sync", result: "failure" });
+  });
+
+  it("reconciles by re-reading the subscription from Paddle and audits the change", async () => {
+    process.env.PADDLE_API_KEY = "pdl_srbx_test_server_key";
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        id: "sub_pdl_1",
+        status: "active",
+        customer_id: "ctm_1",
+        currency_code: "USD",
+        current_billing_period: { starts_at: "2026-01-01T00:00:00Z", ends_at: "2026-02-01T00:00:00Z" },
+        next_billed_at: "2026-02-01T00:00:00Z",
+        items: [{ price: { id: "pri_growth_1" } }],
+      },
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { req, res, getStatus } = createMockReqRes({
+      method: "POST",
+      url: "/api/admin?path=billing/sync",
+      body: { userId: USER_ID, reason: "customer says the card was charged", confirm: true },
+    });
+    await handler(req, res);
+    expect(getStatus()).toBe(200);
+    expect(fetchMock).toHaveBeenCalledWith("https://api.paddle.com/subscriptions/sub_pdl_1", expect.objectContaining({
+      headers: expect.objectContaining({ Authorization: "Bearer pdl_srbx_test_server_key" }),
+    }));
+    expect(auditRows[0]).toMatchObject({ action: "subscription.sync", result: "success" });
+    expect(String(auditRows[0].summary)).toContain("Paddle");
   });
 });

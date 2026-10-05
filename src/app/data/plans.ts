@@ -75,6 +75,25 @@ export function planLabel(id: string | null | undefined) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Upgrade ladder                                                      */
+/* ------------------------------------------------------------------ */
+
+const PLAN_LADDER: PlanId[] = ["free", "growth", "agency", "scale"];
+
+/**
+ * The single immediate upgrade target on the Zybble ladder
+ * (free → growth → agency → scale), or null when the plan is the highest
+ * available. There are no downgrades, no skipped steps, and no add-ons —
+ * the server enforces the exact same rule (see api/_lib/paddle-core.ts).
+ */
+export function nextPlan(id: string | null | undefined): Exclude<PlanId, "free"> | null {
+  const key = planFromId(id).id;
+  const index = PLAN_LADDER.indexOf(key);
+  if (index === -1 || index >= PLAN_LADDER.length - 1) return null;
+  return PLAN_LADDER[index + 1] as Exclude<PlanId, "free">;
+}
+
+/* ------------------------------------------------------------------ */
 /* Search form configuration                                           */
 /* ------------------------------------------------------------------ */
 export const RATING_OPTIONS = [

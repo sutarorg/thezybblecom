@@ -1,12 +1,12 @@
 /* ------------------------------------------------------------------ */
 /* /admin/webhooks — provider event operations                         */
 /*                                                                     */
-/* There is deliberately no "retry" button. The billing Edge Function  */
-/* verifies Razorpay's HMAC over the ORIGINAL raw body, and            */
+/* There is deliberately no "retry" button. The billing webhook       */
+/* verifies Paddle's HMAC over the ORIGINAL raw body, and              */
 /* webhook_events stores the parsed payload without the signature, so  */
 /* a replay from here could never be authenticated — it would be a     */
 /* fake button. What is offered instead is the genuinely safe action:  */
-/* re-read the subscription from Razorpay and reconcile it.            */
+/* re-read the subscription from Paddle and reconcile it.              */
 /* ------------------------------------------------------------------ */
 import { useState } from "react";
 import { Link } from "react-router-dom";
@@ -138,12 +138,12 @@ function WebhookDrawer({
                 onClick={() => onReconcile(str(customer.id), str(event.subscription_id))}
               >
                 <RefreshCw className="size-3.5" aria-hidden="true" />
-                Reconcile this subscription with Razorpay
+                Reconcile this subscription with Paddle
               </Btn>
             ) : null}
 
             <Caveat>
-              The raw provider payload isn't shown — Razorpay payloads carry customer contact details, and everything
+              The raw provider payload isn't shown — Paddle payloads carry customer contact details, and everything
               operationally useful (ids, statuses, amount) is extracted above.
             </Caveat>
           </>
@@ -186,7 +186,7 @@ export function AdminWebhooks({ identity }: { identity: AdminIdentity }) {
         userId: reconcileUser,
         reason,
       });
-      toast(`Razorpay reports “${result.providerStatus || "unknown"}” — saved as ${result.status}.`, "success");
+      toast(`Paddle reports “${result.providerStatus || "unknown"}” — saved as ${result.status}.`, "success");
       setReconcileUser(null);
       query.refresh();
     } catch (caught) {
@@ -229,8 +229,8 @@ export function AdminWebhooks({ identity }: { identity: AdminIdentity }) {
             <Panel title="Provider configuration">
               <ul className="space-y-1.5 text-xs">
                 <li className="flex items-center justify-between gap-2">
-                  <span className="text-ink-soft">Razorpay API credentials</span>
-                  {bool(provider.razorpayConfigured) ? (
+                  <span className="text-ink-soft">Paddle API credentials</span>
+                  {bool(provider.paddleConfigured) ? (
                     <Badge tone="green">Configured</Badge>
                   ) : (
                     <Badge tone="red">Missing</Badge>
@@ -319,7 +319,7 @@ export function AdminWebhooks({ identity }: { identity: AdminIdentity }) {
               empty={
                 <Nothing
                   title="No webhook events"
-                  description="Razorpay hasn't delivered an event matching these filters."
+                  description="Paddle hasn't delivered an event matching these filters."
                 />
               }
             />
@@ -327,10 +327,10 @@ export function AdminWebhooks({ identity }: { identity: AdminIdentity }) {
           </Panel>
 
           <Caveat>
-            Events can't be replayed from here. Razorpay's signature is computed over the original request body, which
+            Events can't be replayed from here. Paddle's signature is computed over the original request body, which
             isn't stored, so a replay could not be verified and would risk applying an unauthenticated change. When an
             event failed, open it and reconcile the subscription directly with the provider instead — that reads the
-            truth from Razorpay rather than trusting a stored payload.
+            truth from Paddle rather than trusting a stored payload.
           </Caveat>
         </div>
       )}
@@ -353,8 +353,8 @@ export function AdminWebhooks({ identity }: { identity: AdminIdentity }) {
         onConfirm={reconcile}
         busy={busy}
         error={actionError}
-        title="Reconcile subscription with Razorpay"
-        description="Reads the subscription from Razorpay and stores the provider's status and period. Nothing is charged or cancelled."
+        title="Reconcile subscription with Paddle"
+        description="Reads the subscription from Paddle and stores the provider's status and period. Nothing is charged or cancelled."
         confirmLabel="Reconcile now"
       />
     </AdminLayout>

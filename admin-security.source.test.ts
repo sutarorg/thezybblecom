@@ -150,8 +150,8 @@ describe("admin browser bundle", () => {
     for (const secret of [
       "SERVICE_ROLE",
       "SUPABASE_SECRET",
-      "RAZORPAY_KEY_SECRET",
-      "RAZORPAY_WEBHOOK_SECRET",
+      "PADDLE_API_KEY",
+      "PADDLE_WEBHOOK_SECRET",
       "OPENROUTER_API_KEY",
       "SERPAPI_API_KEY",
       "RESEND_API_KEY",
@@ -164,7 +164,7 @@ describe("admin browser bundle", () => {
   it("reaches privileged data only through the same-origin admin API", () => {
     expect(adminClientSource).toMatch(/fetch\(buildUrl\(path, options\.params\)/);
     expect(adminClientSource).not.toMatch(/\.rpc\(/);
-    expect(adminClientSource).not.toMatch(/api\.razorpay\.com|openrouter\.ai|serpapi\.com/);
+    expect(adminClientSource).not.toMatch(/api\.paddle\.com|sandbox-api\.paddle\.com|openrouter\.ai|serpapi\.com/);
     // The only Supabase use in the console is reading the caller's own session.
     const supabaseUses = adminClientSource.match(/getSupabase\(\)/g) ?? [];
     expect(supabaseUses.length).toBe(1);

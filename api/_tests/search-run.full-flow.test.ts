@@ -306,6 +306,10 @@ describe("POST /api/search-run full flow", () => {
           return json({ id: "search-fixture-123" });
         }
         if (url.startsWith(`${SUPABASE_URL}/rest/v1/rpc/reserve_leads`)) return json(-2); // quota exhausted
+        // The dedicated quota error re-reads plan/used/allowance from the DB.
+        if (url.startsWith(`${SUPABASE_URL}/rest/v1/rpc/lead_quota_state`)) {
+          return json([{ plan_id: "growth", allowance: 5000, used: 5000 }]);
+        }
         throw new Error(`Unexpected request in fixture transport: ${method} ${url}`);
       }),
     );
@@ -313,6 +317,16 @@ describe("POST /api/search-run full flow", () => {
     const { req, res, getStatus, getBody } = createMockReqRes();
     await handler(req, res);
     expect(getStatus()).toBe(429);
-    expect(getBody()).toMatchObject({ code: "quota_exceeded" });
+    // The dedicated machine-readable limit error: code + payload the /find UI
+    // renders (current plan, used, allowance, next plan on the ladder).
+    expect(getBody()).toMatchObject({
+      code: "monthly_lead_limit_reached",
+      planId: "growth",
+      planLabel: "Growth",
+      used: 5000,
+      allowance: 5000,
+      nextPlan: "agency",
+    });
+    expect(String((getBody() as { error: string }).error)).toContain("5,000");
   });
 });

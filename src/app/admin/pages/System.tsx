@@ -52,7 +52,7 @@ export function AdminSystem({ identity }: { identity: AdminIdentity }) {
   const billing = obj(health.billing);
   const webhooks = obj(health.webhooks);
   const configuration = obj(query.data?.configuration);
-  const razorpayPlans = obj(configuration.razorpayPlans);
+  const paddlePlans = obj(configuration.paddlePlans);
 
   const status = str(database.status) || "unknown";
 
@@ -159,11 +159,12 @@ export function AdminSystem({ identity }: { identity: AdminIdentity }) {
                 <ConfigRow label="SerpApi" present={bool(configuration.serpApi)} note="Lead discovery" />
                 <ConfigRow label="OpenRouter" present={bool(configuration.openRouter)} note="AI features" />
                 <ConfigRow label="Resend" present={bool(configuration.resend)} note="Invitation email" />
-                <ConfigRow label="Razorpay API" present={bool(configuration.razorpay)} note="Checkout and reconciliation" />
-                <ConfigRow label="Razorpay webhook secret" present={bool(configuration.razorpayWebhookSecret)} />
-                <ConfigRow label="Razorpay plan: growth" present={bool(razorpayPlans.growth)} />
-                <ConfigRow label="Razorpay plan: agency" present={bool(razorpayPlans.agency)} />
-                <ConfigRow label="Razorpay plan: scale" present={bool(razorpayPlans.scale)} />
+                <ConfigRow label="Paddle API key" present={bool(configuration.paddle)} note="Server-side billing actions" />
+                <ConfigRow label={`Paddle environment (${str(configuration.paddleEnvironment) || "production"})`} present={bool(configuration.paddle)} note="sandbox or live — never mixed" />
+                <ConfigRow label="Paddle webhook secret" present={bool(configuration.paddleWebhookSecret)} />
+                <ConfigRow label="Paddle price: growth" present={bool(paddlePlans.growth)} />
+                <ConfigRow label="Paddle price: agency" present={bool(paddlePlans.agency)} />
+                <ConfigRow label="Paddle price: scale" present={bool(paddlePlans.scale)} />
                 <ConfigRow label="APP_URL" present={bool(configuration.appUrl)} note="Used in invitation links" />
               </ul>
             </Panel>
@@ -260,7 +261,7 @@ export function AdminSystem({ identity }: { identity: AdminIdentity }) {
           <Caveat>
             Only two things are measured live here: the database round trip (healthy under 1.5 s, degraded above it,
             failing if the query errors) and whether each server credential exists. SerpApi, OpenRouter, Resend and
-            Razorpay are <strong>not</strong> pinged — doing so on every page load would cost money and rate limit, so
+            Paddle are <strong>not</strong> pinged — doing so on every page load would rate limit, so
             their real condition is inferred from the failure counts above rather than claimed with a green tick.
           </Caveat>
         </div>
